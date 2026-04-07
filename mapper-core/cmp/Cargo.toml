@@ -2,7 +2,7 @@
 name = "cartographer"
 version = "1.1.0"
 edition = "2021"
-description = "Architectural intelligence and health monitoring for codebases"
+description = "Code Cartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
 
 [[bin]]
