@@ -2,7 +2,7 @@
 // This provides endpoints for AI tools like ShellAI to query module context
 
 use crate::layers::{detect_layer_violations, LayerConfig, LayerViolation};
-use crate::mapper::{DetailLevel, MappedFile};
+use crate::mapper::{DetailLevel, MappedFile, Signature};
 use petgraph::algo;
 use petgraph::graphmap::UnGraphMap;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ pub struct ModuleContextResponse {
     pub module_id: String,
     pub path: String,
     pub imports: Vec<String>,
-    pub signatures: Vec<String>,
+    pub signatures: Vec<Signature>,
     pub docstrings: Option<Vec<String>>,
     pub parameters: Option<Vec<String>>,
     pub return_types: Option<Vec<String>>,

@@ -516,6 +516,84 @@ impl McpServer {
                 })
             }
 
+            "get_semantic_impact" => {
+                let args = call.arguments;
+                let module_id = args
+                    .get("module_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing module_id")?;
+
+                let graph = self.api_state.rebuild_graph()?;
+
+                let node = graph.nodes.iter().find(|n| n.module_id == module_id);
+
+                let impact = if let Some(n) = node {
+                    let dependents: Vec<&str> = graph
+                        .edges
+                        .iter()
+                        .filter(|e| e.target == module_id)
+                        .map(|e| e.source.as_str())
+                        .collect();
+
+                    let dependencies: Vec<&str> = graph
+                        .edges
+                        .iter()
+                        .filter(|e| e.source == module_id)
+                        .map(|e| e.target.as_str())
+                        .collect();
+
+                    format!(
+                        "## Semantic Impact Analysis for {}\n\n\
+                         Path: {}\n\
+                         Type: {}\n\
+                         Risk Level: {}\n\
+                         Is Bridge: {}\n\n\
+                         ### Direct Dependencies ({})\n\
+                         {}\n\n\
+                         ### Direct Dependents ({})\n\
+                         {}\n\n\
+                         ### Bridge Score: {:?}\n\
+                         ### Degree: {:?}",
+                        module_id,
+                        n.path,
+                        n.language,
+                        n.risk_level.as_deref().unwrap_or("UNKNOWN"),
+                        n.is_bridge
+                            .map(|b| if b { "Yes - HIGH IMPACT" } else { "No" })
+                            .unwrap_or("No"),
+                        dependencies.len(),
+                        if dependencies.is_empty() {
+                            "  (none)".to_string()
+                        } else {
+                            dependencies
+                                .iter()
+                                .map(|s| format!("  - {}", s))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        },
+                        dependents.len(),
+                        if dependents.is_empty() {
+                            "  (none)".to_string()
+                        } else {
+                            dependents
+                                .iter()
+                                .map(|s| format!("  - {}", s))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        },
+                        n.bridge_score,
+                        n.degree
+                    )
+                } else {
+                    format!("Module not found: {}", module_id)
+                };
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(impact)],
+                    is_error: None,
+                })
+            }
+
             _ => Err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -568,7 +646,12 @@ impl McpServer {
                     module_id,
                     context.path,
                     context.imports.join("\n"),
-                    context.signatures.join("\n")
+                    context
+                        .signatures
+                        .iter()
+                        .map(|s| s.raw.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ))
             }
 
@@ -609,7 +692,12 @@ impl McpServer {
                             .collect::<Vec<_>>()
                             .join(", "))
                         .unwrap_or_default(),
-                    context.signatures.join("\n")
+                    context
+                        .signatures
+                        .iter()
+                        .map(|s| s.raw.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ))
             }
 

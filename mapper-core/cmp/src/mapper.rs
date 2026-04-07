@@ -13,19 +13,78 @@ pub enum DetailLevel {
     Extended,
 }
 
+/// A signature with metadata for CKB integration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signature {
+    pub raw: String,
+    pub ckb_id: Option<String>,
+    pub symbol_name: Option<String>,
+    pub signature_type: Option<String>,
+}
+
+impl Signature {
+    pub fn from_raw(raw: String) -> Self {
+        let symbol_name = extract_symbol_name(&raw);
+        let ckb_id = generate_ckb_id(&raw);
+
+        Self {
+            raw,
+            ckb_id: Some(ckb_id),
+            symbol_name,
+            signature_type: None,
+        }
+    }
+
+    pub fn with_type(mut self, sig_type: String) -> Self {
+        self.signature_type = Some(sig_type);
+        self
+    }
+}
+
+fn extract_symbol_name(raw: &str) -> Option<String> {
+    let patterns = [
+        r"fn\s+(\w+)",
+        r"def\s+(\w+)",
+        r"function\s+(\w+)",
+        r"class\s+(\w+)",
+        r"interface\s+(\w+)",
+        r"type\s+(\w+)",
+        r"struct\s+(\w+)",
+        r"enum\s+(\w+)",
+    ];
+
+    for pattern in &patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(caps) = re.captures(raw) {
+                return caps.get(1).map(|m| m.as_str().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn generate_ckb_id(raw: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("sym_{:x}", hasher.finish())[..12].to_string()
+}
+
 /// Represents a mapped file with only signatures (no implementation details)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappedFile {
     pub path: String,
     pub imports: Vec<String>,
-    pub signatures: Vec<String>,
+    pub signatures: Vec<Signature>,
     pub docstrings: Option<Vec<String>>,
     pub parameters: Option<Vec<String>>,
     pub return_types: Option<Vec<String>>,
 }
 
 impl MappedFile {
-    pub fn new(path: String, imports: Vec<String>, signatures: Vec<String>) -> Self {
+    pub fn new(path: String, imports: Vec<String>, signatures: Vec<Signature>) -> Self {
         Self {
             path,
             imports,
@@ -47,7 +106,7 @@ impl MappedFile {
         }
     }
 
-    pub fn with_signatures(mut self, signatures: Vec<String>) -> Self {
+    pub fn with_signatures(mut self, signatures: Vec<Signature>) -> Self {
         self.signatures = signatures;
         self
     }
@@ -81,7 +140,7 @@ impl MappedFile {
 
         // Signatures section
         for sig in &self.signatures {
-            out.push_str(sig);
+            out.push_str(&sig.raw);
             out.push_str(" // ...\n");
         }
 
@@ -116,7 +175,7 @@ impl MappedFile {
                         .signatures
                         .iter()
                         .map(|s| {
-                            let trimmed = s.trim();
+                            let trimmed = s.raw.trim();
                             let without_body = trimmed.split('{').next().unwrap_or(trimmed).trim();
                             let simplified = without_body
                                 .replace("pub ", "")
@@ -138,10 +197,15 @@ impl MappedFile {
                     out.push_str(" (exports:\n");
                     for sig in &self.signatures {
                         let simplified = sig
+                            .raw
                             .replace("pub ", "")
                             .replace("private ", "")
                             .replace("protected ", "");
-                        out.push_str(&format!("  {}\n", simplified));
+                        out.push_str(&format!(
+                            "  {} [{}]\n",
+                            simplified,
+                            sig.ckb_id.as_deref().unwrap_or("?")
+                        ));
                     }
                     out.push_str(" )\n");
                 }
@@ -150,7 +214,11 @@ impl MappedFile {
                 if !self.signatures.is_empty() {
                     out.push_str(" (exports:\n");
                     for sig in &self.signatures {
-                        out.push_str(&format!("  {}\n", sig));
+                        out.push_str(&format!(
+                            "  {} [{}]\n",
+                            sig.raw,
+                            sig.ckb_id.as_deref().unwrap_or("?")
+                        ));
                     }
                     out.push_str(" )\n");
                 }
@@ -283,7 +351,9 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -334,7 +404,9 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -375,7 +447,7 @@ fn extract_python(path: String, content: &str) -> MappedFile {
         for pattern in &sig_patterns {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
-                    signatures.push(m.as_str().to_string());
+                    signatures.push(Signature::from_raw(m.as_str().to_string()));
                     break;
                 }
             }
@@ -420,7 +492,9 @@ fn extract_go(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -465,7 +539,9 @@ fn extract_java_like(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -513,7 +589,9 @@ fn extract_c_cpp(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -556,7 +634,7 @@ fn extract_ruby(path: String, content: &str) -> MappedFile {
         for pattern in &sig_patterns {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
-                    signatures.push(m.as_str().to_string());
+                    signatures.push(Signature::from_raw(m.as_str().to_string()));
                     break;
                 }
             }
@@ -602,7 +680,9 @@ fn extract_php(path: String, content: &str) -> MappedFile {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(m) = re.find(trimmed) {
                     let sig = m.as_str().trim_end_matches('{').trim();
-                    signatures.push(sig.to_string());
+                    signatures.push(
+                        Signature::from_raw(sig.to_string()).with_type("function".to_string()),
+                    );
                     break;
                 }
             }
@@ -636,7 +716,8 @@ fn extract_generic(path: String, content: &str) -> MappedFile {
         if import_re.is_match(trimmed) {
             imports.push(trimmed.to_string());
         } else if let Some(m) = sig_re.find(trimmed) {
-            signatures.push(m.as_str().to_string());
+            signatures
+                .push(Signature::from_raw(m.as_str().to_string()).with_type("unknown".to_string()));
         }
     }
 

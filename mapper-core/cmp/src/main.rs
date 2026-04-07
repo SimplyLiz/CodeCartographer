@@ -152,6 +152,15 @@ enum Commands {
     },
     /// Notify agents of context update
     Notify,
+    /// Initialize Cartographer with CKB integration
+    InitCkb {
+        #[arg(long, value_name = "CKB_URL")]
+        ckb_url: Option<String>,
+        #[arg(long, value_name = "WEBHOOK_URL")]
+        webhook_url: Option<String>,
+    },
+    /// Health check - shows architectural health score
+    Health,
 }
 
 #[derive(Subcommand)]
@@ -266,6 +275,17 @@ fn main() -> Result<()> {
         Some(Commands::Notify) => {
             let root = resolve_path(&cwd, cli.path)?;
             notify_mode(&root)
+        }
+        Some(Commands::InitCkb {
+            ckb_url,
+            webhook_url,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            init_ckb_mode(&root, ckb_url.as_deref(), webhook_url.as_deref())
+        }
+        Some(Commands::Health) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            health_mode(&root)
         }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -1108,6 +1128,145 @@ fn notify_mode(root: &Path) -> Result<()> {
                 println!("  - {}", e);
             }
         }
+    }
+
+    Ok(())
+}
+
+fn init_ckb_mode(root: &Path, ckb_url: Option<&str>, webhook_url: Option<&str>) -> Result<()> {
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║      Cartographer v1.0.0 - CKB Integration Setup           ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    let config_path = root.join(".cartographer").join("config.toml");
+    let config_dir = config_path.parent().unwrap();
+    std::fs::create_dir_all(config_dir)?;
+
+    let ckb_url = ckb_url.unwrap_or("http://localhost:8080");
+    let webhook_url = webhook_url.unwrap_or("http://localhost:8081/webhook");
+
+    let config_content = format!(
+        r#"# Cartographer Configuration
+version = "1.0.0"
+
+[ckb]
+url = "{}"
+enabled = true
+
+[webhooks]
+enabled = true
+url = "{}"
+events = ["graph_updated", "module_changed", "layer_violation"]
+
+[layers]
+# Define your architectural layers here
+# Example:
+# ui = ["components", "pages", "hooks"]
+# services = ["api", "auth"]
+# db = ["models", "repositories"]
+
+[allowed_flows]
+# Define allowed dependency flows
+# Example:
+# ui -> services
+# services -> db
+"#,
+        ckb_url, webhook_url
+    );
+
+    std::fs::write(&config_path, config_content)?;
+
+    println!("✓ Created configuration at: {}", config_path.display());
+    println!();
+    println!("📋 Next steps:");
+    println!("  1. Add layer definitions to {}", config_path.display());
+    println!("  2. Run 'cmp map' to generate initial graph");
+    println!("  3. Run 'cmp health' to see architectural health");
+    println!();
+    println!("🔗 CKB Integration:");
+    println!("  - CKB URL: {}", ckb_url);
+    println!("  - Webhook URL: {}", webhook_url);
+    println!();
+    println!("✅ Cartographer is ready to integrate with CKB!");
+
+    Ok(())
+}
+
+fn health_mode(root: &Path) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Cartographer - Architectural Health Report          ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let files = result.files;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    println!(
+        "📊 Health Score: {:.1}/100",
+        graph.metadata.health_score.unwrap_or(0.0)
+    );
+    println!();
+
+    println!("📈 Statistics:");
+    println!("  - Files: {}", graph.metadata.total_files);
+    println!("  - Dependencies: {}", graph.metadata.total_edges);
+    println!("  - Bridges: {}", graph.metadata.bridge_count.unwrap_or(0));
+    println!("  - Cycles: {}", graph.metadata.cycle_count.unwrap_or(0));
+    println!(
+        "  - God Modules: {}",
+        graph.metadata.god_module_count.unwrap_or(0)
+    );
+    println!(
+        "  - Layer Violations: {}",
+        graph.metadata.layer_violation_count.unwrap_or(0)
+    );
+    println!();
+
+    if !graph.cycles.is_empty() {
+        println!("🔴 Critical Issues (Cycles):");
+        for (i, cycle) in graph.cycles.iter().take(3).enumerate() {
+            println!(
+                "  {}. {} - {}",
+                i + 1,
+                cycle.severity,
+                cycle.nodes.join(" -> ")
+            );
+        }
+        println!();
+    }
+
+    if graph.metadata.health_score.unwrap_or(100.0) < 70.0 {
+        println!("⚠️  Architectural health is below acceptable threshold.");
+        println!("   Run 'cmp map --detail extended' for more information.");
+    } else {
+        println!("✅ Architecture looks healthy!");
     }
 
     Ok(())
