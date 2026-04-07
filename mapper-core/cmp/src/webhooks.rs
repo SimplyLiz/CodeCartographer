@@ -77,6 +77,8 @@ pub struct ModuleChangedData {
     pub path: String,
     pub change_type: String,
     pub signature_count: usize,
+    pub risk_level: Option<String>,
+    pub is_bridge: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,12 +205,16 @@ impl WebhookService {
         path: String,
         change_type: &str,
         signature_count: usize,
+        risk_level: Option<String>,
+        is_bridge: Option<bool>,
     ) -> Vec<Result<(), String>> {
         let data = WebhookData::ModuleChanged(ModuleChangedData {
             module_id,
             path,
             change_type: change_type.to_string(),
             signature_count,
+            risk_level,
+            is_bridge,
         });
         self.notify(WebhookEvent::ModuleChanged, data)
     }

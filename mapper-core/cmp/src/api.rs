@@ -2,7 +2,8 @@
 // This provides endpoints for AI tools like ShellAI to query module context
 
 use crate::mapper::{DetailLevel, MappedFile};
-use crate::scanner;
+use petgraph::algo;
+use petgraph::graphmap::UnGraphMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -80,6 +81,10 @@ pub struct GraphNode {
     pub language: String,
     pub signature_count: usize,
     pub complexity: Option<u32>,
+    pub is_bridge: Option<bool>,
+    pub bridge_score: Option<f64>,
+    pub degree: Option<usize>,
+    pub risk_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +100,7 @@ pub struct GraphMetadata {
     pub total_edges: usize,
     pub languages: HashMap<String, usize>,
     pub generated_at: String,
+    pub bridge_count: Option<usize>,
 }
 
 /// Compression level configuration
@@ -324,6 +330,10 @@ impl ApiState {
                 language,
                 signature_count: file.signatures.len(),
                 complexity: None,
+                is_bridge: None,
+                bridge_score: None,
+                degree: None,
+                risk_level: None,
             });
 
             for import in &file.imports {
@@ -337,11 +347,25 @@ impl ApiState {
             }
         }
 
+        let bridge_analysis = self.analyze_bridges(&nodes, &edges);
+
+        for node in &mut nodes {
+            if let Some(analysis) = bridge_analysis.get(&node.module_id) {
+                node.is_bridge = Some(analysis.is_bridge);
+                node.bridge_score = Some(analysis.bridge_score);
+                node.degree = Some(analysis.degree);
+                node.risk_level = Some(analysis.risk_level.clone());
+            }
+        }
+
+        let bridge_count = nodes.iter().filter(|n| n.is_bridge == Some(true)).count();
+
         let metadata = GraphMetadata {
             total_files: nodes.len(),
             total_edges: edges.len(),
             languages,
             generated_at: chrono_now(),
+            bridge_count: Some(bridge_count),
         };
 
         let response = ProjectGraphResponse {
@@ -354,6 +378,163 @@ impl ApiState {
         *graph = Some(response.clone());
 
         Ok(response)
+    }
+}
+
+struct BridgeAnalysis {
+    is_bridge: bool,
+    bridge_score: f64,
+    degree: usize,
+    risk_level: String,
+}
+
+impl ApiState {
+    fn analyze_bridges(
+        &self,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> HashMap<String, BridgeAnalysis> {
+        let mut graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+
+        let node_ids: HashMap<&str, &GraphNode> =
+            nodes.iter().map(|n| (n.module_id.as_str(), n)).collect();
+
+        for node in nodes {
+            graph.add_node(node.module_id.as_str());
+        }
+
+        for edge in edges {
+            graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
+        }
+
+        let node_count = graph.nodes().count();
+        if node_count < 3 {
+            return HashMap::new();
+        }
+
+        let avg_degree = 2.0 * edges.len() as f64 / node_count as f64;
+        let hub_threshold = (avg_degree * 3.0).max(20.0) as usize;
+
+        let betweenness = self.compute_betweenness_centrality(&graph);
+
+        let mut analysis: HashMap<String, BridgeAnalysis> = HashMap::new();
+
+        for (node_id, bc) in &betweenness {
+            let degree = graph.edges(node_id).count();
+            let is_hub = degree > hub_threshold;
+
+            let normalized_bc = bc / ((node_count - 1) as f64 * (node_count - 2) as f64);
+            let bridge_score = if is_hub { 0.0 } else { normalized_bc * 1000.0 };
+
+            let is_bridge = !is_hub && bridge_score > 0.0;
+
+            let risk_level = if is_bridge && bridge_score > 10.0 {
+                "CRITICAL".to_string()
+            } else if is_bridge {
+                "HIGH".to_string()
+            } else if is_hub {
+                "LOW".to_string()
+            } else {
+                "MEDIUM".to_string()
+            };
+
+            analysis.insert(
+                node_id.to_string(),
+                BridgeAnalysis {
+                    is_bridge,
+                    bridge_score,
+                    degree,
+                    risk_level,
+                },
+            );
+        }
+
+        analysis
+    }
+
+    fn compute_betweenness_centrality<'a>(
+        &self,
+        graph: &UnGraphMap<&'a str, ()>,
+    ) -> HashMap<&'a str, f64> {
+        let mut betweenness = HashMap::new();
+        let nodes: Vec<&str> = graph.nodes().collect();
+
+        for node in &nodes {
+            betweenness.insert(*node, 0.0);
+        }
+
+        for src in &nodes {
+            let mut stack: Vec<&str> = Vec::new();
+            let mut predecessors: HashMap<&str, Vec<&str>> = HashMap::new();
+            let mut sigma: HashMap<&str, f64> = HashMap::new();
+            let mut distance: HashMap<&str, i32> = HashMap::new();
+            let mut queue: Vec<&str> = Vec::new();
+
+            for node in &nodes {
+                distance.insert(*node, -1);
+                sigma.insert(*node, 0.0);
+            }
+
+            distance.insert(*src, 0);
+            sigma.insert(*src, 1.0);
+            queue.push(*src);
+
+            while let Some(v) = queue.pop() {
+                stack.push(v);
+                let v_dist = distance.get(v).copied().unwrap_or(0);
+
+                for w in graph.neighbors(v) {
+                    if *distance.get(w).unwrap_or(&-1) == -1 {
+                        distance.insert(w, v_dist + 1);
+                        queue.push(w);
+                    }
+
+                    if *distance.get(w).unwrap_or(&0) == v_dist + 1 {
+                        let sigma_v = sigma.get(v).copied().unwrap_or(0.0);
+                        let sigma_w = sigma.get(w).copied().unwrap_or(0.0);
+                        sigma.insert(w, sigma_w + sigma_v);
+
+                        predecessors.entry(w).or_insert_with(Vec::new).push(v);
+                    }
+                }
+            }
+
+            let mut delta: HashMap<&str, f64> = HashMap::new();
+            for node in &nodes {
+                delta.insert(*node, 0.0);
+            }
+
+            while let Some(w) = stack.pop() {
+                if let Some(preds) = predecessors.get(w) {
+                    for v in preds {
+                        let delta_v = delta.get(v).copied().unwrap_or(0.0);
+                        let sigma_v = sigma.get(v).copied().unwrap_or(0.0);
+                        let sigma_w = sigma.get(w).copied().unwrap_or(0.0);
+                        let factor = sigma_v / sigma_w;
+                        delta.insert(
+                            v,
+                            delta_v + factor * (1.0 + delta.get(w).copied().unwrap_or(0.0)),
+                        );
+                    }
+                }
+
+                if w != *src {
+                    let bc_w = betweenness.get(w).copied().unwrap_or(0.0);
+                    let delta_w = delta.get(w).copied().unwrap_or(0.0);
+                    betweenness.insert(w, bc_w + delta_w);
+                }
+            }
+        }
+
+        let n = nodes.len();
+        if n > 2 {
+            let divisor = ((n - 1) * (n - 2)) as f64;
+            for (_, bc) in betweenness.iter_mut() {
+                *bc /= divisor;
+            }
+        }
+
+        betweenness
     }
 
     fn resolve_import_target(&self, import: &str, source: &str) -> Option<String> {

@@ -87,6 +87,83 @@ impl MappedFile {
 
         out
     }
+
+    pub fn to_ai_lang(&self, detail_level: DetailLevel) -> String {
+        let mut out = String::new();
+
+        out.push_str(&format!("({})\n", self.path));
+
+        if !self.imports.is_empty() {
+            let imports: Vec<String> = self
+                .imports
+                .iter()
+                .map(|i| {
+                    let parts: Vec<&str> = i.split_whitespace().collect();
+                    parts
+                        .last()
+                        .map(|s| s.trim_matches(';'))
+                        .unwrap_or(i)
+                        .to_string()
+                })
+                .collect();
+            out.push_str(&format!(" (imports: [{}])\n", imports.join(", ")));
+        }
+
+        match detail_level {
+            DetailLevel::Minimal => {
+                if !self.signatures.is_empty() {
+                    let sigs: Vec<String> = self
+                        .signatures
+                        .iter()
+                        .map(|s| {
+                            let trimmed = s.trim();
+                            let without_body = trimmed.split('{').next().unwrap_or(trimmed).trim();
+                            let simplified = without_body
+                                .replace("pub ", "")
+                                .replace("private ", "")
+                                .replace("async ", "")
+                                .replace("fn ", "fn ")
+                                .replace("function ", "fn ")
+                                .replace("def ", "fn ")
+                                .replace("class ", "class ")
+                                .replace("interface ", "if ");
+                            simplified
+                        })
+                        .collect();
+                    out.push_str(&format!(" (sigs: {})\n", sigs.join(", ")));
+                }
+            }
+            DetailLevel::Standard => {
+                if !self.signatures.is_empty() {
+                    out.push_str(" (exports:\n");
+                    for sig in &self.signatures {
+                        let simplified = sig
+                            .replace("pub ", "")
+                            .replace("private ", "")
+                            .replace("protected ", "");
+                        out.push_str(&format!("  {}\n", simplified));
+                    }
+                    out.push_str(" )\n");
+                }
+            }
+            DetailLevel::Extended => {
+                if !self.signatures.is_empty() {
+                    out.push_str(" (exports:\n");
+                    for sig in &self.signatures {
+                        out.push_str(&format!("  {}\n", sig));
+                    }
+                    out.push_str(" )\n");
+                }
+                if let Some(ref docs) = self.docstrings {
+                    if !docs.is_empty() {
+                        out.push_str(&format!(" (doc: {})\n", docs.first().unwrap()));
+                    }
+                }
+            }
+        }
+
+        out
+    }
 }
 
 /// Extract skeleton map from file content based on language
