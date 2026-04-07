@@ -42,7 +42,7 @@ impl Memory {
 
     pub fn get_dirty_files(&self, current_files: &[(PathBuf, u64)]) -> Vec<PathBuf> {
         let mut dirty = Vec::new();
-        
+
         for (path, modified) in current_files {
             let rel_path = path.to_string_lossy().replace('\\', "/");
             match self.files.get(&rel_path) {

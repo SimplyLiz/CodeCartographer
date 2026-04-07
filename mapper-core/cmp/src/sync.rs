@@ -53,7 +53,7 @@ impl SyncService {
     pub fn incremental_sync_with_noise(&self, mut memory: Memory) -> Result<SyncResult> {
         let scan_result = scan_files_with_noise_tracking(&self.root)?;
         let files = scan_result.files;
-        
+
         // Get file paths with modification times
         let current: Vec<_> = files
             .iter()
@@ -70,7 +70,7 @@ impl SyncService {
 
         // Find dirty files
         let dirty = memory.get_dirty_files(&current);
-        
+
         if dirty.is_empty() {
             println!("✓ No changes detected");
             return Ok(SyncResult {
@@ -80,7 +80,7 @@ impl SyncService {
         }
 
         println!("⟳ Syncing {} changed file(s)...", dirty.len());
-        
+
         // Parse only dirty files
         let updates = self.parse_files(&dirty);
         memory.patch(updates);
@@ -105,10 +105,7 @@ impl SyncService {
 
     /// Force-include specific ignored files back into the scan
     pub fn include_ignored_files(&self, memory: &mut Memory, ignored: &[IgnoredFile]) {
-        let paths: Vec<_> = ignored
-            .iter()
-            .map(|i| self.root.join(&i.path))
-            .collect();
+        let paths: Vec<_> = ignored.iter().map(|i| self.root.join(&i.path)).collect();
         let entries = self.parse_files(&paths);
         memory.patch(entries);
     }

@@ -28,16 +28,13 @@ impl WebhookService {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
-        
+
         Ok(Self { client })
     }
 
     /// Notify a single agent via webhook
     pub fn notify_agent(&self, webhook_url: &str, payload: &WebhookPayload) -> Result<()> {
-        let response = self.client
-            .post(webhook_url)
-            .json(payload)
-            .send()?;
+        let response = self.client.post(webhook_url).json(payload).send()?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -49,7 +46,11 @@ impl WebhookService {
     }
 
     /// Notify all agents with webhooks
-    pub fn notify_all(&self, agents: &[crate::uc_agents::AgentConfig], payload: &WebhookPayload) -> Vec<Result<()>> {
+    pub fn notify_all(
+        &self,
+        agents: &[crate::uc_agents::AgentConfig],
+        payload: &WebhookPayload,
+    ) -> Vec<Result<()>> {
         agents
             .iter()
             .filter(|a| a.enabled && a.webhook_url.is_some())
@@ -167,18 +168,18 @@ impl AgentContext {
         let mut md = format!("# Context: {}\n\n", self.context_id);
         md.push_str(&format!("Version: {}\n", self.version));
         md.push_str(&format!("Total Files: {}\n\n", self.files.len()));
-        
+
         md.push_str("## Files\n\n");
         let mut paths: Vec<_> = self.files.keys().collect();
         paths.sort();
-        
+
         for path in paths {
             let file = &self.files[path];
             let lang = file.language.as_deref().unwrap_or("text");
             md.push_str(&format!("### {}\n\n", file.path));
             md.push_str(&format!("```{}\n{}\n```\n\n", lang, file.content));
         }
-        
+
         md
     }
 }

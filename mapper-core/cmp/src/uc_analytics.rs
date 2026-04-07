@@ -52,12 +52,15 @@ impl Analytics {
     }
 
     pub fn record_file_access(&mut self, path: &str, tokens: usize) {
-        let entry = self.file_access.entry(path.to_string()).or_insert(FileAccessLog {
-            path: path.to_string(),
-            access_count: 0,
-            last_accessed: chrono::Utc::now().to_rfc3339(),
-            total_tokens: 0,
-        });
+        let entry = self
+            .file_access
+            .entry(path.to_string())
+            .or_insert(FileAccessLog {
+                path: path.to_string(),
+                access_count: 0,
+                last_accessed: chrono::Utc::now().to_rfc3339(),
+                total_tokens: 0,
+            });
 
         entry.access_count += 1;
         entry.last_accessed = chrono::Utc::now().to_rfc3339();
@@ -83,7 +86,11 @@ impl Analytics {
     }
 
     pub fn end_session(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.session_id == session_id) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.session_id == session_id)
+        {
             session.ended_at = Some(chrono::Utc::now().to_rfc3339());
             self.last_updated = chrono::Utc::now().to_rfc3339();
         }
@@ -108,7 +115,11 @@ impl Analytics {
 
     pub fn calculate_context_health(&self) -> ContextHealth {
         let total_files = self.file_access.len();
-        let accessed_files = self.file_access.values().filter(|f| f.access_count > 0).count();
+        let accessed_files = self
+            .file_access
+            .values()
+            .filter(|f| f.access_count > 0)
+            .count();
         let unused_files = total_files - accessed_files;
 
         let avg_tokens_per_file = if total_files > 0 {
@@ -152,18 +163,30 @@ impl ContextHealth {
     pub fn print(&self) {
         println!("\nContext Health Report:");
         println!("============================================");
-        println!("Health Score:        {}% {}", self.health_score, self.health_emoji());
+        println!(
+            "Health Score:        {}% {}",
+            self.health_score,
+            self.health_emoji()
+        );
         println!("Total Files:         {}", self.total_files);
-        println!("Accessed Files:      {} ({:.1}%)", 
-            self.accessed_files, 
+        println!(
+            "Accessed Files:      {} ({:.1}%)",
+            self.accessed_files,
             (self.accessed_files as f64 / self.total_files as f64) * 100.0
         );
-        println!("Unused Files:        {} ({:.1}%)", 
+        println!(
+            "Unused Files:        {} ({:.1}%)",
             self.unused_files,
             (self.unused_files as f64 / self.total_files as f64) * 100.0
         );
-        println!("Total Tokens Used:   {}", format_tokens(self.total_tokens_used));
-        println!("Avg Tokens/File:     {}", format_tokens(self.avg_tokens_per_file));
+        println!(
+            "Total Tokens Used:   {}",
+            format_tokens(self.total_tokens_used)
+        );
+        println!(
+            "Avg Tokens/File:     {}",
+            format_tokens(self.avg_tokens_per_file)
+        );
         println!("Total Syncs:         {}", self.total_syncs);
         println!("Total Sessions:      {}", self.total_sessions);
         println!("============================================\n");
@@ -208,9 +231,10 @@ impl AnalyticsService {
             println!("No file access data yet.");
         } else {
             for (i, file) in top_files.iter().enumerate() {
-                println!("{}. {} ({} accesses, {})", 
-                    i + 1, 
-                    file.path, 
+                println!(
+                    "{}. {} ({} accesses, {})",
+                    i + 1,
+                    file.path,
                     file.access_count,
                     format_tokens(file.total_tokens)
                 );
@@ -225,9 +249,14 @@ impl AnalyticsService {
             println!("No session data yet.");
         } else {
             for session in recent {
-                let status = if session.ended_at.is_some() { "completed" } else { "active" };
+                let status = if session.ended_at.is_some() {
+                    "completed"
+                } else {
+                    "active"
+                };
                 let agent = session.agent_type.as_deref().unwrap_or("unknown");
-                println!("Session {} ({}) - {} files, {}", 
+                println!(
+                    "Session {} ({}) - {} files, {}",
                     &session.session_id[..8],
                     agent,
                     session.files_accessed.len(),
@@ -244,27 +273,37 @@ impl AnalyticsService {
         let analytics = Analytics::load(&self.root)?;
         let mut suggestions = Vec::new();
 
-        let unused: Vec<_> = analytics.file_access
+        let unused: Vec<_> = analytics
+            .file_access
             .values()
             .filter(|f| f.access_count == 0)
             .map(|f| f.path.clone())
             .collect();
 
         if !unused.is_empty() {
-            suggestions.push(format!("Remove {} unused files to reduce context size", unused.len()));
+            suggestions.push(format!(
+                "Remove {} unused files to reduce context size",
+                unused.len()
+            ));
         }
 
-        let large_files: Vec<_> = analytics.file_access
+        let large_files: Vec<_> = analytics
+            .file_access
             .values()
             .filter(|f| f.total_tokens > 5000)
             .collect();
 
         if !large_files.is_empty() {
-            suggestions.push(format!("Consider splitting {} large files (>5k tokens)", large_files.len()));
+            suggestions.push(format!(
+                "Consider splitting {} large files (>5k tokens)",
+                large_files.len()
+            ));
         }
 
         if analytics.total_tokens_used > 100_000 {
-            suggestions.push("High token usage detected. Consider using skeleton maps more often.".to_string());
+            suggestions.push(
+                "High token usage detected. Consider using skeleton maps more often.".to_string(),
+            );
         }
 
         Ok(suggestions)

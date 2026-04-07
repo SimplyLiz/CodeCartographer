@@ -153,13 +153,16 @@ pub const IGNORED_FILES: &[&str] = &[
 ];
 
 // Patterns for extension-based blocking
-pub const BLOCKED_EXTENSIONS: &[&str] = &[
-    "pem", "key", "p12", "pfx", "jks", "keystore",
-];
+pub const BLOCKED_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "jks", "keystore"];
 
 pub const BLOCKED_PATTERNS: &[&str] = &[
-    "id_rsa", "id_dsa", "id_ed25519", "id_ecdsa",
-    "aws_access", "aws_secret", "credentials",
+    "id_rsa",
+    "id_dsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "aws_access",
+    "aws_secret",
+    "credentials",
 ];
 
 /// Legacy function for backward compatibility
@@ -185,7 +188,7 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
 
     for entry in all_entries {
         let path = entry.path();
-        
+
         // Check security blocks first (these are never included, not even reported)
         if is_blocked_file(path, &ignored_files) {
             continue;
@@ -201,7 +204,9 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
     }
 
     result.files.sort();
-    result.ignored_noise.sort_by(|a, b| b.estimated_tokens.cmp(&a.estimated_tokens));
+    result
+        .ignored_noise
+        .sort_by(|a, b| b.estimated_tokens.cmp(&a.estimated_tokens));
     Ok(result)
 }
 
@@ -227,7 +232,7 @@ fn check_noise_file(path: &Path, root: &Path) -> Option<IgnoredFile> {
     // Check extension-based noise
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         let ext_lower = ext.to_lowercase();
-        
+
         // Binary images - always ignore
         if NOISE_BINARY_EXTENSIONS.contains(&ext_lower.as_str()) {
             return Some(IgnoredFile {
@@ -236,7 +241,7 @@ fn check_noise_file(path: &Path, root: &Path) -> Option<IgnoredFile> {
                 estimated_tokens: 0,
             });
         }
-        
+
         // Log files
         if NOISE_LOG_EXTENSIONS.contains(&ext_lower.as_str()) {
             let tokens = estimate_file_tokens(path);
@@ -305,19 +310,19 @@ fn estimate_file_tokens(path: &Path) -> usize {
 
 fn is_blocked_file(path: &Path, ignored_files: &HashSet<&str>) -> bool {
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    
+
     // Direct filename match
     if ignored_files.contains(filename) {
         return true;
     }
-    
+
     // Extension-based blocking
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         if BLOCKED_EXTENSIONS.contains(&ext) {
             return true;
         }
     }
-    
+
     // Pattern-based blocking (contains check)
     let lower = filename.to_lowercase();
     for pattern in BLOCKED_PATTERNS {
@@ -325,7 +330,7 @@ fn is_blocked_file(path: &Path, ignored_files: &HashSet<&str>) -> bool {
             return true;
         }
     }
-    
+
     false
 }
 

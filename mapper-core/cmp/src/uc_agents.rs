@@ -212,11 +212,14 @@ impl AgentService {
         println!("Name:        {}", agent.name);
         println!("Type:        {}", agent.agent_type);
         println!("Context ID:  {}", agent.context_id);
-        println!("Status:      {}", if agent.enabled { "enabled" } else { "disabled" });
+        println!(
+            "Status:      {}",
+            if agent.enabled { "enabled" } else { "disabled" }
+        );
         println!("Created:     {}", agent.created_at);
 
         if let Some(key) = &agent.api_key {
-            println!("API Key:     {}...{}", &key[..8], &key[key.len()-4..]);
+            println!("API Key:     {}...{}", &key[..8], &key[key.len() - 4..]);
         }
 
         if let Some(webhook) = &agent.webhook_url {

@@ -1,6 +1,7 @@
 // API Service - Exposes Project Cartographer via HTTP API
 // This provides endpoints for AI tools like ShellAI to query module context
 
+use crate::layers::{detect_layer_violations, LayerConfig, LayerViolation};
 use crate::mapper::{DetailLevel, MappedFile};
 use petgraph::algo;
 use petgraph::graphmap::UnGraphMap;
@@ -73,6 +74,7 @@ pub struct ProjectGraphResponse {
     pub edges: Vec<GraphEdge>,
     pub cycles: Vec<CycleInfo>,
     pub god_modules: Vec<GodModuleInfo>,
+    pub layer_violations: Vec<LayerViolation>,
     pub metadata: GraphMetadata,
 }
 
@@ -106,6 +108,8 @@ pub struct GraphMetadata {
     pub cycle_count: Option<usize>,
     pub god_module_count: Option<usize>,
     pub health_score: Option<f64>,
+    pub layer_violation_count: Option<usize>,
+    pub architectural_drift: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,8 +391,21 @@ impl ApiState {
         let god_modules = self.detect_god_modules(&nodes, &edges, &files);
         let god_module_count = god_modules.len();
 
-        let health_score =
-            self.calculate_health_score(bridge_count, cycle_count, god_module_count, nodes.len());
+        let edge_tuples: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.source.clone(), e.target.clone()))
+            .collect();
+
+        let layer_violations = self.detect_layer_violations(&edge_tuples);
+        let layer_violation_count = layer_violations.len();
+
+        let health_score = self.calculate_health_score(
+            bridge_count,
+            cycle_count,
+            god_module_count,
+            layer_violation_count,
+            nodes.len(),
+        );
 
         let metadata = GraphMetadata {
             total_files: nodes.len(),
@@ -399,6 +416,8 @@ impl ApiState {
             cycle_count: Some(cycle_count),
             god_module_count: Some(god_module_count),
             health_score: Some(health_score),
+            layer_violation_count: Some(layer_violation_count),
+            architectural_drift: None,
         };
 
         let response = ProjectGraphResponse {
@@ -406,6 +425,7 @@ impl ApiState {
             edges,
             cycles,
             god_modules,
+            layer_violations,
             metadata,
         };
 
@@ -731,6 +751,7 @@ impl ApiState {
         bridge_count: usize,
         cycle_count: usize,
         god_module_count: usize,
+        layer_violation_count: usize,
         total_nodes: usize,
     ) -> f64 {
         if total_nodes == 0 {
@@ -741,8 +762,14 @@ impl ApiState {
         let cycle_penalty = (cycle_count as f64 * 5.0).min(30.0);
         let bridge_penalty = ((bridge_count as f64 / total_nodes as f64) * 100.0 * 2.0).min(20.0);
         let god_penalty = (god_module_count as f64 * 3.0).min(20.0);
+        let layer_penalty = (layer_violation_count as f64 * 4.0).min(25.0);
 
-        (base_score - cycle_penalty - bridge_penalty - god_penalty).max(0.0)
+        (base_score - cycle_penalty - bridge_penalty - god_penalty - layer_penalty).max(0.0)
+    }
+
+    fn detect_layer_violations(&self, edges: &[(String, String)]) -> Vec<LayerViolation> {
+        let config = LayerConfig::default();
+        detect_layer_violations(edges, &config)
     }
 }
 

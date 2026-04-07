@@ -53,7 +53,7 @@ impl Formatter for RawFormatter {
     fn format(&self, memory: &Memory) -> String {
         serde_json::to_string_pretty(&memory.files).unwrap_or_default()
     }
-    
+
     fn extension(&self) -> &'static str {
         "json"
     }
@@ -64,10 +64,10 @@ impl Formatter for ClaudeFormatter {
         let mut out = String::new();
         out.push_str("<context>\n");
         out.push_str("<project_map>\n");
-        
+
         let mut entries: Vec<&FileEntry> = memory.files.values().collect();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        
+
         for entry in entries {
             out.push_str(&format!("<file path=\"{}\">\n", escape_xml(&entry.path)));
             out.push_str(&escape_xml(&entry.content));
@@ -76,12 +76,12 @@ impl Formatter for ClaudeFormatter {
             }
             out.push_str("</file>\n");
         }
-        
+
         out.push_str("</project_map>\n");
         out.push_str("</context>");
         out
     }
-    
+
     fn extension(&self) -> &'static str {
         "xml"
     }
@@ -92,17 +92,17 @@ impl Formatter for CursorFormatter {
         let mut out = String::new();
         out.push_str("# Project Context\n\n");
         out.push_str("## File Structure\n\n");
-        
+
         let mut entries: Vec<&FileEntry> = memory.files.values().collect();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        
+
         // Tree view
         for entry in &entries {
             out.push_str(&format!("- `{}`\n", entry.path));
         }
-        
+
         out.push_str("\n## File Contents\n\n");
-        
+
         for entry in entries {
             let ext = entry.path.rsplit('.').next().unwrap_or("txt");
             out.push_str(&format!("### {}\n\n```{}\n", entry.path, ext));
@@ -112,10 +112,10 @@ impl Formatter for CursorFormatter {
             }
             out.push_str("```\n\n");
         }
-        
+
         out
     }
-    
+
     fn extension(&self) -> &'static str {
         "md"
     }

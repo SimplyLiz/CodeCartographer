@@ -53,26 +53,32 @@ impl UCSyncService {
     /// Initialize UC sync for this project
     pub fn init(&self, project_name: &str) -> Result<UCConfig> {
         println!("Initializing UC sync for '{}'...", project_name);
-        
+
         // Create new context in UC
         let ctx = self.client.create_context(None, None)?;
-        
+
         // Add project metadata as first message
         let mut metadata = HashMap::new();
         metadata.insert("type".to_string(), serde_json::json!("project_metadata"));
         metadata.insert("project_name".to_string(), serde_json::json!(project_name));
-        metadata.insert("cmp_version".to_string(), serde_json::json!(env!("CARGO_PKG_VERSION")));
-        metadata.insert("initialized_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
-        
+        metadata.insert(
+            "cmp_version".to_string(),
+            serde_json::json!(env!("CARGO_PKG_VERSION")),
+        );
+        metadata.insert(
+            "initialized_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+
         let msg = UCMessage {
             id: String::new(),
             index: 0,
             metadata: serde_json::json!({}),
             data: metadata,
         };
-        
+
         self.client.append(&ctx.id, msg)?;
-        
+
         let config = UCConfig {
             context_id: ctx.id.clone(),
             project_name: project_name.to_string(),
@@ -83,31 +89,35 @@ impl UCSyncService {
                 .as_secs(),
             file_hashes: HashMap::new(),
         };
-        
+
         config.save(&self.root)?;
-        
+
         println!("✓ UC context created: {}", ctx.id);
         println!("✓ Config saved to {}", UC_CONFIG_FILE);
-        
+
         Ok(config)
     }
 
     /// Push local memory to UC (append-only with change detection)
     pub fn push(&self, memory: &Memory) -> Result<UCConfig> {
         let mut config = UCConfig::load(&self.root)?;
-        
-        println!("Pushing {} files to UC context {}...", memory.files.len(), config.context_id);
-        
+
+        println!(
+            "Pushing {} files to UC context {}...",
+            memory.files.len(),
+            config.context_id
+        );
+
         let mut new_count = 0;
         let mut updated_count = 0;
         let mut deleted_count = 0;
-        
+
         let current_files: std::collections::HashSet<_> = memory.files.keys().collect();
-        
+
         // Detect changes
         let mut added_files = Vec::new();
         let mut modified_files = Vec::new();
-        
+
         for (path, entry) in &memory.files {
             match config.file_hashes.get(path) {
                 None => {
@@ -125,7 +135,7 @@ impl UCSyncService {
                 }
             }
         }
-        
+
         // Detect deleted files
         let mut deleted_files = Vec::new();
         for path in config.file_hashes.keys() {
@@ -134,13 +144,13 @@ impl UCSyncService {
                 deleted_count += 1;
             }
         }
-        
+
         // Append changes to UC (append-only model)
         // 1. Append new files
         for (path, entry) in &added_files {
             let mut msg_data = self.file_entry_to_message(entry);
             msg_data.insert("operation".to_string(), serde_json::json!("add"));
-            
+
             let msg = UCMessage {
                 id: String::new(),
                 index: 0,
@@ -150,12 +160,12 @@ impl UCSyncService {
             self.client.append(&config.context_id, msg)?;
             config.file_hashes.insert(path.clone(), entry.hash);
         }
-        
+
         // 2. Append modified files (as updates)
         for (path, entry) in &modified_files {
             let mut msg_data = self.file_entry_to_message(entry);
             msg_data.insert("operation".to_string(), serde_json::json!("update"));
-            
+
             let msg = UCMessage {
                 id: String::new(),
                 index: 0,
@@ -165,14 +175,14 @@ impl UCSyncService {
             self.client.append(&config.context_id, msg)?;
             config.file_hashes.insert(path.clone(), entry.hash);
         }
-        
+
         // 3. Append deletion markers
         for path in &deleted_files {
             let mut msg_data = HashMap::new();
             msg_data.insert("type".to_string(), serde_json::json!("file"));
             msg_data.insert("path".to_string(), serde_json::json!(path));
             msg_data.insert("operation".to_string(), serde_json::json!("delete"));
-            
+
             let msg = UCMessage {
                 id: String::new(),
                 index: 0,
@@ -182,7 +192,7 @@ impl UCSyncService {
             self.client.append(&config.context_id, msg)?;
             config.file_hashes.remove(path);
         }
-        
+
         // Update config
         let ctx = self.client.get_context(&config.context_id, None, false)?;
         config.last_version = ctx.version;
@@ -191,35 +201,44 @@ impl UCSyncService {
             .unwrap()
             .as_secs();
         config.save(&self.root)?;
-        
-        println!("✓ Push complete: {} new, {} updated, {} deleted", new_count, updated_count, deleted_count);
+
+        println!(
+            "✓ Push complete: {} new, {} updated, {} deleted",
+            new_count, updated_count, deleted_count
+        );
         println!("✓ UC version: {}", config.last_version);
-        
+
         Ok(config)
     }
 
     /// Pull UC context to local memory
     pub fn pull(&self, version: Option<u32>) -> Result<Memory> {
         let config = UCConfig::load(&self.root)?;
-        
+
         println!("Pulling from UC context {}...", config.context_id);
         if let Some(v) = version {
             println!("Target version: {}", v);
         }
-        
-        let ctx = self.client.get_context(&config.context_id, version, false)?;
-        
+
+        let ctx = self
+            .client
+            .get_context(&config.context_id, version, false)?;
+
         let mut memory = Memory::default();
         memory.version = ctx.version;
-        
+
         for msg in &ctx.data {
             if let Some(entry) = self.message_to_file_entry(msg) {
                 memory.files.insert(entry.path.clone(), entry);
             }
         }
-        
-        println!("✓ Pulled {} files (version {})", memory.files.len(), ctx.version);
-        
+
+        println!(
+            "✓ Pulled {} files (version {})",
+            memory.files.len(),
+            ctx.version
+        );
+
         Ok(memory)
     }
 
@@ -227,18 +246,23 @@ impl UCSyncService {
     pub fn history(&self) -> Result<Vec<UCVersion>> {
         let config = UCConfig::load(&self.root)?;
         let ctx = self.client.get_context(&config.context_id, None, true)?;
-        
+
         Ok(ctx.versions.unwrap_or_default())
     }
 
     /// Create a branch from current or specific version
     pub fn branch(&self, branch_name: &str, from_version: Option<u32>) -> Result<UCConfig> {
         let config = UCConfig::load(&self.root)?;
-        
-        println!("Creating branch '{}' from context {}...", branch_name, config.context_id);
-        
-        let new_ctx = self.client.create_context(Some(&config.context_id), from_version)?;
-        
+
+        println!(
+            "Creating branch '{}' from context {}...",
+            branch_name, config.context_id
+        );
+
+        let new_ctx = self
+            .client
+            .create_context(Some(&config.context_id), from_version)?;
+
         let branch_config = UCConfig {
             context_id: new_ctx.id.clone(),
             project_name: format!("{}-{}", config.project_name, branch_name),
@@ -249,41 +273,49 @@ impl UCSyncService {
                 .as_secs(),
             file_hashes: HashMap::new(),
         };
-        
+
         // Save branch config with different name
-        let branch_config_path = self.root.join(format!(".cmp_uc_config.{}.json", branch_name));
+        let branch_config_path = self
+            .root
+            .join(format!(".cmp_uc_config.{}.json", branch_name));
         let data = serde_json::to_string_pretty(&branch_config)?;
         fs::write(branch_config_path, data)?;
-        
+
         println!("✓ Branch created: {}", new_ctx.id);
         println!("✓ Config saved to .cmp_uc_config.{}.json", branch_name);
-        
+
         Ok(branch_config)
     }
 
     /// Diff between two versions
     pub fn diff(&self, v1: u32, v2: u32) -> Result<ContextDiff> {
         let config = UCConfig::load(&self.root)?;
-        
-        let ctx1 = self.client.get_context(&config.context_id, Some(v1), false)?;
-        let ctx2 = self.client.get_context(&config.context_id, Some(v2), false)?;
-        
-        let files1: HashMap<String, FileEntry> = ctx1.data
+
+        let ctx1 = self
+            .client
+            .get_context(&config.context_id, Some(v1), false)?;
+        let ctx2 = self
+            .client
+            .get_context(&config.context_id, Some(v2), false)?;
+
+        let files1: HashMap<String, FileEntry> = ctx1
+            .data
             .iter()
             .filter_map(|msg| self.message_to_file_entry(msg))
             .map(|e| (e.path.clone(), e))
             .collect();
-        
-        let files2: HashMap<String, FileEntry> = ctx2.data
+
+        let files2: HashMap<String, FileEntry> = ctx2
+            .data
             .iter()
             .filter_map(|msg| self.message_to_file_entry(msg))
             .map(|e| (e.path.clone(), e))
             .collect();
-        
+
         let mut added = Vec::new();
         let mut modified = Vec::new();
         let mut deleted = Vec::new();
-        
+
         for (path, entry2) in &files2 {
             match files1.get(path) {
                 None => added.push(path.clone()),
@@ -291,13 +323,13 @@ impl UCSyncService {
                 _ => {}
             }
         }
-        
+
         for path in files1.keys() {
             if !files2.contains_key(path) {
                 deleted.push(path.clone());
             }
         }
-        
+
         Ok(ContextDiff {
             from_version: v1,
             to_version: v2,
@@ -322,7 +354,7 @@ impl UCSyncService {
         if msg_type != "file" {
             return None;
         }
-        
+
         Some(FileEntry {
             path: msg.data.get("path")?.as_str()?.to_string(),
             content: msg.data.get("content")?.as_str()?.to_string(),
@@ -343,30 +375,33 @@ pub struct ContextDiff {
 
 impl ContextDiff {
     pub fn print(&self) {
-        println!("\nContext Diff: v{} → v{}", self.from_version, self.to_version);
+        println!(
+            "\nContext Diff: v{} → v{}",
+            self.from_version, self.to_version
+        );
         println!("============================================");
-        
+
         if !self.added.is_empty() {
             println!("\n+ Added ({}):", self.added.len());
             for path in &self.added {
                 println!("  + {}", path);
             }
         }
-        
+
         if !self.modified.is_empty() {
             println!("\n~ Modified ({}):", self.modified.len());
             for path in &self.modified {
                 println!("  ~ {}", path);
             }
         }
-        
+
         if !self.deleted.is_empty() {
             println!("\n- Deleted ({}):", self.deleted.len());
             for path in &self.deleted {
                 println!("  - {}", path);
             }
         }
-        
+
         if self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty() {
             println!("No changes");
         }

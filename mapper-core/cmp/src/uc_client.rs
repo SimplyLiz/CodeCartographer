@@ -56,7 +56,7 @@ impl UCClient {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        
+
         Ok(Self { api_key, client })
     }
 
@@ -70,7 +70,8 @@ impl UCClient {
             }
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("{}/contexts", UC_BASE_URL))
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -79,34 +80,40 @@ impl UCClient {
 
         let status = response.status();
         let text = response.text().unwrap_or_default();
-        
+
         if !status.is_success() {
             anyhow::bail!("UC API error ({}): {}\n\nThis might mean:\n1. The UC API is not yet publicly available\n2. Your API key needs activation\n3. The endpoint structure is different\n\nPlease contact UltraContext support or check https://ultracontext.ai/docs", status, text);
         }
 
-        let ctx: UCContext = serde_json::from_str(&text)
-            .context("Failed to parse context response")?;
+        let ctx: UCContext =
+            serde_json::from_str(&text).context("Failed to parse context response")?;
         Ok(ctx)
     }
 
     /// Get context with optional version and history
-    pub fn get_context(&self, ctx_id: &str, version: Option<u32>, history: bool) -> Result<UCContext> {
+    pub fn get_context(
+        &self,
+        ctx_id: &str,
+        version: Option<u32>,
+        history: bool,
+    ) -> Result<UCContext> {
         let mut url = format!("{}/contexts/{}", UC_BASE_URL, ctx_id);
         let mut params = vec![];
-        
+
         if let Some(v) = version {
             params.push(format!("version={}", v));
         }
         if history {
             params.push("history=true".to_string());
         }
-        
+
         if !params.is_empty() {
             url.push('?');
             url.push_str(&params.join("&"));
         }
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .bearer_auth(&self.api_key)
             .send()
@@ -124,7 +131,8 @@ impl UCClient {
 
     /// Append a message to context
     pub fn append(&self, ctx_id: &str, message: UCMessage) -> Result<UCContext> {
-        let response = self.client
+        let response = self
+            .client
             .post(&format!("{}/contexts/{}", UC_BASE_URL, ctx_id))
             .bearer_auth(&self.api_key)
             .json(&message.data)
@@ -144,7 +152,8 @@ impl UCClient {
 
     /// Update a message by ID or index
     pub fn update(&self, ctx_id: &str, message: UCMessage) -> Result<UCContext> {
-        let response = self.client
+        let response = self
+            .client
             .patch(&format!("{}/contexts/{}", UC_BASE_URL, ctx_id))
             .bearer_auth(&self.api_key)
             .json(&message)
@@ -163,8 +172,12 @@ impl UCClient {
 
     /// Delete a message by ID or index
     pub fn delete(&self, ctx_id: &str, id_or_index: &str) -> Result<UCContext> {
-        let response = self.client
-            .delete(&format!("{}/contexts/{}/{}", UC_BASE_URL, ctx_id, id_or_index))
+        let response = self
+            .client
+            .delete(&format!(
+                "{}/contexts/{}/{}",
+                UC_BASE_URL, ctx_id, id_or_index
+            ))
             .bearer_auth(&self.api_key)
             .send()
             .context("Failed to delete message")?;
@@ -182,17 +195,18 @@ impl UCClient {
     /// Batch append multiple messages
     pub fn batch_append(&self, ctx_id: &str, messages: Vec<UCMessage>) -> Result<UCContext> {
         let mut ctx = self.get_context(ctx_id, None, false)?;
-        
+
         for msg in messages {
             ctx = self.append(ctx_id, msg)?;
         }
-        
+
         Ok(ctx)
     }
 
     /// List all contexts (if API supports it)
     pub fn list_contexts(&self) -> Result<Vec<UCContext>> {
-        let response = self.client
+        let response = self
+            .client
             .get(&format!("{}/contexts", UC_BASE_URL))
             .bearer_auth(&self.api_key)
             .send()

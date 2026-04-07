@@ -431,6 +431,91 @@ impl McpServer {
                 })
             }
 
+            "get_cycle_fix_plan" => {
+                let args = call.arguments;
+                let _cycle_index = args
+                    .get("cycle_index")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("Missing cycle_index")? as usize;
+
+                let graph = self.api_state.rebuild_graph()?;
+
+                let fix_plan = if graph.cycles.is_empty() {
+                    "No cycles detected - graph is healthy!".to_string()
+                } else {
+                    let mut plan = String::from("## Cycle Fix Plans\n\n");
+                    for (i, cycle) in graph.cycles.iter().enumerate() {
+                        plan.push_str(&format!(
+                            "### Cycle {} (severity: {})\n",
+                            i + 1,
+                            cycle.severity
+                        ));
+                        plan.push_str(&format!("  Nodes: {}\n", cycle.nodes.join(" -> ")));
+                        if let Some(ref pivot) = cycle.pivot_node {
+                            plan.push_str(&format!(
+                                "  💡 Pivot node (remove this import to break cycle): {}\n",
+                                pivot
+                            ));
+                        }
+                        plan.push('\n');
+                    }
+                    plan
+                };
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(fix_plan)],
+                    is_error: None,
+                })
+            }
+
+            "explain_health_drop" => {
+                let args = call.arguments;
+                let _old_score = args
+                    .get("old_score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(100.0);
+                let _new_score = args
+                    .get("new_score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(100.0);
+
+                let graph = self.api_state.rebuild_graph()?;
+
+                let health = graph.metadata.health_score.unwrap_or(100.0);
+                let drop = 100.0 - health;
+
+                let explanation = format!(
+                    "## Architectural Health Analysis\n\n\
+                     Current Health Score: {:.1}/100\n\
+                     Score Drop: {:.1}\n\n\
+                     ### Contributing Factors:\n\
+                     - Bridges: {:?}\n\
+                     - Cycles: {:?}\n\
+                     - God Modules: {:?}\n\
+                     - Layer Violations: {:?}\n\n\
+                     ### Recommendations:\n\
+                     {}",
+                    health,
+                    drop,
+                    graph.metadata.bridge_count.unwrap_or(0),
+                    graph.metadata.cycle_count.unwrap_or(0),
+                    graph.metadata.god_module_count.unwrap_or(0),
+                    graph.metadata.layer_violation_count.unwrap_or(0),
+                    if drop > 20.0 {
+                        "⚠️ Critical - Address immediately"
+                    } else if drop > 10.0 {
+                        "⚡ High - Review in this sprint"
+                    } else {
+                        "✅ Acceptable - Monitor trends"
+                    }
+                );
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(explanation)],
+                    is_error: None,
+                })
+            }
+
             _ => Err(format!("Unknown tool: {}", call.name)),
         }
     }
