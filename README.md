@@ -1,61 +1,140 @@
-# Project Cartographer - Semantic Workspace Mapping
+# Code Cartographer for Architectural Intelligence
 
-## Overview
-Project Cartographer is a background worker that generates semantic skeleton maps of codebases using CKB (Code Knowledge Base) technology. Instead of providing full source code, it delivers compressed public API signatures and dependency information, reducing token usage by 90%+ compared to traditional code ingestion.
+> The "GPS with Traffic Data" for your codebase - warns you about roadblocks before you even start driving.
 
-## Core Components
+## What is Cartographer?
 
-### 1. Background Worker Service (`cartographer_service.py`)
-- Continuously monitors file system changes
-- Uses CKB to extract semantic information
-- Generates and maintains `project_graph.json`
-- Implements intelligent caching for performance
+Cartographer is a **structural intelligence engine** that maps your codebase's architecture, monitors its health, and predicts the ripple effects of changes before you make them.
 
-### 2. Semantic Skeleton Extraction
-- Leverages existing `mapper.rs` language-specific extractors
-- Supports 10+ languages (JS/TS, Rust, Python, Go, Java/Kotlin/Scala, C/C++, Ruby, PHP)
-- Extracts only: imports, function signatures, class/interface definitions, type declarations
-- Excludes: function bodies, implementation details, comments
+It answers questions like:
+- "What files are architectural bottlenecks?"
+- "What happens if I change this function?"
+- "Is my codebase getting healthier or more tangled?"
+- "Who can I legally import from?"
 
-### 3. Module Context API (`get_module_context`)
-- Returns public API surface of any module
-- Includes transitive dependencies when requested
-- Compressed format using AI Lang techniques
-- Configurable depth and inclusion options
+## Quick Start
 
-### 4. Dependency Graph Generation (`project_graph.json`)
-- Nodes: Files/modules with their exported signatures
+```bash
+# Build
+cd mapper-core/cargo && cargo build --release
+
+# Generate architectural map
+cartographer map
+
+# Check health score
+cartographer health
+
+# Predict impact of a change
+cartographer simulate --module src/auth/user.rs --new-signature "fn login(u: User)"
+
+# See architectural trends
+cartographer evolution --days 30
+```
+
+## Core Features
+
+### 🗺️ The Map (Dependency Graph)
+Generates `project_graph.json` - a complete dependency map at file/module level:
+- Nodes: Files with their public API signatures
 - Edges: Import/require/use relationships
-- Metadata: Language, complexity estimates, change frequency
-- Compression: Removes whitespace, normalizes formatting
+- Metadata: Language, complexity estimates, bridge detection
 
-## Token Savings Achieved
-- Traditional approach: 5,000 tokens for a medium-sized module
-- Project Cartographer: 200 tokens for same module
-- **96% reduction in token usage**
-- Enables LLMs to work with 5x more context within same limits
+### 🏛️ Bridge Detection
+Identifies "Global Bridges" - files that connect disparate subsystems. Using **Bridgeness Centrality** (betweenness filtered to exclude noisy utility hubs), Cartographer finds the true architectural bottlenecks.
 
-## Integration Points
-- Hop AI: Consumes `project_graph.json` for workspace understanding
-- ShellAI: Uses `get_module_context` for targeted code queries
-- Both systems benefit from dramatically reduced context footprints
+### 🛡️ Layer Enforcement
+Prevents architectural drift with `layers.toml`:
+```toml
+[layers]
+ui = ["components", "pages"]
+services = ["api", "auth"]
+db = ["models"]
 
-## Status
-✅ Background worker service implemented
-✅ CKB integration for semantic extraction
-✅ Language-specific skeleton extraction (via mapper.rs)
-✅ Module context API endpoint
-✅ Project graph JSON generator
-✅ Dependency tracking between modules
-✅ Caching mechanism for performance
-✅ Compression using AI Lang techniques
-✅ Change detection for incremental updates
-✅ Tested with CMP codebase - verified token savings
-🟡 Documentation for Hop and ShellAI integration (pending)
+[allowed_flows]
+ui -> services
+services -> db
+```
+Detects: BackCalls (db→ui), SkipCalls (ui→db without business layer)
 
-## Next Steps
-1. Finalize API documentation for external consumers
-2. Add configuration options for compression levels
-3. Implement webhook notifications for graph updates
-4. Add visualization hooks for dependency graphs
-5. Performance optimization for large codebases (>100K lines)
+### 📊 Health Scoring
+Calculates architectural health from 0-100:
+```
+health = 100 - (cycles × 5) - (bridges × 2) - (god_modules × 3) - (violations × 4)
+```
+
+### 🔮 Predictive Simulation
+Before you write code, Cartographer simulates the ripple effect:
+- Will this create a cycle?
+- Which modules will be affected?
+- What layer violations will this cause?
+- What's the health impact?
+
+### 📈 Historical Evolution
+Track architecture over time - see debt indicators, health trends, and get recommendations.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Cartographer                          │
+├─────────────────────────────────────────────────────────┤
+│  mapper.rs     │ Skeleton extraction (10+ languages) │
+│  api.rs         │ Graph generation, health scoring    │
+│  layers.rs      │ Layer config, violation detection    │
+│  webhooks.rs    │ Change notifications                 │
+│  mcp.rs         │ MCP server for AI tool integration  │
+└─────────────────────────────────────────────────────────┘
+                        │
+                        ▼ (webhook / API)
+                   ┌─────────┐
+                   │   CKB   │  ← Deep semantic analysis
+                   └─────────┘
+```
+
+## Cartographer vs CKB
+
+| Aspect | Cartographer | CKB |
+|--------|--------------|-----|
+| View | Macro (file/module) | Micro (symbol/AST) |
+| Speed | Fast (regex) | Deep (AST) |
+| Purpose | Map, warn, predict | Analyze, refactor |
+| Output | `project_graph.json` | Call graphs, refs |
+
+**The handoff:** Cartographer identifies "where to look," CKB does the deep analysis there.
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `cartographer map` | Generate skeleton map |
+| `cartographer watch` | Live file watching |
+| `cartographer health` | Show health score |
+| `cartographer simulate` | Predict change impact |
+| `cartographer evolution` | Architectural trends |
+| `cartographer init-ckb` | Setup CKB integration |
+
+## Token Efficiency
+
+Cartographer achieves **90%+ token reduction** vs full source code:
+- Full source: ~5,000 tokens/module
+- Cartographer skeleton: ~200 tokens/module
+- AI-Lang compression strips `pub`, `private`, `async`, etc.
+
+## Integrations
+
+- **MCP Server** - AI tools can query via Model Context Protocol
+- **Webhooks** - Notify CKB when graph changes
+- **CKB** - Uses Cartographer as a filter for deep analysis
+
+## Version History
+
+- **v1.1.0** - Predictive simulation, historical evolution
+- **v1.0.0** - CKB integration, symbol mapping
+- **v0.5.0** - Layer enforcement, border patrol
+- **v0.4.0** - Health monitoring, cycle/god detection
+- **v0.3.0** - Bridge detection, AI-Lang compression
+- **v0.2.0** - API, MCP server
+
+## Author
+
+SimplyLiz
