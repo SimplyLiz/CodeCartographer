@@ -1,9 +1,13 @@
 [package]
-name = "cmp"
+name = "architect"
 version = "1.1.0"
 edition = "2021"
-description = "Context Memory Protocol - Deterministic codebase mapper for AI context injection"
+description = "Cartographer - Architectural intelligence and health monitoring for codebases"
 authors = ["SimplyLiz"]
+
+[[bin]]
+name = "architect"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
