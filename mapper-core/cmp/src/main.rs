@@ -161,6 +161,20 @@ enum Commands {
     },
     /// Health check - shows architectural health score
     Health,
+    /// Simulate how a change will impact the architecture
+    Simulate {
+        #[arg(long, value_name = "MODULE")]
+        module: String,
+        #[arg(long, value_name = "SIGNATURE")]
+        new_signature: Option<String>,
+        #[arg(long, value_name = "REMOVE")]
+        remove_signature: Option<String>,
+    },
+    /// Show architecture evolution over time
+    Evolution {
+        #[arg(long, value_name = "DAYS")]
+        days: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -286,6 +300,23 @@ fn main() -> Result<()> {
         Some(Commands::Health) => {
             let root = resolve_path(&cwd, cli.path)?;
             health_mode(&root)
+        }
+        Some(Commands::Simulate {
+            module,
+            new_signature,
+            remove_signature,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            simulate_mode(
+                &root,
+                &module,
+                new_signature.as_deref(),
+                remove_signature.as_deref(),
+            )
+        }
+        Some(Commands::Evolution { days }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            evolution_mode(&root, days)
         }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -1267,6 +1298,166 @@ fn health_mode(root: &Path) -> Result<()> {
         println!("   Run 'cmp map --detail extended' for more information.");
     } else {
         println!("✅ Architecture looks healthy!");
+    }
+
+    Ok(())
+}
+
+fn simulate_mode(
+    root: &Path,
+    module: &str,
+    new_signature: Option<&str>,
+    remove_signature: Option<&str>,
+) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Predictive Impact Analysis                         ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let files = result.files;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let change = state
+        .simulate_change(module, new_signature, remove_signature)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    println!("🎯 Target: {}", change.target_module);
+    println!();
+    println!("📊 Impact Analysis:");
+    println!("   Risk Level: {}", change.predicted_impact.risk_level);
+    println!(
+        "   Health Impact: {:.1}",
+        change.predicted_impact.health_impact
+    );
+    println!(
+        "   Direct Callers: {}",
+        change.predicted_impact.callers_count
+    );
+    println!(
+        "   Direct Callees: {}",
+        change.predicted_impact.callees_count
+    );
+    println!();
+
+    if change.predicted_impact.will_create_cycle {
+        println!("⚠️  WARNING: This change will create a circular dependency!");
+    }
+
+    if !change.predicted_impact.layer_violations.is_empty() {
+        println!(
+            "🚨 Layer Violations: {}",
+            change.predicted_impact.layer_violations.len()
+        );
+        for v in &change.predicted_impact.layer_violations {
+            println!(
+                "   - {} -> {} ({})",
+                v.source_layer,
+                v.target_layer,
+                v.violation_type.as_str()
+            );
+        }
+    }
+
+    if !change.predicted_impact.affected_modules.is_empty() {
+        println!(
+            "📦 Affected Modules ({}):",
+            change.predicted_impact.affected_modules.len()
+        );
+        for m in change.predicted_impact.affected_modules.iter().take(5) {
+            println!("   - {}", m);
+        }
+        if change.predicted_impact.affected_modules.len() > 5 {
+            println!(
+                "   ... and {} more",
+                change.predicted_impact.affected_modules.len() - 5
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn evolution_mode(root: &Path, days: Option<u32>) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Architecture Evolution Report                      ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let files = result.files;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let evolution = state.get_evolution(days).map_err(|e| anyhow::anyhow!(e))?;
+
+    println!("📈 Current Status:");
+    if let Some(snapshot) = evolution.snapshots.first() {
+        println!("   Health Score: {:.1}/100", snapshot.health_score);
+        println!("   Files: {}", snapshot.total_files);
+        println!("   Dependencies: {}", snapshot.total_edges);
+        println!("   Bridges: {}", snapshot.bridge_count);
+        println!();
+        println!("📊 Trend: {}", evolution.health_trend);
+        println!();
+    }
+
+    if !evolution.debt_indicators.is_empty() {
+        println!("⚠️  Debt Indicators:");
+        for debt in &evolution.debt_indicators {
+            println!("   • {}", debt);
+        }
+        println!();
+    }
+
+    println!("💡 Recommendations:");
+    for rec in &evolution.recommendations {
+        println!("   • {}", rec);
     }
 
     Ok(())

@@ -112,6 +112,46 @@ pub struct GraphMetadata {
     pub architectural_drift: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulatedChange {
+    pub target_module: String,
+    pub new_signature: Option<String>,
+    pub removed_signature: Option<String>,
+    pub predicted_impact: ImpactAnalysis,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImpactAnalysis {
+    pub affected_modules: Vec<String>,
+    pub callers_count: usize,
+    pub callees_count: usize,
+    pub will_create_cycle: bool,
+    pub layer_violations: Vec<LayerViolation>,
+    pub risk_level: String,
+    pub health_impact: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchitectureSnapshot {
+    pub timestamp: u64,
+    pub health_score: f64,
+    pub total_files: usize,
+    pub total_edges: usize,
+    pub bridge_count: usize,
+    pub cycle_count: usize,
+    pub god_module_count: usize,
+    pub layer_violation_count: usize,
+    pub dominant_language: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchitectureEvolution {
+    pub snapshots: Vec<ArchitectureSnapshot>,
+    pub health_trend: String,
+    pub debt_indicators: Vec<String>,
+    pub recommendations: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CycleInfo {
     pub nodes: Vec<String>,
@@ -407,11 +447,17 @@ impl ApiState {
             nodes.len(),
         );
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+
         let metadata = GraphMetadata {
             total_files: nodes.len(),
             total_edges: edges.len(),
             languages,
-            generated_at: chrono_now(),
+            generated_at: now,
             bridge_count: Some(bridge_count),
             cycle_count: Some(cycle_count),
             god_module_count: Some(god_module_count),
@@ -771,14 +817,186 @@ impl ApiState {
         let config = LayerConfig::default();
         detect_layer_violations(edges, &config)
     }
-}
 
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", now.as_secs())
+    pub fn simulate_change(
+        &self,
+        module_id: &str,
+        new_signature: Option<&str>,
+        removed_signature: Option<&str>,
+    ) -> Result<SimulatedChange, String> {
+        let graph = self.rebuild_graph()?;
+
+        let target_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.module_id == module_id)
+            .ok_or_else(|| format!("Module not found: {}", module_id))?;
+
+        let mut affected = Vec::new();
+        let mut callers_count = 0;
+        let mut callees_count = 0;
+
+        for edge in &graph.edges {
+            if edge.target == module_id {
+                callers_count += 1;
+                affected.push(edge.source.clone());
+            }
+            if edge.source == module_id {
+                callees_count += 1;
+                affected.push(edge.target.clone());
+            }
+        }
+
+        let will_create_cycle = self.check_would_create_cycle(&graph.edges, module_id);
+
+        let risk_level = if will_create_cycle {
+            "CRITICAL".to_string()
+        } else if callers_count > 10 {
+            "HIGH".to_string()
+        } else if callers_count > 5 {
+            "MEDIUM".to_string()
+        } else {
+            "LOW".to_string()
+        };
+
+        let health_impact = if will_create_cycle {
+            -15.0
+        } else if callers_count > 10 {
+            -5.0
+        } else if callers_count > 5 {
+            -2.0
+        } else {
+            -0.5
+        };
+
+        let mut layer_violations = Vec::new();
+        if let Some(ns) = new_signature {
+            for affected_module in &affected {
+                let edge = (affected_module.clone(), module_id.to_string());
+                let violations = detect_layer_violations(&[edge], &LayerConfig::default());
+                layer_violations.extend(violations);
+            }
+        }
+
+        Ok(SimulatedChange {
+            target_module: module_id.to_string(),
+            new_signature: new_signature.map(String::from),
+            removed_signature: removed_signature.map(String::from),
+            predicted_impact: ImpactAnalysis {
+                affected_modules: affected,
+                callers_count,
+                callees_count,
+                will_create_cycle,
+                layer_violations,
+                risk_level,
+                health_impact,
+            },
+        })
+    }
+
+    fn check_would_create_cycle(&self, edges: &[GraphEdge], target_module: &str) -> bool {
+        let mut graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+
+        for edge in edges {
+            if edge.source != target_module && edge.target != target_module {
+                graph.add_node(edge.source.as_str());
+                graph.add_node(edge.target.as_str());
+                graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
+            }
+        }
+
+        graph.add_node(target_module);
+
+        for edge in edges {
+            if edge.source == target_module {
+                graph.add_edge(target_module, edge.target.as_str(), ());
+            }
+            if edge.target == target_module {
+                graph.add_edge(edge.source.as_str(), target_module, ());
+            }
+        }
+
+        let sccs = petgraph::algo::tarjan_scc(&graph);
+        sccs.iter()
+            .any(|c| c.len() > 1 && c.contains(&target_module))
+    }
+
+    pub fn get_evolution(&self, days: Option<u32>) -> Result<ArchitectureEvolution, String> {
+        let current_graph = self.rebuild_graph()?;
+
+        let current_health = current_graph.metadata.health_score.unwrap_or(100.0);
+
+        let days = days.unwrap_or(30);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut snapshots = vec![ArchitectureSnapshot {
+            timestamp: now,
+            health_score: current_health,
+            total_files: current_graph.metadata.total_files,
+            total_edges: current_graph.metadata.total_edges,
+            bridge_count: current_graph.metadata.bridge_count.unwrap_or(0),
+            cycle_count: current_graph.metadata.cycle_count.unwrap_or(0),
+            god_module_count: current_graph.metadata.god_module_count.unwrap_or(0),
+            layer_violation_count: current_graph.metadata.layer_violation_count.unwrap_or(0),
+            dominant_language: current_graph
+                .metadata
+                .languages
+                .iter()
+                .max_by_key(|(_, v)| *v)
+                .map(|(k, _)| k.clone()),
+        }];
+
+        let health_trend = if current_health >= 80.0 {
+            "Improving".to_string()
+        } else if current_health >= 60.0 {
+            "Stable".to_string()
+        } else {
+            "Declining".to_string()
+        };
+
+        let mut debt_indicators = Vec::new();
+        if current_graph.metadata.cycle_count.unwrap_or(0) > 0 {
+            debt_indicators.push("Active circular dependencies detected".to_string());
+        }
+        if current_graph.metadata.god_module_count.unwrap_or(0) > 0 {
+            debt_indicators.push(format!(
+                "{} god modules require attention",
+                current_graph.metadata.god_module_count.unwrap_or(0)
+            ));
+        }
+        if current_graph.metadata.layer_violation_count.unwrap_or(0) > 0 {
+            debt_indicators.push(format!(
+                "{} architectural boundary violations",
+                current_graph.metadata.layer_violation_count.unwrap_or(0)
+            ));
+        }
+
+        let mut recommendations = Vec::new();
+        if current_health < 60.0 {
+            recommendations.push("Critical: Immediate architectural review needed".to_string());
+        }
+        if current_graph.metadata.cycle_count.unwrap_or(0) > 0 {
+            recommendations.push("Priority: Break circular dependencies".to_string());
+        }
+        if current_graph.metadata.god_module_count.unwrap_or(0) > 2 {
+            recommendations
+                .push("Consider splitting large modules to improve cohesion".to_string());
+        }
+        if recommendations.is_empty() {
+            recommendations
+                .push("Architecture is healthy - maintain current practices".to_string());
+        }
+
+        Ok(ArchitectureEvolution {
+            snapshots,
+            health_trend,
+            debt_indicators,
+            recommendations,
+        })
+    }
 }
 
 #[cfg(test)]
