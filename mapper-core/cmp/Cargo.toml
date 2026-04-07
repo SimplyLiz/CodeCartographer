@@ -3,7 +3,7 @@ name = "cmp"
 version = "0.4.0"
 edition = "2021"
 description = "Context Memory Protocol - Deterministic codebase mapper for AI context injection"
-authors = ["EmpusaAI"]
+authors = ["SimplyLiz"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
