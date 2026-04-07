@@ -166,6 +166,55 @@ impl MappedFile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectorySummary {
+    pub path: String,
+    pub file_count: usize,
+    pub signature_count: usize,
+    pub description: Option<String>,
+    pub modules: Vec<String>,
+}
+
+/// Generate satellite view summary for a directory
+pub fn summarize_directory(files: &[&MappedFile], root_path: &str) -> DirectorySummary {
+    let mut file_count = 0;
+    let mut signature_count = 0;
+    let mut modules = Vec::new();
+
+    for file in files {
+        file_count += 1;
+        signature_count += file.signatures.len();
+        modules.push(file.path.clone());
+    }
+
+    let description = find_directory_description(files, root_path);
+
+    DirectorySummary {
+        path: root_path.to_string(),
+        file_count,
+        signature_count,
+        description,
+        modules,
+    }
+}
+
+fn find_directory_description(files: &[&MappedFile], _root_path: &str) -> Option<String> {
+    for file in files {
+        let path_lower = file.path.to_lowercase();
+        if path_lower.contains("readme")
+            || path_lower.contains("mod.rs")
+            || path_lower.contains("mod.rs")
+        {
+            if let Some(ref sigs) = file.docstrings {
+                if !sigs.is_empty() {
+                    return Some(sigs[0].clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract skeleton map from file content based on language
 pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
     let ext = path

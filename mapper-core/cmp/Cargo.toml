@@ -1,6 +1,6 @@
 [package]
 name = "cmp"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Context Memory Protocol - Deterministic codebase mapper for AI context injection"
 authors = ["EmpusaAI"]

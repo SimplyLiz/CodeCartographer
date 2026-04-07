@@ -71,6 +71,8 @@ pub struct GraphQueryRequest {
 pub struct ProjectGraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    pub cycles: Vec<CycleInfo>,
+    pub god_modules: Vec<GodModuleInfo>,
     pub metadata: GraphMetadata,
 }
 
@@ -101,6 +103,25 @@ pub struct GraphMetadata {
     pub languages: HashMap<String, usize>,
     pub generated_at: String,
     pub bridge_count: Option<usize>,
+    pub cycle_count: Option<usize>,
+    pub god_module_count: Option<usize>,
+    pub health_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleInfo {
+    pub nodes: Vec<String>,
+    pub pivot_node: Option<String>,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GodModuleInfo {
+    pub module_id: String,
+    pub path: String,
+    pub degree: usize,
+    pub cohesion_score: f64,
+    pub severity: String,
 }
 
 /// Compression level configuration
@@ -360,17 +381,31 @@ impl ApiState {
 
         let bridge_count = nodes.iter().filter(|n| n.is_bridge == Some(true)).count();
 
+        let cycles = self.detect_cycles(&nodes, &edges);
+        let cycle_count = cycles.len();
+
+        let god_modules = self.detect_god_modules(&nodes, &edges, &files);
+        let god_module_count = god_modules.len();
+
+        let health_score =
+            self.calculate_health_score(bridge_count, cycle_count, god_module_count, nodes.len());
+
         let metadata = GraphMetadata {
             total_files: nodes.len(),
             total_edges: edges.len(),
             languages,
             generated_at: chrono_now(),
             bridge_count: Some(bridge_count),
+            cycle_count: Some(cycle_count),
+            god_module_count: Some(god_module_count),
+            health_score: Some(health_score),
         };
 
         let response = ProjectGraphResponse {
             nodes,
             edges,
+            cycles,
+            god_modules,
             metadata,
         };
 
@@ -577,6 +612,137 @@ impl ApiState {
             .lock()
             .map(|c| *c)
             .unwrap_or(CompressionLevel::Standard)
+    }
+
+    fn detect_cycles(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<CycleInfo> {
+        let mut graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+
+        for node in nodes {
+            graph.add_node(node.module_id.as_str());
+        }
+
+        for edge in edges {
+            graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
+        }
+
+        let sccs = petgraph::algo::tarjan_scc(&graph);
+
+        let hub_nodes: std::collections::HashSet<&str> = nodes
+            .iter()
+            .filter(|n| n.degree.unwrap_or(0) > 30)
+            .map(|n| n.module_id.as_str())
+            .collect();
+
+        let mut cycles = Vec::new();
+
+        for component in sccs {
+            if component.len() > 1 {
+                let cycle_nodes: Vec<String> = component.iter().map(|s| s.to_string()).collect();
+
+                let filtered_nodes: Vec<&str> = component
+                    .iter()
+                    .map(|&s| s)
+                    .filter(|n| !hub_nodes.contains(*n))
+                    .collect();
+
+                let pivot = if filtered_nodes.is_empty() {
+                    None
+                } else {
+                    Some(filtered_nodes[filtered_nodes.len() / 2].to_string())
+                };
+
+                let severity = if component.len() > 5 {
+                    "CRITICAL"
+                } else {
+                    "HIGH"
+                };
+
+                cycles.push(CycleInfo {
+                    nodes: cycle_nodes,
+                    pivot_node: pivot,
+                    severity: severity.to_string(),
+                });
+            }
+        }
+
+        cycles
+    }
+
+    fn detect_god_modules(
+        &self,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        files: &HashMap<String, MappedFile>,
+    ) -> Vec<GodModuleInfo> {
+        let god_threshold = 50;
+        let mut god_modules = Vec::new();
+
+        for node in nodes {
+            let degree = node.degree.unwrap_or(0);
+
+            if degree > god_threshold {
+                let file = files.get(&node.module_id);
+
+                let import_types: std::collections::HashSet<&str> = file
+                    .map(|f| {
+                        f.imports
+                            .iter()
+                            .filter_map(|i| {
+                                let parts: Vec<&str> = i.split('/').collect();
+                                parts.get(1).or(parts.first()).map(|s| *s)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let unique_types = import_types.len() as f64;
+                let cohesion = if degree > 0 {
+                    (unique_types / degree as f64).min(1.0)
+                } else {
+                    0.0
+                };
+
+                if cohesion < 0.3 {
+                    let severity = if degree > 100 {
+                        "CRITICAL"
+                    } else if degree > 75 {
+                        "HIGH"
+                    } else {
+                        "MEDIUM"
+                    };
+
+                    god_modules.push(GodModuleInfo {
+                        module_id: node.module_id.clone(),
+                        path: node.path.clone(),
+                        degree,
+                        cohesion_score: cohesion,
+                        severity: severity.to_string(),
+                    });
+                }
+            }
+        }
+
+        god_modules.sort_by(|a, b| b.degree.cmp(&a.degree));
+        god_modules
+    }
+
+    fn calculate_health_score(
+        &self,
+        bridge_count: usize,
+        cycle_count: usize,
+        god_module_count: usize,
+        total_nodes: usize,
+    ) -> f64 {
+        if total_nodes == 0 {
+            return 100.0;
+        }
+
+        let base_score = 100.0;
+        let cycle_penalty = (cycle_count as f64 * 5.0).min(30.0);
+        let bridge_penalty = ((bridge_count as f64 / total_nodes as f64) * 100.0 * 2.0).min(20.0);
+        let god_penalty = (god_module_count as f64 * 3.0).min(20.0);
+
+        (base_score - cycle_penalty - bridge_penalty - god_penalty).max(0.0)
     }
 }
 
