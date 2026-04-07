@@ -1,0 +1,28 @@
+[package]
+name = "cmp"
+version = "0.2.0"
+edition = "2021"
+description = "Context Memory Protocol - Deterministic codebase mapper for AI context injection"
+authors = ["EmpusaAI"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+walkdir = "2.4"
+notify = { version = "6.1", features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.4"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiktoken-rs = "0.5"
+arboard = "3.2"
+regex = "1.10"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+tokio = { version = "1.35", features = ["full"] }
+chrono = "0.4"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
