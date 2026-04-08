@@ -1,6 +1,6 @@
 [package]
 name = "cartographer"
-version = "1.1.0"
+version = "1.3.0"
 edition = "2021"
 description = "Code Cartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
@@ -8,6 +8,11 @@ authors = ["SimplyLiz"]
 [[bin]]
 name = "cartographer"
 path = "src/main.rs"
+
+[lib]
+name = "cartographer"
+crate-type = ["staticlib", "rlib"]
+path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
@@ -23,6 +28,7 @@ regex = "1.10"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
 tokio = { version = "1.35", features = ["full"] }
 chrono = "0.4"
+toml = { version = "0.8", features = ["parse"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 petgraph = "0.6"
 

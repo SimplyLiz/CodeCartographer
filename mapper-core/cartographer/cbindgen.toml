@@ -1,0 +1,14 @@
+language = "C"
+include_guard = "CARTOGRAPHER_H"
+
+[include]
+[export]
+include = [
+    "cartographer_map_project",
+    "cartographer_health",
+    "cartographer_check_layers",
+    "cartographer_simulate_change",
+    "cartographer_skeleton_map",
+    "cartographer_module_context",
+    "cartographer_free_string",
+]

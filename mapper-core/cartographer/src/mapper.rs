@@ -64,12 +64,14 @@ fn extract_symbol_name(raw: &str) -> Option<String> {
 }
 
 fn generate_ckb_id(raw: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    raw.hash(&mut hasher);
-    format!("sym_{:x}", hasher.finish())[..12].to_string()
+    // FNV-1a: stable across processes and Rust versions (DefaultHasher is not).
+    // Zero-padded to 16 hex digits so the [..12] slice never panics.
+    let mut hash: u64 = 14695981039346656037;
+    for byte in raw.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("sym_{:016x}", hash)[..12].to_string()
 }
 
 /// Represents a mapped file with only signatures (no implementation details)
@@ -271,7 +273,8 @@ fn find_directory_description(files: &[&MappedFile], _root_path: &str) -> Option
         let path_lower = file.path.to_lowercase();
         if path_lower.contains("readme")
             || path_lower.contains("mod.rs")
-            || path_lower.contains("mod.rs")
+            || path_lower.contains("index.js")
+            || path_lower.contains("index.ts")
         {
             if let Some(ref sigs) = file.docstrings {
                 if !sigs.is_empty() {

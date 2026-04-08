@@ -1,5 +1,7 @@
 mod api;
 mod formatter;
+mod git_analysis;
+mod global_config;
 mod layers;
 mod mapper;
 mod mcp;
@@ -38,7 +40,7 @@ const TOKEN_THRESHOLD_YELLOW: usize = 30_000;
 const WATCH_DEBOUNCE_MS: u64 = 500;
 
 #[derive(Parser)]
-#[command(name = "cmp")]
+#[command(name = "cartographer")]
 #[command(about = "Memory Unit - Deterministic codebase mapper for AI context injection")]
 #[command(version)]
 struct Cli {
@@ -49,8 +51,8 @@ struct Cli {
     #[arg(value_name = "PATH")]
     path: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "claude")]
-    target: Target,
+    #[arg(short, long)]
+    target: Option<Target>,
 
     #[arg(short, long)]
     copy: bool,
@@ -175,6 +177,80 @@ enum Commands {
         #[arg(long, value_name = "DAYS")]
         days: Option<u32>,
     },
+    /// Show dependencies of a target module as JSON
+    Deps {
+        #[arg(value_name = "TARGET")]
+        target: String,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+    /// Start MCP server (stdio JSON-RPC transport)
+    Serve,
+    /// Show project and cloud sync status
+    Status,
+    /// Manage global cartographer configuration
+    Config {
+        /// Set the UC API key globally
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Set the default output target globally (claude, cursor, raw)
+        #[arg(long, value_name = "TARGET")]
+        default_target: Option<String>,
+        /// Print current global configuration
+        #[arg(long)]
+        show: bool,
+    },
+    /// Show temporal coupling pairs from git history
+    Cochange {
+        /// Number of commits to analyse
+        #[arg(long, default_value = "500")]
+        commits: usize,
+        /// Minimum co-change count to display
+        #[arg(long, default_value = "5")]
+        min_count: usize,
+    },
+    /// Show hotspot files (high churn × high complexity)
+    Hotspots {
+        /// Number of commits to analyse
+        #[arg(long, default_value = "500")]
+        commits: usize,
+        /// Number of results to show
+        #[arg(long, default_value = "15")]
+        top: usize,
+    },
+    /// Find dead code candidates (unreachable in dependency graph)
+    Dead,
+    /// Export dependency graph as a diagram
+    Diagram {
+        /// Output format: mermaid or dot
+        #[arg(long, default_value = "mermaid")]
+        format: String,
+        /// Write output to file instead of stdout
+        #[arg(short = 'o', long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Maximum nodes to include (trims least-connected)
+        #[arg(long, default_value = "60")]
+        max_nodes: usize,
+    },
+    /// Generate llms.txt index for this project
+    Llmstxt {
+        /// Write to file instead of stdout
+        #[arg(short = 'o', long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Generate CLAUDE.md architecture guide
+    Claudemd {
+        /// Write to file instead of stdout
+        #[arg(short = 'o', long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Show semantic diff (function-level) between two commits
+    Semidiff {
+        #[arg(value_name = "COMMIT1")]
+        commit1: String,
+        #[arg(value_name = "COMMIT2", default_value = "HEAD")]
+        commit2: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -217,7 +293,8 @@ enum AgentCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
-    let target: OutputTarget = cli.target.into();
+    // Resolve target: CLI flag > per-repo .cartographer/config.toml > global config > claude
+    let target = resolve_target(cli.target, &cwd);
     let ignore_set: HashSet<String> = cli.ignore_files.into_iter().collect();
 
     match cli.command {
@@ -246,8 +323,7 @@ fn main() -> Result<()> {
             if cloud {
                 init_cloud_mode(&root, project.as_deref())
             } else {
-                println!("Use --cloud flag to initialize UC sync");
-                Ok(())
+                init_local_mode(&root)
             }
         }
         Some(Commands::Push) => {
@@ -318,6 +394,58 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, cli.path)?;
             evolution_mode(&root, days)
         }
+        Some(Commands::Deps { target, format }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            deps_mode(&root, &target, &format)
+        }
+        Some(Commands::Serve) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            mcp_serve_mode(&root)
+        }
+        Some(Commands::Status) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            status_mode(&root)
+        }
+        Some(Commands::Config {
+            api_key,
+            default_target,
+            show,
+        }) => config_mode(api_key, default_target, show),
+        Some(Commands::Cochange {
+            commits,
+            min_count,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            cochange_mode(&root, commits, min_count)
+        }
+        Some(Commands::Hotspots { commits, top }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            hotspots_mode(&root, commits, top)
+        }
+        Some(Commands::Dead) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            dead_mode(&root)
+        }
+        Some(Commands::Diagram {
+            format,
+            output,
+            max_nodes,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            diagram_mode(&root, &format, output.as_deref(), max_nodes)
+        }
+        Some(Commands::Llmstxt { output }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            llmstxt_mode(&root, output.as_deref())
+        }
+        Some(Commands::Claudemd { output }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            claudemd_mode(&root, output.as_deref())
+        }
+        Some(Commands::Semidiff { commit1, commit2 }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            semidiff_mode(&root, &commit1, &commit2)
+        }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
             source_mode(&root, &cwd, target, cli.copy, &ignore_set)
@@ -350,7 +478,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
     println!("============================================");
     println!("  Mode: Skeleton Map ONLY (lightweight)");
     println!("  Debounce: {}ms", WATCH_DEBOUNCE_MS);
-    println!("  Full source: Use 'cmp copy' when needed");
+    println!("  Full source: Use 'cartographer copy' when needed");
     println!("============================================");
     println!("Press Ctrl+C to stop\n");
 
@@ -361,11 +489,11 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
 
     // Write lightweight map file
     let formatter = get_formatter(target);
-    let map_filename = format!("cmp_map.{}", formatter.extension());
+    let map_filename = format!("cartographer_map.{}", formatter.extension());
     let map_path = output_dir.join(&map_filename);
     fs::write(&map_path, &output)?;
 
-    print_cmp_report(mapped_files.len(), &ignored);
+    print_cartographer_report(mapped_files.len(), &ignored);
     println!("Map: {} | {}", map_filename, format_token_count(tokens));
     println!("Watching for changes...\n");
 
@@ -381,7 +509,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                 let relevant = events.iter().any(|e| {
                     e.kind == DebouncedEventKind::Any
                         && !e.path.ends_with(&map_filename)
-                        && !e.path.ends_with(".cmp_memory.json")
+                        && !e.path.ends_with(".cartographer_memory.json")
                         && !e.path.ends_with("context.xml")
                         && !e.path.ends_with("context.md")
                         && !e.path.ends_with("context.json")
@@ -466,7 +594,7 @@ fn copy_mode(root: &Path, target: OutputTarget, ignore_set: &HashSet<String>) ->
         });
     }
 
-    print_cmp_report(memory.files.len(), &ignored);
+    print_cartographer_report(memory.files.len(), &ignored);
 
     // Generate output to memory only (NOT to disk)
     let formatter = get_formatter(target);
@@ -487,7 +615,7 @@ fn copy_mode(root: &Path, target: OutputTarget, ignore_set: &HashSet<String>) ->
             format_token_count(tokens),
             estimate_cost(tokens)
         );
-        println!("Recommend using `cmp map` first or targeting a specific folder.\n");
+        println!("Recommend using `cartographer map` first or targeting a specific folder.\n");
         print!("[?] Copy to clipboard anyway? (y/N) ");
         io::stdout().flush()?;
         let mut input = String::new();
@@ -531,13 +659,13 @@ fn map_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) ->
     println!("MAP MODE: Scanning {}...", root.display());
 
     let (mapped_files, ignored) = generate_skeleton_map(root)?;
-    print_cmp_report(mapped_files.len(), &ignored);
+    print_cartographer_report(mapped_files.len(), &ignored);
 
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
     let formatter = get_formatter(target);
-    let filename = format!("cmp_map.{}", formatter.extension());
+    let filename = format!("cartographer_map.{}", formatter.extension());
     fs::write(output_dir.join(&filename), &output)?;
 
     println!(
@@ -576,7 +704,7 @@ fn source_mode(
         println!("User-ignored {} file(s)", ignore_set.len());
     }
 
-    print_cmp_report(memory.files.len(), &ignored);
+    print_cartographer_report(memory.files.len(), &ignored);
     let memory = handle_ignored_consent(&service, memory, &ignored)?;
     memory.save(output_dir)?;
     let output = write_output(output_dir, &memory, target)?;
@@ -603,7 +731,7 @@ fn sync_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) -
     let memory = result.memory;
     let ignored = result.ignored_noise;
 
-    print_cmp_report(memory.files.len(), &ignored);
+    print_cartographer_report(memory.files.len(), &ignored);
     let memory = handle_ignored_consent(&service, memory, &ignored)?;
     memory.save(output_dir)?;
     let output = write_output(output_dir, &memory, target)?;
@@ -663,7 +791,7 @@ fn format_map_json(files: &[MappedFile]) -> String {
 // CMP Report
 // =============================================================================
 
-fn print_cmp_report(included_count: usize, ignored: &[IgnoredFile]) {
+fn print_cartographer_report(included_count: usize, ignored: &[IgnoredFile]) {
     println!();
     println!("CMP REPORT:");
     println!("============================================");
@@ -707,7 +835,7 @@ fn handle_token_budget_copy(content: &str, tokens: usize, auto_copy: bool) -> Re
             format_token_count(tokens),
             estimate_cost(tokens)
         );
-        println!("Recommend using `cmp map` first or targeting a specific folder.\n");
+        println!("Recommend using `cartographer map` first or targeting a specific folder.\n");
         print!("[?] Proceed with copy? (y/N) ");
         io::stdout().flush()?;
         let mut input = String::new();
@@ -841,13 +969,59 @@ fn handle_ignored_consent(
 // UC CLOUD SYNC MODES
 // =============================================================================
 
+// =============================================================================
+// TARGET RESOLUTION
+// =============================================================================
+
+/// Per-repo config subset — only the [defaults] section we care about.
+#[derive(serde::Deserialize, Default)]
+struct RepoConfigFile {
+    #[serde(default)]
+    defaults: RepoDefaults,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RepoDefaults {
+    target: Option<String>,
+}
+
+/// Resolve output target: CLI flag > per-repo config > global config > claude.
+fn resolve_target(cli_target: Option<Target>, cwd: &Path) -> OutputTarget {
+    if let Some(t) = cli_target {
+        return t.into();
+    }
+    // Per-repo config
+    let repo_cfg_path = cwd.join(".cartographer").join("config.toml");
+    if let Ok(content) = fs::read_to_string(repo_cfg_path) {
+        if let Ok(cfg) = toml::from_str::<RepoConfigFile>(&content) {
+            if let Some(ref t) = cfg.defaults.target {
+                if let Ok(ot) = t.parse::<OutputTarget>() {
+                    return ot;
+                }
+            }
+        }
+    }
+    // Global config
+    let global = global_config::GlobalConfig::load();
+    if let Some(ref t) = global.defaults.target {
+        if let Ok(ot) = t.parse::<OutputTarget>() {
+            return ot;
+        }
+    }
+    OutputTarget::Claude
+}
+
+// =============================================================================
+// UC CLOUD SYNC MODES
+// =============================================================================
+
 fn get_uc_api_key() -> Result<String> {
-    // Try environment variable first
+    // 1. Environment variable
     if let Ok(key) = std::env::var("ULTRA_CONTEXT") {
         return Ok(key);
     }
 
-    // Try .env.local in current directory
+    // 2. .env.local in current directory
     if let Ok(content) = fs::read_to_string(".env.local") {
         for line in content.lines() {
             if line.starts_with("ULTRA_CONTEXT=") {
@@ -858,18 +1032,257 @@ fn get_uc_api_key() -> Result<String> {
         }
     }
 
-    // Try .env.local in parent directory
-    if let Ok(content) = fs::read_to_string("../.env.local") {
-        for line in content.lines() {
-            if line.starts_with("ULTRA_CONTEXT=") {
-                if let Some(key) = line.strip_prefix("ULTRA_CONTEXT=") {
-                    return Ok(key.trim().to_string());
-                }
-            }
+    // 3. Global config (~/.config/cartographer/config.toml)
+    let global = global_config::GlobalConfig::load();
+    if let Some(key) = global.api.key {
+        if !key.is_empty() {
+            return Ok(key);
         }
     }
 
-    anyhow::bail!("UC API key not found. Set ULTRA_CONTEXT env var or add to .env.local")
+    anyhow::bail!(
+        "UC API key not found.\n  Set ULTRA_CONTEXT env var, add to .env.local, or run:\n  cartographer config --api-key <key>"
+    )
+}
+
+fn init_local_mode(root: &Path) -> Result<()> {
+    let config_path = root.join(".cartographer").join("config.toml");
+    if config_path.exists() {
+        println!("Config already exists at: {}", config_path.display());
+        println!("Edit it directly or run 'cartographer init --cloud' to enable cloud sync.");
+        return Ok(());
+    }
+    let config_dir = config_path.parent().unwrap();
+    fs::create_dir_all(config_dir)?;
+
+    let project_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("my-project");
+
+    let config_content = format!(
+        r#"# Cartographer Configuration
+version = "1.0.0"
+project = "{}"
+
+[defaults]
+# Output target for this repo: claude, cursor, or raw
+# Overrides global config; --target flag overrides this.
+target = "claude"
+
+[layers]
+# Define your architectural layers here
+# ui = ["components", "pages", "hooks"]
+# services = ["api", "auth"]
+# db = ["models", "repositories"]
+
+[allowed_flows]
+# Define allowed dependency flows
+# ui -> services
+# services -> db
+"#,
+        project_name
+    );
+
+    fs::write(&config_path, config_content)?;
+    println!("Initialized .cartographer/config.toml");
+    println!("Project: {}", project_name);
+    println!();
+    println!("Next steps:");
+    println!("  cartographer source          — generate context");
+    println!("  cartographer init --cloud    — enable UC cloud sync");
+    println!("  Edit {} to configure layers and defaults", config_path.display());
+    Ok(())
+}
+
+fn status_mode(root: &Path) -> Result<()> {
+    println!("Cartographer Status");
+    println!("============================================");
+    println!("Root: {}", root.display());
+    println!();
+
+    // Local memory
+    let memory = Memory::load(root).unwrap_or_default();
+    if memory.files.is_empty() {
+        println!("Local memory: not initialized (run 'cartographer source')");
+    } else {
+        println!("Tracked files:  {}", memory.files.len());
+        println!("Memory version: {}", memory.version);
+        if memory.last_sync > 0 {
+            println!("Last scanned:   {}", format_timestamp(memory.last_sync));
+        }
+    }
+    println!();
+
+    // Cloud sync state
+    match uc_sync::UCConfig::load(root) {
+        Ok(config) => {
+            println!("Cloud context:  {}", config.context_id);
+            println!("Cloud version:  {}", config.last_version);
+            println!("Last pushed:    {}", format_timestamp(config.last_sync));
+
+            // Detect unpushed local changes
+            let mut unpushed = 0usize;
+            let mut new_local = 0usize;
+            for (path, entry) in &memory.files {
+                match config.file_hashes.get(path) {
+                    None => new_local += 1,
+                    Some(&h) if h != entry.hash => unpushed += 1,
+                    _ => {}
+                }
+            }
+            let deleted_remote = config
+                .file_hashes
+                .keys()
+                .filter(|k| !memory.files.contains_key(*k))
+                .count();
+
+            if unpushed == 0 && new_local == 0 && deleted_remote == 0 {
+                println!("Sync status:    up to date");
+            } else {
+                println!(
+                    "Sync status:    {} modified, {} new, {} deleted (not yet pushed)",
+                    unpushed, new_local, deleted_remote
+                );
+            }
+        }
+        Err(_) => {
+            println!("Cloud sync:     not configured (run 'cartographer init --cloud')");
+        }
+    }
+    println!();
+
+    // Global config
+    let global = global_config::GlobalConfig::load();
+    let key_status = if global.api.key.is_some() {
+        "configured"
+    } else {
+        "not set (run 'cartographer config --api-key <key>')"
+    };
+    println!("Global API key:  {}", key_status);
+    let target_status = global
+        .defaults
+        .target
+        .as_deref()
+        .unwrap_or("claude (default)");
+    println!("Global target:   {}", target_status);
+
+    // Per-repo config
+    let repo_cfg = root.join(".cartographer").join("config.toml");
+    if repo_cfg.exists() {
+        println!("Repo config:     {}", repo_cfg.display());
+    } else {
+        println!("Repo config:     not present (run 'cartographer init')");
+    }
+
+    // .cartographerignore
+    let ignore_path = root.join(".cartographerignore");
+    if ignore_path.exists() {
+        let pattern_count = fs::read_to_string(&ignore_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .count();
+        println!(".cartographerignore: {} pattern(s)", pattern_count);
+    } else {
+        println!(".cartographerignore: not present");
+    }
+
+    println!("============================================");
+    Ok(())
+}
+
+fn config_mode(
+    api_key: Option<String>,
+    default_target: Option<String>,
+    show: bool,
+) -> Result<()> {
+    if api_key.is_none() && default_target.is_none() && !show {
+        println!("Usage:");
+        println!("  cartographer config --show");
+        println!("  cartographer config --api-key <key>");
+        println!("  cartographer config --default-target <claude|cursor|raw>");
+        return Ok(());
+    }
+
+    if show {
+        let global = global_config::GlobalConfig::load();
+        let path = global_config::GlobalConfig::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".into());
+        println!("Global config: {}", path);
+        println!(
+            "  api.key:          {}",
+            global
+                .api
+                .key
+                .as_deref()
+                .map(|k| {
+                    // Show only last 4 chars for security
+                    if k.len() > 4 {
+                        format!("{}...{}", &k[..4], &k[k.len() - 4..])
+                    } else {
+                        "****".into()
+                    }
+                })
+                .unwrap_or_else(|| "(not set)".into())
+        );
+        println!(
+            "  defaults.target:  {}",
+            global.defaults.target.as_deref().unwrap_or("(not set, defaults to claude)")
+        );
+        return Ok(());
+    }
+
+    let mut global = global_config::GlobalConfig::load();
+    let mut changed = false;
+
+    if let Some(key) = api_key {
+        global.api.key = Some(key);
+        changed = true;
+        println!("API key saved.");
+    }
+    if let Some(t) = default_target {
+        // Validate
+        t.parse::<OutputTarget>()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        global.defaults.target = Some(t.clone());
+        changed = true;
+        println!("Default target set to '{}'.", t);
+    }
+
+    if changed {
+        global.save()?;
+        let path = global_config::GlobalConfig::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".into());
+        println!("Saved to {}", path);
+    }
+
+    Ok(())
+}
+
+fn format_timestamp(secs: u64) -> String {
+    if secs == 0 {
+        return "never".into();
+    }
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(secs);
+    match dt.elapsed() {
+        Ok(elapsed) => {
+            let s = elapsed.as_secs();
+            if s < 60 {
+                format!("{s}s ago")
+            } else if s < 3600 {
+                format!("{}m ago", s / 60)
+            } else if s < 86400 {
+                format!("{}h ago", s / 3600)
+            } else {
+                format!("{}d ago", s / 86400)
+            }
+        }
+        Err(_) => "unknown".into(),
+    }
 }
 
 fn init_cloud_mode(root: &Path, project_name: Option<&str>) -> Result<()> {
@@ -891,7 +1304,7 @@ fn push_mode(root: &Path) -> Result<()> {
     let service = UCSyncService::new(api_key, root)?;
 
     // Load local memory
-    let memory = Memory::load(root).context("No local memory found. Run 'cmp source' first.")?;
+    let memory = Memory::load(root).context("No local memory found. Run 'cartographer source' first.")?;
 
     // Track what changed for webhook notification
     let old_config = uc_sync::UCConfig::load(root).ok();
@@ -966,7 +1379,7 @@ fn pull_mode(root: &Path, version: Option<u32>) -> Result<()> {
 
     println!(
         "✓ Memory saved to {}",
-        root.join(".cmp_memory.json").display()
+        root.join(".cartographer_memory.json").display()
     );
     Ok(())
 }
@@ -1092,7 +1505,7 @@ fn optimize_mode(root: &Path) -> Result<()> {
 }
 
 fn export_mode(root: &Path, format: &str, output: Option<&Path>) -> Result<()> {
-    let memory = Memory::load(root).context("No local memory found. Run 'cmp source' first.")?;
+    let memory = Memory::load(root).context("No local memory found. Run 'cartographer source' first.")?;
     let config = uc_sync::UCConfig::load(root)?;
 
     let agent_context = AgentContext::from_memory(&memory, &config.context_id);
@@ -1114,13 +1527,13 @@ fn export_mode(root: &Path, format: &str, output: Option<&Path>) -> Result<()> {
 }
 
 fn notify_mode(root: &Path) -> Result<()> {
-    let memory = Memory::load(root).context("No local memory found. Run 'cmp source' first.")?;
+    let memory = Memory::load(root).context("No local memory found. Run 'cartographer source' first.")?;
     let config = uc_sync::UCConfig::load(root)?;
     let agent_service = AgentService::new(root);
 
     let agents = agent_service.list_agents()?;
     if agents.is_empty() {
-        println!("No agents configured. Use 'cmp agents add' to add one.");
+        println!("No agents configured. Use 'cartographer agents add' to add one.");
         return Ok(());
     }
 
@@ -1212,8 +1625,8 @@ events = ["graph_updated", "module_changed", "layer_violation"]
     println!();
     println!("📋 Next steps:");
     println!("  1. Add layer definitions to {}", config_path.display());
-    println!("  2. Run 'cmp map' to generate initial graph");
-    println!("  3. Run 'cmp health' to see architectural health");
+    println!("  2. Run 'cartographer map' to generate initial graph");
+    println!("  3. Run 'cartographer health' to see architectural health");
     println!();
     println!("🔗 CKB Integration:");
     println!("  - CKB URL: {}", ckb_url);
@@ -1295,7 +1708,7 @@ fn health_mode(root: &Path) -> Result<()> {
 
     if graph.metadata.health_score.unwrap_or(100.0) < 70.0 {
         println!("⚠️  Architectural health is below acceptable threshold.");
-        println!("   Run 'cmp map --detail extended' for more information.");
+        println!("   Run 'cartographer map --detail extended' for more information.");
     } else {
         println!("✅ Architecture looks healthy!");
     }
@@ -1460,5 +1873,854 @@ fn evolution_mode(root: &Path, days: Option<u32>) -> Result<()> {
         println!("   • {}", rec);
     }
 
+    Ok(())
+}
+
+// =============================================================================
+// DEPS MODE - Show dependencies of a target module as JSON
+// =============================================================================
+
+fn deps_mode(root: &Path, target: &str, _format: &str) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    // Populate project_graph so get_dependencies_internal can traverse edges
+    state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let nodes = state
+        .search_graph(target, None)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let node = nodes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Target not found: {}", target))?;
+
+    let deps = state
+        .get_dependencies_internal(&node.module_id, 1)
+        .map_err(|e| anyhow::anyhow!(e))?
+        .unwrap_or_default();
+
+    let output = serde_json::json!({
+        "node_id": node.module_id,
+        "node_name": node.path,
+        "dependencies": deps,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+// =============================================================================
+// GIT ENRICHMENT — Populate hotspot/cochange data on a ProjectGraphResponse.
+// Lives here (not in api.rs) because git_analysis is a binary-only module.
+// =============================================================================
+
+fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
+    let churn = crate::git_analysis::git_churn(root, 500);
+    if churn.is_empty() {
+        return;
+    }
+
+    let max_raw = graph
+        .nodes
+        .iter()
+        .map(|n| {
+            let c = *churn.get(&n.path).unwrap_or(&0);
+            c * n.signature_count
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+
+    let mut hotspot_count = 0usize;
+    for node in &mut graph.nodes {
+        let c = *churn.get(&node.path).unwrap_or(&0);
+        node.churn = Some(c);
+        let score = ((c * node.signature_count) as f64 / max_raw * 100.0).round();
+        node.hotspot_score = Some(score);
+        if score >= 20.0 {
+            hotspot_count += 1;
+        }
+    }
+    graph.metadata.hotspot_count = Some(hotspot_count);
+
+    let known: std::collections::HashSet<&str> =
+        graph.nodes.iter().map(|n| n.path.as_str()).collect();
+    graph.cochange_pairs = crate::git_analysis::git_cochange(root, 500)
+        .into_iter()
+        .filter(|p| known.contains(p.file_a.as_str()) && known.contains(p.file_b.as_str()))
+        .map(|p| crate::api::CoChangePair {
+            file_a: p.file_a,
+            file_b: p.file_b,
+            count: p.count,
+            coupling_score: p.coupling_score,
+        })
+        .collect();
+}
+
+// =============================================================================
+// COCHANGE MODE — Temporal coupling analysis from git history
+// =============================================================================
+
+fn cochange_mode(root: &Path, commits: usize, min_count: usize) -> Result<()> {
+    let pairs = crate::git_analysis::git_cochange(root, commits);
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Temporal Coupling Analysis                         ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Last {} commits", commits);
+    println!();
+
+    let mut filtered: Vec<_> = pairs.iter().filter(|p| p.count >= min_count).collect();
+    filtered.sort_by(|a, b| {
+        b.coupling_score
+            .partial_cmp(&a.coupling_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if filtered.is_empty() {
+        println!("No co-change pairs found with count >= {}.", min_count);
+        return Ok(());
+    }
+
+    for pair in &filtered {
+        println!(
+            "  {} ↔ {} | coupled {} times | score: {:.2}",
+            pair.file_a, pair.file_b, pair.count, pair.coupling_score
+        );
+    }
+
+    println!();
+    println!("Note: High coupling score with no import link = hidden dependency.");
+
+    Ok(())
+}
+
+// =============================================================================
+// HOTSPOTS MODE — High churn × high complexity files
+// =============================================================================
+
+fn hotspots_mode(root: &Path, commits: usize, top: usize) -> Result<()> {
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let churn = crate::git_analysis::git_churn(root, commits);
+
+    // Compute raw hotspot = churn * sig_count for each file
+    let mut scores: Vec<(String, usize, usize, f64)> = mapped_files
+        .iter()
+        .map(|(path, mf)| {
+            let c = *churn.get(path.as_str()).unwrap_or(&0);
+            let sigs = mf.signatures.len();
+            let raw = (c * sigs) as f64;
+            (path.clone(), c, sigs, raw)
+        })
+        .filter(|(_, c, sigs, _)| *c > 0 && *sigs > 0)
+        .collect();
+
+    // Normalize to 0–100
+    let max_raw = scores
+        .iter()
+        .map(|(_, _, _, r)| *r)
+        .fold(0.0_f64, f64::max);
+    if max_raw > 0.0 {
+        for s in &mut scores {
+            s.3 = (s.3 / max_raw) * 100.0;
+        }
+    }
+
+    scores.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Hotspot Analysis                                   ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Last {} commits  |  top {}", commits, top);
+    println!();
+
+    if scores.is_empty() {
+        println!("No hotspots found (no git history or no source files).");
+        return Ok(());
+    }
+
+    for (path, c, sigs, score) in scores.iter().take(top) {
+        let label = if *score > 80.0 {
+            "CRITICAL"
+        } else if *score > 50.0 {
+            "HIGH    "
+        } else if *score > 20.0 {
+            "MODERATE"
+        } else {
+            "LOW     "
+        };
+        println!(
+            "  [{}] {} | churn: {} commits | sigs: {} | hotspot: {:.1}",
+            label, path, c, sigs, score
+        );
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// DEAD MODE — Dead code candidates (unreachable in dependency graph)
+// =============================================================================
+
+fn dead_mode(root: &Path) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let dead: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.role.as_deref() == Some("dead"))
+        .collect();
+
+    let entry: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.role.as_deref() == Some("entry"))
+        .collect();
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Dead Code Candidates                               ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "Dead code count: {}  |  total files: {}",
+        graph.metadata.dead_code_count.unwrap_or(0),
+        graph.metadata.total_files
+    );
+    println!();
+
+    if dead.is_empty() {
+        println!("No dead code candidates found.");
+    } else {
+        println!("Unreachable (in_degree = 0, not entry pattern):");
+        for node in &dead {
+            println!("  - {} ({} symbols)", node.path, node.signature_count);
+        }
+    }
+
+    println!();
+    println!("Entry points (in_degree = 0, not imported but likely intentional):");
+    if entry.is_empty() {
+        println!("  (none detected)");
+    } else {
+        for node in &entry {
+            println!("  - {}", node.path);
+        }
+    }
+
+    println!();
+    println!("Note: Confidence is limited by static import analysis. Verify before deleting.");
+
+    Ok(())
+}
+
+// =============================================================================
+// DIAGRAM MODE — Export dependency graph as Mermaid or DOT
+// =============================================================================
+
+fn diagram_mode(root: &Path, format: &str, output: Option<&Path>, max_nodes: usize) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+    use std::collections::HashMap;
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    // Compute degree per node from edges
+    let mut degree: HashMap<&str, usize> = HashMap::new();
+    for edge in &graph.edges {
+        *degree.entry(edge.source.as_str()).or_insert(0) += 1;
+        *degree.entry(edge.target.as_str()).or_insert(0) += 1;
+    }
+
+    // Pick top max_nodes by degree; exclude zero-edge nodes
+    let mut ranked: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| degree.get(n.module_id.as_str()).copied().unwrap_or(0) > 0)
+        .collect();
+    ranked.sort_by(|a, b| {
+        let da = degree.get(a.module_id.as_str()).copied().unwrap_or(0);
+        let db = degree.get(b.module_id.as_str()).copied().unwrap_or(0);
+        db.cmp(&da)
+    });
+    ranked.truncate(max_nodes);
+
+    let included: std::collections::HashSet<&str> =
+        ranked.iter().map(|n| n.module_id.as_str()).collect();
+
+    let content = match format.to_lowercase().as_str() {
+        "dot" => {
+            let mut out = String::from("digraph cartographer {\n    rankdir=LR;\n");
+            for node in &ranked {
+                let label = node
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&node.path);
+                let color = match node.role.as_deref() {
+                    Some("core") => "#9cf",
+                    Some("bridge") => "#f96",
+                    Some("dead") => "#ccc",
+                    Some("entry") => "#9f9",
+                    _ => "#fff",
+                };
+                out.push_str(&format!(
+                    "    \"{}\" [label=\"{}\\n{} fn\" shape=box style=filled fillcolor=\"{}\"];\n",
+                    node.module_id, label, node.signature_count, color
+                ));
+            }
+            for edge in &graph.edges {
+                if included.contains(edge.source.as_str()) && included.contains(edge.target.as_str()) {
+                    out.push_str(&format!(
+                        "    \"{}\" -> \"{}\";\n",
+                        edge.source, edge.target
+                    ));
+                }
+            }
+            out.push('}');
+            out
+        }
+        _ => {
+            // mermaid (default)
+            let mut out = String::from("graph TD\n");
+            out.push_str("    classDef bridge fill:#f96,stroke:#333\n");
+            out.push_str("    classDef core fill:#9cf,stroke:#333\n");
+            out.push_str("    classDef dead fill:#ccc,stroke:#333\n");
+            out.push_str("    classDef entry fill:#9f9,stroke:#333\n");
+
+            // Build stable numeric IDs
+            let id_map: HashMap<&str, usize> = ranked
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.module_id.as_str(), i))
+                .collect();
+
+            for node in &ranked {
+                let i = id_map[node.module_id.as_str()];
+                let label = node
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&node.path);
+                let class_suffix = match node.role.as_deref() {
+                    Some("core") => ":::core",
+                    Some("bridge") => ":::bridge",
+                    Some("dead") => ":::dead",
+                    Some("entry") => ":::entry",
+                    _ => "",
+                };
+                out.push_str(&format!(
+                    "    N{}[\"{}\\n{} fn\"]{}\n",
+                    i, label, node.signature_count, class_suffix
+                ));
+            }
+
+            for edge in &graph.edges {
+                if included.contains(edge.source.as_str()) && included.contains(edge.target.as_str()) {
+                    if let (Some(&si), Some(&ti)) = (
+                        id_map.get(edge.source.as_str()),
+                        id_map.get(edge.target.as_str()),
+                    ) {
+                        out.push_str(&format!("    N{} --> N{}\n", si, ti));
+                    }
+                }
+            }
+            out
+        }
+    };
+
+    if let Some(out_path) = output {
+        fs::write(out_path, &content)?;
+        println!("Diagram written to: {}", out_path.display());
+    } else {
+        println!("{}", content);
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// LLMSTXT MODE — Generate llms.txt index for the project
+// =============================================================================
+
+fn llmstxt_mode(root: &Path, output: Option<&Path>) -> Result<()> {
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    // Detect project name
+    let project_name = detect_project_name(root);
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mut mapped: Vec<(String, crate::mapper::MappedFile)> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mf = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mf))
+        })
+        .collect();
+
+    // Sort: entry points first, then by signature count descending
+    mapped.sort_by(|(pa, ma), (pb, mb)| {
+        let ea = crate::api::is_entry_point_path(pa);
+        let eb = crate::api::is_entry_point_path(pb);
+        if ea != eb {
+            return eb.cmp(&ea); // entry points first
+        }
+        mb.signatures.len().cmp(&ma.signatures.len())
+    });
+
+    let total_files = mapped.len();
+    let mut content = format!(
+        "# {}\n\n> Codebase index generated by Cartographer. {} modules.\n\n## Key Modules\n\n",
+        project_name, total_files
+    );
+
+    for (rel, mf) in &mapped {
+        let sig_count = mf.signatures.len();
+        if sig_count == 0 {
+            continue;
+        }
+        let desc = if crate::api::is_entry_point_path(rel) {
+            format!("Entry point — {} symbols", sig_count)
+        } else {
+            format!("{} symbols", sig_count)
+        };
+        content.push_str(&format!("- [{}]({}): {}\n", rel, rel, desc));
+    }
+
+    content.push_str("\n## Ignored\n\n");
+    content.push_str("Built with [Cartographer](https://github.com/SimplyLiz/Cartographer) v1.3.0\n");
+
+    if let Some(out_path) = output {
+        fs::write(out_path, &content)?;
+        println!("llms.txt written to: {}", out_path.display());
+    } else {
+        print!("{}", content);
+    }
+
+    Ok(())
+}
+
+fn detect_project_name(root: &Path) -> String {
+    // Try Cargo.toml
+    let cargo = root.join("Cargo.toml");
+    if cargo.exists() {
+        if let Ok(text) = std::fs::read_to_string(&cargo) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with("name") {
+                    if let Some(val) = line.splitn(2, '=').nth(1) {
+                        let name = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                        if !name.is_empty() {
+                            return name;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Try package.json
+    let pkg = root.join("package.json");
+    if pkg.exists() {
+        if let Ok(text) = std::fs::read_to_string(&pkg) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(name) = v["name"].as_str() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    // Fall back to directory name
+    root.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project")
+        .to_string()
+}
+
+// =============================================================================
+// CLAUDEMD MODE — Generate CLAUDE.md architecture guide
+// =============================================================================
+
+fn claudemd_mode(root: &Path, output: Option<&Path>) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let project_name = detect_project_name(root);
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let mut graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+    enrich_with_git(&mut graph, root);
+
+    // Language summary: sort by count
+    let mut langs: Vec<(String, usize)> = graph.metadata.languages.iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    langs.sort_by(|a, b| b.1.cmp(&a.1));
+    let total_lang: usize = langs.iter().map(|(_, c)| c).sum();
+    let lang_str = langs
+        .iter()
+        .map(|(lang, count)| {
+            let pct = if total_lang > 0 { *count * 100 / total_lang } else { 0 };
+            format!("{} ({}%)", lang, pct)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut doc = format!(
+        "# Architecture Guide — {}\n\
+         <!-- Auto-generated by Cartographer v1.3.0. Re-run: cartographer claudemd -->\n\n\
+         ## Overview\n\
+         - **Files**: {} | **Dependencies**: {} | **Health**: {:.0}/100\n\
+         - **Languages**: {}\n\n",
+        project_name,
+        graph.metadata.total_files,
+        graph.metadata.total_edges,
+        graph.metadata.health_score.unwrap_or(0.0),
+        lang_str
+    );
+
+    // Entry points
+    let entries: Vec<_> = graph.nodes.iter()
+        .filter(|n| n.role.as_deref() == Some("entry"))
+        .collect();
+    if !entries.is_empty() {
+        doc.push_str("## Key Entry Points\n");
+        for n in &entries {
+            doc.push_str(&format!("- `{}` — {} symbols\n", n.path, n.signature_count));
+        }
+        doc.push('\n');
+    }
+
+    // Core modules (most-depended-upon)
+    let mut core_nodes: Vec<_> = graph.nodes.iter()
+        .filter(|n| n.role.as_deref() == Some("core"))
+        .collect();
+    core_nodes.sort_by(|a, b| b.signature_count.cmp(&a.signature_count));
+    if !core_nodes.is_empty() {
+        doc.push_str("## Core Modules (most-depended-upon)\n");
+        for n in core_nodes.iter().take(10) {
+            doc.push_str(&format!(
+                "- `{}` — {} symbols, role: core\n",
+                n.path, n.signature_count
+            ));
+        }
+        doc.push('\n');
+    }
+
+    // Hotspots
+    let mut hotspot_nodes: Vec<_> = graph.nodes.iter()
+        .filter(|n| n.hotspot_score.map(|s| s > 20.0).unwrap_or(false))
+        .collect();
+    hotspot_nodes.sort_by(|a, b| {
+        b.hotspot_score.unwrap_or(0.0)
+            .partial_cmp(&a.hotspot_score.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if !hotspot_nodes.is_empty() {
+        doc.push_str("## Hotspots\n");
+        for n in hotspot_nodes.iter().take(5) {
+            doc.push_str(&format!(
+                "- `{}` — changed {}x, {} symbols (hotspot: {:.0})\n",
+                n.path,
+                n.churn.unwrap_or(0),
+                n.signature_count,
+                n.hotspot_score.unwrap_or(0.0)
+            ));
+        }
+        doc.push('\n');
+    }
+
+    // Architectural issues
+    let has_cycles = !graph.cycles.is_empty();
+    let cochange_issues: Vec<_> = graph.cochange_pairs.iter()
+        .filter(|p| p.coupling_score >= 0.7)
+        .collect();
+
+    if has_cycles || !cochange_issues.is_empty() {
+        doc.push_str("## Architectural Issues\n");
+        if has_cycles {
+            doc.push_str("### Circular Dependencies\n");
+            for cycle in graph.cycles.iter().take(5) {
+                doc.push_str(&format!(
+                    "- {} ({})\n",
+                    cycle.nodes.join(" → "),
+                    cycle.severity
+                ));
+            }
+            doc.push('\n');
+        }
+        if !cochange_issues.is_empty() {
+            doc.push_str("### Hidden Coupling (no import, always co-change)\n");
+            for pair in cochange_issues.iter().take(5) {
+                doc.push_str(&format!(
+                    "- `{}` ↔ `{}` — coupled {} times (score: {:.2})\n",
+                    pair.file_a, pair.file_b, pair.count, pair.coupling_score
+                ));
+            }
+            doc.push('\n');
+        }
+    }
+
+    // Quick reference
+    doc.push_str("## Quick Reference\n```\n\
+        cartographer serve       # Start MCP server\n\
+        cartographer health      # Health report\n\
+        cartographer hotspots    # Churn × complexity\n\
+        cartographer dead        # Dead code candidates\n\
+        cartographer semidiff HEAD~1  # What changed last commit\n\
+        ```\n");
+
+    if let Some(out_path) = output {
+        fs::write(out_path, &doc)?;
+        println!("CLAUDE.md written to: {}", out_path.display());
+    } else {
+        print!("{}", doc);
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// SEMIDIFF MODE — Semantic (function-level) diff between two commits
+// =============================================================================
+
+fn semidiff_mode(root: &Path, commit1: &str, commit2: &str) -> Result<()> {
+    use crate::mapper::extract_skeleton;
+
+    let changed = crate::git_analysis::git_diff_files(root, commit1, commit2);
+
+    if changed.is_empty() {
+        println!("No files changed between {} and {}.", commit1, commit2);
+        return Ok(());
+    }
+
+    println!("Semantic diff: {} → {}", commit1, commit2);
+    println!();
+
+    for (path, status) in &changed {
+        let status_label = match status {
+            'A' => "added",
+            'D' => "deleted",
+            _ => "modified",
+        };
+        println!("{} ({})", path, status_label);
+
+        let fake_path = std::path::Path::new(path);
+
+        let before_sigs: Vec<String> = if *status != 'A' {
+            crate::git_analysis::git_show_file(root, commit1, path)
+                .map(|content| {
+                    let mf = extract_skeleton(fake_path, &content);
+                    mf.signatures.into_iter().map(|s| s.raw).collect()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let after_sigs: Vec<String> = if *status != 'D' {
+            crate::git_analysis::git_show_file(root, commit2, path)
+                .map(|content| {
+                    let mf = extract_skeleton(fake_path, &content);
+                    mf.signatures.into_iter().map(|s| s.raw).collect()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let before_set: std::collections::HashSet<&str> =
+            before_sigs.iter().map(|s| s.as_str()).collect();
+        let after_set: std::collections::HashSet<&str> =
+            after_sigs.iter().map(|s| s.as_str()).collect();
+
+        let mut any = false;
+        for sig in &after_sigs {
+            if !before_set.contains(sig.as_str()) {
+                println!("  + {}", sig);
+                any = true;
+            }
+        }
+        for sig in &before_sigs {
+            if !after_set.contains(sig.as_str()) {
+                println!("  - {}", sig);
+                any = true;
+            }
+        }
+        if !any {
+            println!("  (no signature changes)");
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// MCP SERVE MODE - Start MCP server with stdio JSON-RPC transport
+// =============================================================================
+
+fn mcp_serve_mode(root: &Path) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::mcp::McpServer;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+    use std::sync::Arc;
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = Arc::new(ApiState::new(root.to_path_buf()));
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    // Pre-populate graph so dependency tools work from first call
+    state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let server = McpServer::new(state);
+    server.serve();
     Ok(())
 }

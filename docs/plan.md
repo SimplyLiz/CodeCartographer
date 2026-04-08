@@ -83,7 +83,7 @@ Position Project Cartographer as the "golden source" for public API surface defi
 
 | File | Description |
 |------|-------------|
-| `mapper-core/cmp/src/api.rs` | HTTP API service with graph querying, compression levels |
-| `mapper-core/cmp/src/mcp.rs` | Model Context Protocol server implementation |
-| `mapper-core/cmp/src/webhooks.rs` | Webhook notifications for graph updates |
+| `mapper-core/cartographer/src/api.rs` | HTTP API service with graph querying, compression levels |
+| `mapper-core/cartographer/src/mcp.rs` | Model Context Protocol server implementation |
+| `mapper-core/cartographer/src/webhooks.rs` | Webhook notifications for graph updates |
 | `docs/api/openapi.yaml` | OpenAPI 3.0 specification for HTTP API |

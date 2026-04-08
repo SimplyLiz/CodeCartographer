@@ -115,11 +115,11 @@ def example_usage():
     # Load context ID from CMP config
     import json
     try:
-        with open(".cmp_uc_config.json") as f:
+        with open(".cartographer_uc_config.json") as f:
             config = json.load(f)
             context_id = config["context_id"]
     except FileNotFoundError:
-        print("❌ No .cmp_uc_config.json found. Run 'cmp init --cloud' first.")
+        print("❌ No .cartographer_uc_config.json found. Run 'cartographer init --cloud' first.")
         return
     
     # Create agent

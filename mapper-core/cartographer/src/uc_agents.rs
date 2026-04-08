@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const AGENTS_CONFIG_FILE: &str = ".cmp_agents.json";
+const AGENTS_CONFIG_FILE: &str = ".cartographer_agents.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -174,7 +174,7 @@ impl AgentService {
         let agents = self.list_agents()?;
 
         if agents.is_empty() {
-            println!("No agents configured. Use 'cmp agents add' to add one.");
+            println!("No agents configured. Use 'cartographer agents add' to add one.");
             return Ok(());
         }
 

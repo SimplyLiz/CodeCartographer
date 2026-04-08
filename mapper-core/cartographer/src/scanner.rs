@@ -146,10 +146,10 @@ pub const IGNORED_FILES: &[&str] = &[
     "context.xml",
     "context.json",
     "context.md",
-    "cmp_map.xml",
-    "cmp_map.md",
-    "cmp_map.json",
-    ".cmp_memory.json",
+    "cartographer_map.xml",
+    "cartographer_map.md",
+    "cartographer_map.json",
+    ".cartographer_memory.json",
 ];
 
 // Patterns for extension-based blocking
@@ -165,6 +165,107 @@ pub const BLOCKED_PATTERNS: &[&str] = &[
     "credentials",
 ];
 
+// =============================================================================
+// .cartographerignore support
+// =============================================================================
+
+/// A compiled pattern from .cartographerignore
+pub struct CartographerIgnorePattern {
+    pub negate: bool,
+    filename_only: bool,
+    regex: regex::Regex,
+}
+
+impl CartographerIgnorePattern {
+    fn parse(line: &str) -> Option<Self> {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (negate, pattern) = if let Some(rest) = line.strip_prefix('!') {
+            (true, rest)
+        } else {
+            (false, line)
+        };
+        // No '/' in pattern (ignoring trailing slash) → match filename only
+        let filename_only = !pattern.trim_end_matches('/').contains('/');
+        let pattern = pattern.trim_end_matches('/');
+        let regex = glob_to_regex(pattern)?;
+        Some(Self {
+            negate,
+            filename_only,
+            regex,
+        })
+    }
+
+    fn matches(&self, rel_path: &str) -> bool {
+        if self.filename_only {
+            let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+            self.regex.is_match(name)
+        } else {
+            self.regex.is_match(rel_path)
+        }
+    }
+}
+
+fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
+    let mut out = String::from("^");
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
+                out.push_str(".*");
+                i += 2;
+                if i < chars.len() && chars[i] == '/' {
+                    i += 1;
+                }
+            }
+            '*' => {
+                out.push_str("[^/]*");
+                i += 1;
+            }
+            '?' => {
+                out.push_str("[^/]");
+                i += 1;
+            }
+            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\' => {
+                out.push('\\');
+                out.push(chars[i]);
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out.push('$');
+    regex::Regex::new(&out).ok()
+}
+
+/// Load .cartographerignore from the repo root.
+pub fn load_cartographer_ignore(root: &Path) -> Vec<CartographerIgnorePattern> {
+    let path = root.join(".cartographerignore");
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(CartographerIgnorePattern::parse)
+        .collect()
+}
+
+fn is_cartographer_ignored(rel_path: &str, patterns: &[CartographerIgnorePattern]) -> bool {
+    let mut ignored = false;
+    for p in patterns {
+        if p.matches(rel_path) {
+            ignored = !p.negate;
+        }
+    }
+    ignored
+}
+
+// =============================================================================
+
 /// Legacy function for backward compatibility
 #[allow(dead_code)]
 pub fn scan_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -176,6 +277,7 @@ pub fn scan_files(root: &Path) -> Result<Vec<PathBuf>> {
 pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
     let ignored_dirs: HashSet<&str> = IGNORED_DIRS.iter().copied().collect();
     let ignored_files: HashSet<&str> = IGNORED_FILES.iter().copied().collect();
+    let ignore_patterns = load_cartographer_ignore(root);
 
     let mut result = ScanResult::default();
 
@@ -191,6 +293,16 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
 
         // Check security blocks first (these are never included, not even reported)
         if is_blocked_file(path, &ignored_files) {
+            continue;
+        }
+
+        // Check .cartographerignore patterns (user-defined, silently excluded)
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_cartographer_ignored(&rel, &ignore_patterns) {
             continue;
         }
 

@@ -4,7 +4,7 @@
 use crate::layers::{detect_layer_violations, LayerConfig, LayerViolation};
 use crate::mapper::{DetailLevel, MappedFile, Signature};
 use petgraph::algo;
-use petgraph::graphmap::UnGraphMap;
+use petgraph::graphmap::{DiGraphMap, UnGraphMap};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -76,6 +76,8 @@ pub struct ProjectGraphResponse {
     pub god_modules: Vec<GodModuleInfo>,
     pub layer_violations: Vec<LayerViolation>,
     pub metadata: GraphMetadata,
+    /// Temporal coupling pairs from git history (populated by enrich_with_git).
+    pub cochange_pairs: Vec<CoChangePair>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +91,14 @@ pub struct GraphNode {
     pub bridge_score: Option<f64>,
     pub degree: Option<usize>,
     pub risk_level: Option<String>,
+    /// Number of commits that touched this file (from git history).
+    pub churn: Option<usize>,
+    /// churn × signature_count, normalised 0–100.
+    pub hotspot_score: Option<f64>,
+    /// Architectural role: entry/core/utility/leaf/dead/bridge/standard.
+    pub role: Option<String>,
+    /// True when no other module imports this file and it is not an entry point.
+    pub is_dead: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +106,14 @@ pub struct GraphEdge {
     pub source: String,
     pub target: String,
     pub edge_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoChangePair {
+    pub file_a: String,
+    pub file_b: String,
+    pub count: usize,
+    pub coupling_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +128,8 @@ pub struct GraphMetadata {
     pub health_score: Option<f64>,
     pub layer_violation_count: Option<usize>,
     pub architectural_drift: Option<f64>,
+    pub hotspot_count: Option<usize>,
+    pub dead_code_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +419,10 @@ impl ApiState {
                 bridge_score: None,
                 degree: None,
                 risk_level: None,
+                churn: None,
+                hotspot_score: None,
+                role: None,
+                is_dead: None,
             });
 
             for import in &file.imports {
@@ -447,6 +471,53 @@ impl ApiState {
             nodes.len(),
         );
 
+        // --- Role classification and dead-code detection ---
+        // Compute per-node in/out degree from the edge list.
+        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        let mut out_degree: HashMap<String, usize> = HashMap::new();
+        for node in &nodes {
+            in_degree.entry(node.module_id.clone()).or_insert(0);
+            out_degree.entry(node.module_id.clone()).or_insert(0);
+        }
+        for edge in &edges {
+            *out_degree.entry(edge.source.clone()).or_insert(0) += 1;
+            *in_degree.entry(edge.target.clone()).or_insert(0) += 1;
+        }
+
+        let mut dead_code_count = 0usize;
+
+        for node in &mut nodes {
+            let ind = *in_degree.get(&node.module_id).unwrap_or(&0);
+            let outd = *out_degree.get(&node.module_id).unwrap_or(&0);
+
+            let is_entry_name = is_entry_point_path(&node.path);
+            let is_test = is_test_path(&node.path);
+
+            // Role assignment (bridge takes priority over other roles).
+            node.role = Some(if node.is_bridge == Some(true) {
+                "bridge".to_string()
+            } else if ind == 0 && outd == 0 && !is_entry_name && !is_test {
+                "dead".to_string()
+            } else if ind == 0 && outd > 0 && !is_test {
+                "entry".to_string()
+            } else if ind >= 5 && outd >= 3 {
+                "core".to_string()
+            } else if ind >= 5 {
+                "utility".to_string()
+            } else if outd == 0 && ind > 0 {
+                "leaf".to_string()
+            } else {
+                "standard".to_string()
+            });
+
+            // Dead-code flag: in_degree == 0 AND not an entry point or test.
+            let dead = ind == 0 && !is_entry_name && !is_test;
+            node.is_dead = Some(dead);
+            if dead {
+                dead_code_count += 1;
+            }
+        }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -464,6 +535,8 @@ impl ApiState {
             health_score: Some(health_score),
             layer_violation_count: Some(layer_violation_count),
             architectural_drift: None,
+            hotspot_count: None, // filled by enrich_with_git
+            dead_code_count: Some(dead_code_count),
         };
 
         let response = ProjectGraphResponse {
@@ -473,6 +546,7 @@ impl ApiState {
             god_modules,
             layer_violations,
             metadata,
+            cochange_pairs: vec![],
         };
 
         let mut graph = self.project_graph.lock().map_err(|e| e.to_string())?;
@@ -480,6 +554,45 @@ impl ApiState {
 
         Ok(response)
     }
+
+}
+
+// ---------------------------------------------------------------------------
+// Role-classification helpers (free functions, not methods)
+// ---------------------------------------------------------------------------
+
+pub fn is_entry_point_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        name,
+        "main.rs"
+            | "main.py"
+            | "main.go"
+            | "main.ts"
+            | "main.js"
+            | "index.ts"
+            | "index.js"
+            | "index.tsx"
+            | "index.jsx"
+            | "app.rs"
+            | "app.py"
+            | "app.ts"
+            | "app.js"
+            | "server.ts"
+            | "server.js"
+            | "server.go"
+    )
+}
+
+fn is_test_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("_test.")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("/spec/")
+        || lower.ends_with("_test.go")
 }
 
 struct BridgeAnalysis {
@@ -524,8 +637,8 @@ impl ApiState {
             let degree = graph.edges(node_id).count();
             let is_hub = degree > hub_threshold;
 
-            let normalized_bc = bc / ((node_count - 1) as f64 * (node_count - 2) as f64);
-            let bridge_score = if is_hub { 0.0 } else { normalized_bc * 1000.0 };
+            // bc is already normalized by (n-1)*(n-2) inside compute_betweenness_centrality
+            let bridge_score = if is_hub { 0.0 } else { bc * 1000.0 };
 
             let is_bridge = !is_hub && bridge_score > 0.0;
 
@@ -569,7 +682,7 @@ impl ApiState {
             let mut predecessors: HashMap<&str, Vec<&str>> = HashMap::new();
             let mut sigma: HashMap<&str, f64> = HashMap::new();
             let mut distance: HashMap<&str, i32> = HashMap::new();
-            let mut queue: Vec<&str> = Vec::new();
+            let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
 
             for node in &nodes {
                 distance.insert(*node, -1);
@@ -578,16 +691,16 @@ impl ApiState {
 
             distance.insert(*src, 0);
             sigma.insert(*src, 1.0);
-            queue.push(*src);
+            queue.push_back(*src);
 
-            while let Some(v) = queue.pop() {
+            while let Some(v) = queue.pop_front() {
                 stack.push(v);
                 let v_dist = distance.get(v).copied().unwrap_or(0);
 
                 for w in graph.neighbors(v) {
                     if *distance.get(w).unwrap_or(&-1) == -1 {
                         distance.insert(w, v_dist + 1);
-                        queue.push(w);
+                        queue.push_back(w);
                     }
 
                     if *distance.get(w).unwrap_or(&0) == v_dist + 1 {
@@ -681,7 +794,7 @@ impl ApiState {
     }
 
     fn detect_cycles(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<CycleInfo> {
-        let mut graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+        let mut graph: DiGraphMap<&str, ()> = DiGraphMap::new();
 
         for node in nodes {
             graph.add_node(node.module_id.as_str());
@@ -895,7 +1008,7 @@ impl ApiState {
     }
 
     fn check_would_create_cycle(&self, edges: &[GraphEdge], target_module: &str) -> bool {
-        let mut graph: UnGraphMap<&str, ()> = UnGraphMap::new();
+        let mut graph: DiGraphMap<&str, ()> = DiGraphMap::new();
 
         for edge in edges {
             if edge.source != target_module && edge.target != target_module {
@@ -949,12 +1062,14 @@ impl ApiState {
                 .map(|(k, _)| k.clone()),
         }];
 
+        // Trend requires multiple snapshots; this reflects current state only.
+        // Historical tracking is not yet implemented, so `days` has no effect.
         let health_trend = if current_health >= 80.0 {
-            "Improving".to_string()
+            "Healthy".to_string()
         } else if current_health >= 60.0 {
-            "Stable".to_string()
+            "Moderate".to_string()
         } else {
-            "Declining".to_string()
+            "At Risk".to_string()
         };
 
         let mut debt_indicators = Vec::new();

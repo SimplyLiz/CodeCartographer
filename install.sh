@@ -21,7 +21,7 @@ echo ""
 
 # Build CMP
 echo "[2/4] Building CMP (this may take a few minutes)..."
-cd cmp
+cd mapper-core/cartographer
 cargo build --release
 cd ..
 echo "✓ Build successful"
@@ -32,9 +32,9 @@ echo "[3/4] Installing CMP..."
 mkdir -p ~/.local/bin
 
 # Copy binary
-cp cmp/target/release/cmp ~/.local/bin/
-chmod +x ~/.local/bin/cmp
-echo "✓ Binary copied to: ~/.local/bin/cmp"
+cp cartographer/target/release/cartographer ~/.local/bin/
+chmod +x ~/.local/bin/cartographer
+echo "✓ Binary copied to: ~/.local/bin/cartographer"
 echo ""
 
 # Add to PATH
@@ -65,8 +65,8 @@ echo ""
 # Test command
 echo "Testing installation..."
 export PATH="$HOME/.local/bin:$PATH"
-if cmp --version &> /dev/null; then
-    VERSION=$(cmp --version)
+if cartographer --version &> /dev/null; then
+    VERSION=$(cartographer --version)
     echo "✓ CMP is working: $VERSION"
 else
     echo "⚠️  Please restart your terminal for PATH changes to take effect"
@@ -78,9 +78,9 @@ echo "  1. Restart your terminal (if needed)"
 echo "  2. Set your UC API key:"
 echo "     echo 'ULTRA_CONTEXT=uc_live_your_key' > .env.local"
 echo "  3. Initialize your project:"
-echo "     cmp init --cloud --project my-project"
+echo "     cartographer init --cloud --project my-project"
 echo "  4. Start using CMP:"
-echo "     cmp source && cmp push"
+echo "     cartographer source && cartographer push"
 echo ""
 echo "Documentation: UC_INTEGRATION.md"
 echo "Quick Start: QUICKSTART.md"

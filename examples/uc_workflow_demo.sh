@@ -22,56 +22,56 @@ echo ""
 # Step 1: Initialize UC sync
 echo "Step 1: Initialize UC sync"
 echo "-------------------------------------------"
-cmp init --cloud --project demo-project
+cartographer init --cloud --project demo-project
 echo ""
 
 # Step 2: Scan codebase
 echo "Step 2: Scan codebase"
 echo "-------------------------------------------"
-cmp source
+cartographer source
 echo ""
 
 # Step 3: Push to UC
 echo "Step 3: Push to UC"
 echo "-------------------------------------------"
-cmp push
+cartographer push
 echo ""
 
 # Step 4: View history
 echo "Step 4: View version history"
 echo "-------------------------------------------"
-cmp history
+cartographer history
 echo ""
 
 # Step 5: Create a branch
 echo "Step 5: Create feature branch"
 echo "-------------------------------------------"
-cmp branch feature-demo
+cartographer branch feature-demo
 echo ""
 
 # Step 6: Add some agents
 echo "Step 6: Configure AI agents"
 echo "-------------------------------------------"
-cmp agents add cursor --type cursor
-cmp agents add claude --type claude
+cartographer agents add cursor --type cursor
+cartographer agents add claude --type claude
 echo ""
 
 # Step 7: List agents
 echo "Step 7: List configured agents"
 echo "-------------------------------------------"
-cmp agents list
+cartographer agents list
 echo ""
 
 # Step 8: View analytics
 echo "Step 8: View analytics dashboard"
 echo "-------------------------------------------"
-cmp analytics
+cartographer analytics
 echo ""
 
 # Step 9: Get optimization suggestions
 echo "Step 9: Get optimization suggestions"
 echo "-------------------------------------------"
-cmp optimize
+cartographer optimize
 echo ""
 
 echo "=========================================="
@@ -86,7 +86,7 @@ echo "  ✓ Accessible by configured agents"
 echo "  ✓ Tracked with analytics"
 echo ""
 echo "Next steps:"
-echo "  - Run 'cmp pull' on another machine"
-echo "  - Run 'cmp watch' for live updates"
-echo "  - Run 'cmp diff 0 1' to see changes"
+echo "  - Run 'cartographer pull' on another machine"
+echo "  - Run 'cartographer watch' for live updates"
+echo "  - Run 'cartographer diff 0 1' to see changes"
 echo ""

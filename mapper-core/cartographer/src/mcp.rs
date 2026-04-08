@@ -1,7 +1,7 @@
 // MCP Server - Exposes Project Cartographer via Model Context Protocol
 // This allows AI tools and agents to interact with Cartographer using MCP
 
-use crate::api::{ApiState, ModuleContextRequest, ProjectGraphResponse};
+use crate::api::{ApiState, ModuleContextRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,6 +38,7 @@ pub struct McpTool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpInputSchema {
+    #[serde(rename = "type")]
     pub type_: String,
     pub properties: HashMap<String, McpProperty>,
     pub required: Vec<String>,
@@ -45,6 +46,7 @@ pub struct McpInputSchema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpProperty {
+    #[serde(rename = "type")]
     pub type_: String,
     pub description: String,
 }
@@ -211,10 +213,22 @@ impl McpServer {
             McpTool {
                 name: "get_dependencies".to_string(),
                 description: "Get direct/transitive dependencies of a module".to_string(),
-                input_schema: mcinput!(
-                    "module_id" => "string" => "Module to get dependencies for",
-                    "depth" => "number" => "Dependency depth (default 1)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert(
+                            "module_id".to_string(),
+                            mcprop!("string", "Module to get dependencies for"),
+                        );
+                        props.insert(
+                            "depth".to_string(),
+                            mcprop!("number", "Dependency depth (default 1)"),
+                        );
+                        props
+                    },
+                    required: vec!["module_id".to_string()],
+                },
             },
             McpTool {
                 name: "get_dependents".to_string(),
@@ -594,6 +608,115 @@ impl McpServer {
                 })
             }
 
+            "get_symbol_context" => {
+                let args = call.arguments;
+                let module_id = args
+                    .get("module_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing module_id")?
+                    .to_string();
+                let symbol_name = args
+                    .get("symbol_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing symbol_name")?
+                    .to_string();
+                let detail_level = args
+                    .get("detail_level")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let request = ModuleContextRequest {
+                    module_id: module_id.clone(),
+                    depth: None,
+                    detail_level,
+                    include: None,
+                    format: None,
+                };
+
+                let mut response = self.api_state.get_module_context(&request)?;
+                response.signatures.retain(|sig| {
+                    sig.symbol_name.as_deref() == Some(symbol_name.as_str())
+                });
+
+                if response.signatures.is_empty() {
+                    return Err(format!(
+                        "Symbol '{}' not found in module '{}'",
+                        symbol_name, module_id
+                    ));
+                }
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&response).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            "get_blast_radius" => {
+                let args = call.arguments;
+                let target = args
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing target")?;
+                let max_related = args
+                    .get("max_related")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+
+                // Rebuild graph to ensure edges are populated
+                let graph = self.api_state.rebuild_graph()?;
+
+                let node = graph
+                    .nodes
+                    .iter()
+                    .find(|n| n.module_id == target || n.path.contains(target))
+                    .ok_or_else(|| format!("Target not found: {}", target))?;
+                let module_id = node.module_id.clone();
+
+                let deps = self
+                    .api_state
+                    .get_dependencies_internal(&module_id, 1)?
+                    .unwrap_or_default();
+
+                let dependents = self.api_state.get_dependents(&module_id)?;
+
+                let mut related: Vec<serde_json::Value> = Vec::new();
+                for dep in &deps {
+                    if related.len() >= max_related {
+                        break;
+                    }
+                    related.push(serde_json::json!({
+                        "module_id": dep.module_id,
+                        "path": dep.path,
+                        "relationship": "dependency"
+                    }));
+                }
+                for dep in &dependents {
+                    if related.len() >= max_related {
+                        break;
+                    }
+                    related.push(serde_json::json!({
+                        "module_id": dep.module_id,
+                        "path": dep.path,
+                        "relationship": "dependent"
+                    }));
+                }
+
+                let result = serde_json::json!({
+                    "target": target,
+                    "module_id": module_id,
+                    "related": related,
+                });
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
             _ => Err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -704,6 +827,171 @@ impl McpServer {
             _ => Err(format!("Unknown prompt: {}", name)),
         }
     }
+
+    /// Run the MCP server on stdio using JSON-RPC 2.0.
+    pub fn serve(&self) {
+        use std::io::{BufRead, Write};
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let response = self.handle_jsonrpc(&line);
+            if response.is_empty() {
+                continue; // notifications — no response
+            }
+            let mut out = stdout.lock();
+            let _ = writeln!(out, "{}", response);
+            let _ = out.flush();
+        }
+    }
+
+    fn handle_jsonrpc(&self, line: &str) -> String {
+        let msg: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                return jsonrpc_error(None, -32700, &format!("Parse error: {}", e));
+            }
+        };
+
+        let id = msg.get("id").cloned();
+        let method = msg
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let params = msg
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+
+        // Notifications have no id — do not send a response
+        if id.is_none() {
+            return String::new();
+        }
+
+        match method {
+            "initialize" => {
+                let result = serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {}
+                    },
+                    "serverInfo": self.get_server_info()
+                });
+                jsonrpc_ok(&id, result)
+            }
+
+            "tools/list" => {
+                let result = serde_json::json!({ "tools": self.list_tools() });
+                jsonrpc_ok(&id, result)
+            }
+
+            "tools/call" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                let call = McpToolCall { name, arguments };
+                match self.call_tool(call) {
+                    Ok(result) => jsonrpc_ok(
+                        &id,
+                        serde_json::to_value(result).unwrap_or_default(),
+                    ),
+                    Err(e) => jsonrpc_error(id.as_ref(), -32603, &e),
+                }
+            }
+
+            "resources/list" => {
+                let result = serde_json::json!({ "resources": self.list_resources() });
+                jsonrpc_ok(&id, result)
+            }
+
+            "resources/read" => {
+                let uri = params
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match self.get_resource(uri) {
+                    Ok(content) => jsonrpc_ok(
+                        &id,
+                        serde_json::json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": content
+                            }]
+                        }),
+                    ),
+                    Err(e) => jsonrpc_error(id.as_ref(), -32603, &e),
+                }
+            }
+
+            "prompts/list" => {
+                let result = serde_json::json!({ "prompts": self.list_prompts() });
+                jsonrpc_ok(&id, result)
+            }
+
+            "prompts/get" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments: HashMap<String, String> = params
+                    .get("arguments")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                match self.get_prompt(name, &arguments) {
+                    Ok(content) => jsonrpc_ok(
+                        &id,
+                        serde_json::json!({
+                            "description": name,
+                            "messages": [{
+                                "role": "user",
+                                "content": { "type": "text", "text": content }
+                            }]
+                        }),
+                    ),
+                    Err(e) => jsonrpc_error(id.as_ref(), -32603, &e),
+                }
+            }
+
+            _ => jsonrpc_error(
+                id.as_ref(),
+                -32601,
+                &format!("Method not found: {}", method),
+            ),
+        }
+    }
+}
+
+fn jsonrpc_ok(id: &Option<serde_json::Value>, result: serde_json::Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
+    .unwrap_or_default()
+}
+
+fn jsonrpc_error(id: Option<&serde_json::Value>, code: i32, message: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    }))
+    .unwrap_or_default()
 }
 
 #[cfg(test)]

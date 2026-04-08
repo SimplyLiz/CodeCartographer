@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const MEMORY_FILE: &str = ".cmp_memory.json";
+const MEMORY_FILE: &str = ".cartographer_memory.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -70,8 +70,11 @@ impl Memory {
 }
 
 pub fn hash_content(content: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
+    // FNV-1a: stable across processes and Rust versions (DefaultHasher is not)
+    let mut hash: u64 = 14695981039346656037;
+    for byte in content.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
 }

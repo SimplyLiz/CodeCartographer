@@ -6,8 +6,8 @@ This demonstrates how to receive context updates from CMP.
 Run this server and register it as an agent webhook:
 
     python webhook_server.py
-    cmp agents add my-bot -t custom --webhook http://localhost:8080/webhook
-    cmp push  # Will notify this webhook
+    cartographer agents add my-bot -t custom --webhook http://localhost:8080/webhook
+    cartographer push  # Will notify this webhook
 """
 
 from flask import Flask, request, jsonify
@@ -116,9 +116,9 @@ if __name__ == '__main__':
     print("  GET  /health   - Health check")
     print("  GET  /updates  - List received updates")
     print("\nTo register this webhook:")
-    print("  cmp agents add my-bot -t custom --webhook http://localhost:8080/webhook")
+    print("  cartographer agents add my-bot -t custom --webhook http://localhost:8080/webhook")
     print("\nTo test:")
-    print("  cmp push")
+    print("  cartographer push")
     print("="*60 + "\n")
     
     app.run(host='0.0.0.0', port=8080, debug=True)

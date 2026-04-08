@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const ANALYTICS_FILE: &str = ".cmp_analytics.json";
+const ANALYTICS_FILE: &str = ".cartographer_analytics.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileAccessLog {
@@ -193,7 +193,7 @@ impl ContextHealth {
 
         if self.health_score < 50 {
             println!("⚠️  Low health score detected!");
-            println!("Recommendation: Run 'cmp optimize' to remove unused files.\n");
+            println!("Recommendation: Run 'cartographer optimize' to remove unused files.\n");
         }
     }
 

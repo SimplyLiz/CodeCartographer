@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const UC_CONFIG_FILE: &str = ".cmp_uc_config.json";
+const UC_CONFIG_FILE: &str = ".cartographer_uc_config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UCConfig {
@@ -24,7 +24,7 @@ impl UCConfig {
             let data = fs::read_to_string(&path)?;
             Ok(serde_json::from_str(&data)?)
         } else {
-            anyhow::bail!("No UC config found. Run 'cmp init --cloud' first.")
+            anyhow::bail!("No UC config found. Run 'cartographer init --cloud' first.")
         }
     }
 
@@ -62,7 +62,7 @@ impl UCSyncService {
         metadata.insert("type".to_string(), serde_json::json!("project_metadata"));
         metadata.insert("project_name".to_string(), serde_json::json!(project_name));
         metadata.insert(
-            "cmp_version".to_string(),
+            "cartographer_version".to_string(),
             serde_json::json!(env!("CARGO_PKG_VERSION")),
         );
         metadata.insert(
@@ -277,12 +277,12 @@ impl UCSyncService {
         // Save branch config with different name
         let branch_config_path = self
             .root
-            .join(format!(".cmp_uc_config.{}.json", branch_name));
+            .join(format!(".cartographer_uc_config.{}.json", branch_name));
         let data = serde_json::to_string_pretty(&branch_config)?;
         fs::write(branch_config_path, data)?;
 
         println!("✓ Branch created: {}", new_ctx.id);
-        println!("✓ Config saved to .cmp_uc_config.{}.json", branch_name);
+        println!("✓ Config saved to .cartographer_uc_config.{}.json", branch_name);
 
         Ok(branch_config)
     }

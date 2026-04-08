@@ -70,7 +70,7 @@ impl LayerConfig {
                         let key = key.trim();
                         let folders: Vec<String> = value
                             .split(',')
-                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .map(|s| s.trim().trim_matches(|c| c == '"' || c == '[' || c == ']').to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
 
@@ -80,7 +80,7 @@ impl LayerConfig {
                     }
                 }
                 "allowed_flows" => {
-                    if let Some((from, to)) = line.split_once('-') {
+                    if let Some((from, to)) = line.split_once("->") {
                         let from = from.trim().to_string();
                         let to = to.trim().to_string();
 

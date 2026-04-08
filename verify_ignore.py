@@ -1,4 +1,5 @@
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -23,10 +24,10 @@ def setup():
         f.write("// This should be ignored\nexport const bloat = true;")
 
 def build():
-    print("Building cmp binary...")
+    print("Building cartographer binary...")
     result = subprocess.run(
         ["cargo", "build", "--release"],
-        cwd="cmp",
+        cwd="mapper-core/cartographer",
         capture_output=True,
         text=True
     )
@@ -36,10 +37,11 @@ def build():
     print("Build successful.")
 
 def execute():
-    print("Running cmp against test_env...")
-    binary = os.path.join("cmp", "target", "release", "cmp.exe")
-    if not os.path.exists(binary):
-        binary = os.path.join("cmp", "target", "release", "cmp")
+    print("Running cartographer against test_env...")
+    if platform.system() == "Windows":
+        binary = os.path.join("mapper-core", "cartographer", "target", "release", "cartographer.exe")
+    else:
+        binary = os.path.join("mapper-core", "cartographer", "target", "release", "cartographer")
     
     result = subprocess.run(
         [binary],

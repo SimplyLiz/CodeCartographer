@@ -78,30 +78,30 @@ Cartographer **provides on top**:
 | File | Description |
 |------|-------------|
 | `project_graph.json` | Full dependency graph at file level |
-| `cmp_map.{xml,md,json}` | Skeleton map (CLI output) |
-| `.cmp_memory.json` | Versioned memory (CMP core) |
+| `cartographer_map.{xml,md,json}` | Skeleton map (CLI output) |
+| `.cartographer_memory.json` | Versioned memory (Cartographer core) |
 
 ## CLI Commands
 
 ```bash
 # Generate skeleton map (one-shot)
-cmp map
+cartographer map
 
 # Live watching (auto-update map on file changes)
-cmp watch
+cartographer watch
 
 # Full source (legacy - for comparison)
-cmp source
+cartographer source
 
 # Push map to cloud
-cmp push
+cartographer push
 
 # Pull map from cloud
-cmp pull
+cartographer pull
 
 # Agent management
-cmp agents list
-cmp agents add --name "My Agent" --type cursor --webhook https://...
+cartographer agents list
+cartographer agents add --name "My Agent" --type cursor --webhook https://...
 ```
 
 ## Integration Points
