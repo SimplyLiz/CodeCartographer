@@ -95,6 +95,9 @@ enum Commands {
     Watch {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+        /// Auto-push to UC cloud after each detected change
+        #[arg(long)]
+        push: bool,
     },
     /// Copy full source to clipboard (ephemeral - no disk write)
     Copy {
@@ -251,6 +254,23 @@ enum Commands {
         #[arg(value_name = "COMMIT2", default_value = "HEAD")]
         commit2: String,
     },
+    /// CI gate: exit non-zero if cycles or layer violations are found
+    Check,
+    /// Ranked skeleton context pruned to a token budget (personalized PageRank)
+    Context {
+        /// Focus files for personalization (repeatable)
+        #[arg(long = "focus", value_name = "FILE")]
+        focus: Vec<String>,
+        /// Maximum tokens to include (0 = unlimited)
+        #[arg(long, default_value = "8000")]
+        budget: usize,
+    },
+    /// Show symbol-level analysis (unreferenced public exports)
+    Symbols {
+        /// Show only unreferenced public exports
+        #[arg(long)]
+        unreferenced: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -306,9 +326,9 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, path.or(cli.path.clone()))?;
             source_mode(&root, &cwd, target, cli.copy, &ignore_set)
         }
-        Some(Commands::Watch { path }) => {
+        Some(Commands::Watch { path, push }) => {
             let root = resolve_path(&cwd, path.or(cli.path.clone()))?;
-            live_watch_mode(&root, &cwd, target)
+            live_watch_mode(&root, &cwd, target, push)
         }
         Some(Commands::Copy { path }) => {
             let root = resolve_path(&cwd, path.or(cli.path.clone()))?;
@@ -446,6 +466,18 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, cli.path)?;
             semidiff_mode(&root, &commit1, &commit2)
         }
+        Some(Commands::Check) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            check_mode(&root)
+        }
+        Some(Commands::Context { focus, budget }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            context_mode(&root, &focus, budget)
+        }
+        Some(Commands::Symbols { unreferenced }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            symbols_mode(&root, unreferenced)
+        }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
             source_mode(&root, &cwd, target, cli.copy, &ignore_set)
@@ -473,11 +505,47 @@ fn resolve_path(cwd: &Path, path: Option<PathBuf>) -> Result<PathBuf> {
 // LIVE WATCH MODE - Lightweight skeleton map only, NO full source to disk
 // =============================================================================
 
-fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Result<()> {
+/// Record per-file token costs and sync count into the analytics log.
+/// Non-fatal — analytics are best-effort.
+fn record_analytics(root: &Path, memory: &Memory) {
+    if let Ok(mut analytics) = uc_analytics::Analytics::load(root) {
+        for (path, entry) in &memory.files {
+            let tokens = entry.content.len() / 4;
+            analytics.record_file_access(path, tokens);
+        }
+        analytics.record_sync();
+        let _ = analytics.save(root);
+    }
+}
+
+/// After a watch-detected change, do an incremental sync + UC push.
+/// Errors are printed but never propagate — the watcher must keep running.
+fn watch_push(root: &Path) {
+    let existing = Memory::load(root).unwrap_or_default();
+    let service = SyncService::new(root);
+    match service.incremental_sync_with_noise(existing) {
+        Ok(result) => {
+            let memory = result.memory;
+            if memory.save(root).is_err() {
+                eprintln!("[{}] watch --push: failed to save memory", chrono_time());
+                return;
+            }
+            record_analytics(root, &memory);
+            match push_mode(root) {
+                Ok(_) => println!("[{}] Pushed to cloud", chrono_time()),
+                Err(e) => eprintln!("[{}] Push failed: {}", chrono_time(), e),
+            }
+        }
+        Err(e) => eprintln!("[{}] watch --push: sync error: {}", chrono_time(), e),
+    }
+}
+
+fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget, push: bool) -> Result<()> {
     println!("LIVE WATCHER: Monitoring {}...", root.display());
     println!("============================================");
     println!("  Mode: Skeleton Map ONLY (lightweight)");
     println!("  Debounce: {}ms", WATCH_DEBOUNCE_MS);
+    println!("  Auto-push: {}", if push { "enabled" } else { "disabled (use --push to enable)" });
     println!("  Full source: Use 'cartographer copy' when needed");
     println!("============================================");
     println!("Press Ctrl+C to stop\n");
@@ -517,7 +585,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                 });
 
                 if relevant {
-                    // Regenerate skeleton map only
+                    // Regenerate skeleton map
                     match generate_skeleton_map(root) {
                         Ok((files, _)) => {
                             let output = format_map_output(&files, target);
@@ -532,6 +600,9 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                             }
                         }
                         Err(e) => eprintln!("Error updating map: {}", e),
+                    }
+                    if push {
+                        watch_push(root);
                     }
                 }
             }
@@ -707,6 +778,7 @@ fn source_mode(
     print_cartographer_report(memory.files.len(), &ignored);
     let memory = handle_ignored_consent(&service, memory, &ignored)?;
     memory.save(output_dir)?;
+    record_analytics(root, &memory);
     let output = write_output(output_dir, &memory, target)?;
     let tokens = estimate_tokens(&output);
     println!(
@@ -734,6 +806,7 @@ fn sync_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) -
     print_cartographer_report(memory.files.len(), &ignored);
     let memory = handle_ignored_consent(&service, memory, &ignored)?;
     memory.save(output_dir)?;
+    record_analytics(root, &memory);
     let output = write_output(output_dir, &memory, target)?;
     let tokens = estimate_tokens(&output);
     println!(
@@ -1332,6 +1405,7 @@ fn push_mode(root: &Path) -> Result<()> {
 
     // Push to UC
     let config = service.push(&memory)?;
+    record_analytics(root, &memory);
 
     // Notify agents via webhooks
     let agent_service = AgentService::new(root);
@@ -2722,5 +2796,211 @@ fn mcp_serve_mode(root: &Path) -> Result<()> {
 
     let server = McpServer::new(state);
     server.serve();
+    Ok(())
+}
+
+// =============================================================================
+// CHECK MODE — CI gate: non-zero exit on cycles or layer violations
+// =============================================================================
+
+fn check_mode(root: &Path) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let cycle_count = graph.metadata.cycle_count.unwrap_or(0);
+    let violation_count = graph.metadata.layer_violation_count.unwrap_or(0);
+
+    let mut failed = false;
+
+    if cycle_count > 0 {
+        eprintln!("FAIL: {} circular dependenc{}", cycle_count, if cycle_count == 1 { "y" } else { "ies" });
+        for cycle in graph.cycles.iter().take(5) {
+            eprintln!("  {} ({})", cycle.nodes.join(" -> "), cycle.severity);
+        }
+        failed = true;
+    }
+
+    if violation_count > 0 {
+        eprintln!("FAIL: {} layer violation{}", violation_count, if violation_count == 1 { "" } else { "s" });
+        for v in graph.layer_violations.iter().take(5) {
+            eprintln!("  {} -> {} ({} -> {})", v.source_path, v.target_path, v.source_layer, v.target_layer);
+        }
+        failed = true;
+    }
+
+    if failed {
+        std::process::exit(1);
+    }
+
+    println!(
+        "OK: {} files, {} dependencies, health {:.0}/100",
+        graph.metadata.total_files,
+        graph.metadata.total_edges,
+        graph.metadata.health_score.unwrap_or(0.0)
+    );
+    Ok(())
+}
+
+// =============================================================================
+// CONTEXT MODE — Ranked skeleton pruned to token budget (personalized PageRank)
+// =============================================================================
+
+fn context_mode(root: &Path, focus: &[String], budget: usize) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let ranked = state.ranked_skeleton(focus, budget).map_err(|e| anyhow::anyhow!(e))?;
+
+    let total_tokens: usize = ranked.iter().map(|f| f.estimated_tokens).sum();
+
+    eprintln!(
+        "Ranked context: {} files, ~{} tokens (budget: {})",
+        ranked.len(),
+        total_tokens,
+        if budget == 0 { "unlimited".to_string() } else { budget.to_string() }
+    );
+    if !focus.is_empty() {
+        eprintln!("Focus: {}", focus.join(", "));
+    }
+    eprintln!();
+
+    for f in &ranked {
+        println!("// {} (rank: {:.4}, {} tokens)", f.path, f.rank, f.estimated_tokens);
+        for sig in &f.signatures {
+            println!("  {}", sig);
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// SYMBOLS MODE — Symbol-level analysis (unreferenced public exports)
+// =============================================================================
+
+fn symbols_mode(root: &Path, unreferenced_only: bool) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+
+    let result = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let unreferenced_count = graph.metadata.unreferenced_exports_count.unwrap_or(0);
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Symbol Analysis                                    ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Total files:         {}", graph.metadata.total_files);
+    println!("Unreferenced exports: {} (heuristic — verify before removing)", unreferenced_count);
+    println!();
+
+    let nodes_with_unref: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.unreferenced_exports
+                .as_ref()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if unreferenced_only || true {
+        if nodes_with_unref.is_empty() {
+            println!("No unreferenced public exports found.");
+        } else {
+            println!("Unreferenced public exports by file:");
+            for node in &nodes_with_unref {
+                if let Some(exports) = &node.unreferenced_exports {
+                    println!("  {}:", node.path);
+                    for sym in exports {
+                        println!("    - {}", sym);
+                    }
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("Note: Uses import-token heuristic. Does not account for dynamic dispatch,");
+    println!("reflection, or external consumers of library crates.");
+
     Ok(())
 }

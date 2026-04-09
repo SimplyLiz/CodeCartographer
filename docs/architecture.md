@@ -4,14 +4,17 @@
 
 Cartographer is a code intelligence tool that builds a **semantic map** of your codebase — not full source, but the shape (public APIs, imports, signatures, dependency graph) — and exposes it via CLI, MCP server, and a C FFI consumed by CKB.
 
-**v1.5.0 feature set:**
+**v1.6.0 feature set:**
 - Skeleton extraction (regex-based, 8+ languages, 90%+ token savings)
 - Full dependency graph with role classification, bridge detection, cycle detection, layer violation checking
-- Git history analysis: churn, temporal coupling (co-change), hotspot scoring
+- Git history analysis: churn, temporal coupling (co-change), hotspot scoring — bot and formatting commits filtered
 - Dead code detection (in-degree=0 nodes that are not entry points)
+- Unreferenced public export detection (import-token heuristic)
 - Semantic diff (function-level diff between any two commits)
 - Diagram export (Mermaid / Graphviz DOT)
 - `llms.txt` and `CLAUDE.md` generation for AI context
+- `cartographer check` — CI gate, exits non-zero on cycles or layer violations
+- Personalized PageRank skeleton (`cartographer context --focus <file> --budget N`)
 - MCP server (JSON-RPC 2.0 stdio) for Claude and other LLM integrations
 - Context compression via ContextCompressionEngine
 - C FFI (`libcartographer.a`) consumed by CKB via CGo
@@ -80,6 +83,9 @@ cartographer hotspots        # Churn × complexity (top N files)
 cartographer cochange        # Temporally coupled file pairs (hidden coupling)
 cartographer semidiff HEAD~1 # Function-level diff between two commits
 cartographer diagram         # Export graph as Mermaid or DOT
+cartographer check           # CI gate: non-zero exit on cycles/violations
+cartographer context --focus src/api.rs --budget 8000  # Ranked skeleton
+cartographer symbols --unreferenced  # Unreferenced public exports
 
 # AI context generation
 cartographer llmstxt         # Generate llms.txt index
@@ -118,6 +124,8 @@ Compiled as `libcartographer.a` (staticlib) + `rlib`. CKB loads via CGo.
 | `cartographer_git_churn(path, limit)` | path, commit limit (0=500) | `{ "file": count }` JSON |
 | `cartographer_git_cochange(path, limit, min_count)` | path, limit, min co-changes | `[{fileA,fileB,count,couplingScore}]` JSON |
 | `cartographer_semidiff(path, commit1, commit2)` | path, two commit refs | `[{path,status,added[],removed[]}]` JSON |
+| `cartographer_ranked_skeleton(path, focus_json, budget)` | path, focus files JSON array, token budget (0=unlimited) | `[{path,moduleId,rank,signatureCount,estimatedTokens,role,signatures}]` JSON |
+| `cartographer_unreferenced_symbols(path)` | path | `{totalCount, files:[{path,symbols}]}` JSON |
 
 ---
 

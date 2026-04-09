@@ -99,6 +99,8 @@ pub struct GraphNode {
     pub role: Option<String>,
     /// True when no other module imports this file and it is not an entry point.
     pub is_dead: Option<bool>,
+    /// Exported symbols not found in any other file's imports (heuristic).
+    pub unreferenced_exports: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +132,7 @@ pub struct GraphMetadata {
     pub architectural_drift: Option<f64>,
     pub hotspot_count: Option<usize>,
     pub dead_code_count: Option<usize>,
+    pub unreferenced_exports_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,6 +426,7 @@ impl ApiState {
                 hotspot_score: None,
                 role: None,
                 is_dead: None,
+                unreferenced_exports: None,
             });
 
             for import in &file.imports {
@@ -518,6 +522,54 @@ impl ApiState {
             }
         }
 
+        // --- Symbol reference analysis ---
+        // Build a set of all tokens from every file's import statements.
+        // A public symbol whose name does not appear in any import is a candidate
+        // unreferenced export.  This is a heuristic (false positives for very
+        // short or common names), but useful for flagging orphaned exports.
+        let import_tokens: std::collections::HashSet<String> = files
+            .values()
+            .flat_map(|mf| {
+                mf.imports.iter().flat_map(|imp| {
+                    imp.split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .filter(|s| s.len() >= 4)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let public_prefixes = ["pub ", "public ", "export ", "def ", "func ", "function "];
+
+        let mut unreferenced_exports_count = 0usize;
+        for node in &mut nodes {
+            if let Some(mf) = files.get(&node.module_id) {
+                let unreferenced: Vec<String> = mf
+                    .signatures
+                    .iter()
+                    .filter(|sig| {
+                        let is_public = public_prefixes
+                            .iter()
+                            .any(|pfx| sig.raw.starts_with(pfx));
+                        if !is_public {
+                            return false;
+                        }
+                        if let Some(name) = &sig.symbol_name {
+                            name.len() >= 4 && !import_tokens.contains(name.as_str())
+                        } else {
+                            false
+                        }
+                    })
+                    .filter_map(|sig| sig.symbol_name.clone())
+                    .collect();
+
+                unreferenced_exports_count += unreferenced.len();
+                if !unreferenced.is_empty() {
+                    node.unreferenced_exports = Some(unreferenced);
+                }
+            }
+        }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -537,6 +589,7 @@ impl ApiState {
             architectural_drift: None,
             hotspot_count: None, // filled by enrich_with_git
             dead_code_count: Some(dead_code_count),
+            unreferenced_exports_count: Some(unreferenced_exports_count),
         };
 
         let response = ProjectGraphResponse {
@@ -555,6 +608,161 @@ impl ApiState {
         Ok(response)
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// Ranked skeleton (personalized PageRank over dependency graph)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RankedFile {
+    pub path: String,
+    pub module_id: String,
+    /// PageRank score (normalized, higher = more relevant to the focus set).
+    pub rank: f64,
+    pub signature_count: usize,
+    /// Rough token estimate: 15 per signature + 5 per file.
+    pub estimated_tokens: usize,
+    pub role: Option<String>,
+    pub signatures: Vec<String>,
+}
+
+impl ApiState {
+    /// Return files ranked by personalized PageRank, pruned to `token_budget`
+    /// tokens (0 = return all).
+    ///
+    /// `focus` is a list of file paths (relative to root) that seed the
+    /// personalization vector.  When empty, standard PageRank is used.
+    pub fn ranked_skeleton(
+        &self,
+        focus: &[String],
+        token_budget: usize,
+    ) -> Result<Vec<RankedFile>, String> {
+        let graph = self
+            .project_graph
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            .ok_or("Graph not built — call rebuild_graph first")?;
+
+        let files = self.mapped_files.lock().map_err(|e| e.to_string())?;
+
+        let nodes = &graph.nodes;
+        let n = nodes.len();
+        if n == 0 {
+            return Ok(vec![]);
+        }
+
+        // Index nodes by module_id.
+        let idx: HashMap<&str, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.module_id.as_str(), i))
+            .collect();
+
+        // Build edge list as (src_idx, tgt_idx).
+        let edges: Vec<(usize, usize)> = graph
+            .edges
+            .iter()
+            .filter_map(|e| {
+                let s = idx.get(e.source.as_str())?;
+                let t = idx.get(e.target.as_str())?;
+                Some((*s, *t))
+            })
+            .collect();
+
+        // Personalization vector: focus files get equal weight; uniform fallback.
+        let focus_indices: Vec<usize> = focus
+            .iter()
+            .filter_map(|path| idx.get(path.as_str()).copied())
+            .collect();
+
+        let mut personalization = vec![0.0f64; n];
+        if focus_indices.is_empty() {
+            let uniform = 1.0 / n as f64;
+            for p in &mut personalization {
+                *p = uniform;
+            }
+        } else {
+            let w = 1.0 / focus_indices.len() as f64;
+            for &i in &focus_indices {
+                personalization[i] = w;
+            }
+        }
+
+        // Personalized PageRank — 30 power-iteration steps, damping = 0.85.
+        let mut rank = vec![1.0f64 / n as f64; n];
+        let mut new_rank = vec![0.0f64; n];
+        let damping = 0.85f64;
+
+        let mut in_edges: Vec<Vec<usize>> = vec![vec![]; n];
+        let mut out_degree = vec![0usize; n];
+        for &(s, t) in &edges {
+            in_edges[t].push(s);
+            out_degree[s] += 1;
+        }
+
+        for _ in 0..30 {
+            for i in 0..n {
+                let incoming: f64 = in_edges[i]
+                    .iter()
+                    .map(|&s| {
+                        if out_degree[s] > 0 {
+                            rank[s] / out_degree[s] as f64
+                        } else {
+                            0.0
+                        }
+                    })
+                    .sum();
+                new_rank[i] =
+                    (1.0 - damping) * personalization[i] + damping * incoming;
+            }
+            std::mem::swap(&mut rank, &mut new_rank);
+            let sum: f64 = rank.iter().sum();
+            if sum > 0.0 {
+                for r in &mut rank {
+                    *r /= sum;
+                }
+            }
+        }
+
+        // Sort by rank descending and collect into RankedFile, pruning to budget.
+        let mut ranked_idx: Vec<usize> = (0..n).collect();
+        ranked_idx.sort_by(|&a, &b| {
+            rank[b]
+                .partial_cmp(&rank[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut result = Vec::new();
+        let mut tokens_used = 0usize;
+
+        for i in ranked_idx {
+            let node = &nodes[i];
+            let sigs: Vec<String> = files
+                .get(&node.module_id)
+                .map(|mf| mf.signatures.iter().map(|s| s.raw.clone()).collect())
+                .unwrap_or_default();
+            let estimated = sigs.len() * 15 + 5;
+
+            if token_budget > 0 && tokens_used + estimated > token_budget {
+                break;
+            }
+            tokens_used += estimated;
+
+            result.push(RankedFile {
+                path: node.path.clone(),
+                module_id: node.module_id.clone(),
+                rank: rank[i],
+                signature_count: node.signature_count,
+                estimated_tokens: estimated,
+                role: node.role.clone(),
+                signatures: sigs,
+            });
+        }
+
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------

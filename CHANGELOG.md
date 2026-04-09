@@ -2,6 +2,19 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [1.6.0] - 2026-04-09
+
+### Added
+- **Bot-author filtering** in git history analysis — commits from bots (`[bot]`, `dependabot`, `renovate`, `github-actions`, `snyk-bot`, etc.) are excluded from churn and co-change metrics; eliminates the ~74% noise inflation documented in arXiv 2602.13170
+- **Formatting-commit filtering** — commits matching patterns like `cargo fmt`, `prettier`, `rustfmt`, `eslint fix`, `trailing whitespace`, etc. are excluded; same noise gate applied to all git-history paths (`git_churn`, `git_cochange`, FFI wrappers)
+- **Personalized PageRank** over the dependency graph (`ranked_skeleton()` in `api.rs`) — 30-iteration power iteration with damping 0.85; personalization vector concentrates weight on focus files; used by:
+  - `cartographer context --focus src/api.rs --budget 8000` — ranked skeleton pruned to token budget, highest-rank files first
+  - `cartographer_ranked_skeleton(path, focus_json, budget)` — new FFI function for CKB context injection
+- **CI enforcement** — `cartographer check` scans the project and exits non-zero if any cycles or layer violations are found; suitable for CI gates (pre-commit hook, GitHub Actions step)
+- **Unreferenced export detection** — `rebuild_graph` builds an import-token corpus from all files and marks public symbols whose names don't appear in any import as `unreferenced_exports`; surfaced via:
+  - `cartographer symbols --unreferenced` — file-by-file listing with caveat note
+  - `cartographer_unreferenced_symbols(path)` — new FFI function
+
 ## [1.5.0] - 2026-04-09
 
 ### Added

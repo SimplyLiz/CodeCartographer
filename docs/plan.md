@@ -1,6 +1,6 @@
 # Cartographer — Implementation Status
 
-All planned features are complete as of v1.5.0.
+All planned features are complete as of v1.6.0.
 
 ---
 
@@ -34,6 +34,8 @@ All planned features are complete as of v1.5.0.
 - [x] **`git_diff_files`** — file-level diff between two commits
 - [x] **`git_show_file`** — file contents at a given commit
 - [x] **Semantic diff** — function-level diff using skeleton extraction at two revisions
+- [x] **Bot-author filtering** — commits from bots/automation excluded from all git metrics
+- [x] **Formatting-commit filtering** — prettier/rustfmt/eslint-only commits excluded from all git metrics
 
 ### Output / Export
 - [x] Mermaid diagram export (role-based node colouring)
@@ -43,16 +45,21 @@ All planned features are complete as of v1.5.0.
 
 ### Integrations
 - [x] MCP server — JSON-RPC 2.0 stdio, 8 tools
-- [x] C FFI (`libcartographer.a`) — 11 functions for CKB via CGo
+- [x] C FFI (`libcartographer.a`) — 13 functions for CKB via CGo
   - `cartographer_version()` — compatibility gating
   - `cartographer_git_churn()` — hotspot prioritization for CKB
   - `cartographer_git_cochange()` — hidden coupling for CKB
   - `cartographer_semidiff()` — semantic context for `reviewPR` / `summarizeDiff`
+  - `cartographer_ranked_skeleton()` — token-budget-aware context via personalized PageRank
+  - `cartographer_unreferenced_symbols()` — unreferenced public export detection
 - [x] CCE context compression — `compressor.py` + `tools/cce_bridge.mjs`
 - [x] `launch.py` — cross-platform installer (Rust + Node + CCE)
 - [x] Global config (`~/.config/cartographer/config.toml`)
 - [x] Per-repo `.cartographerignore`
 - [x] Webhook notifications
+- [x] **`cartographer check`** — CI gate, exits non-zero on cycles or layer violations
+- [x] **`cartographer context`** — ranked skeleton pruned to token budget (personalized PageRank)
+- [x] **`cartographer symbols --unreferenced`** — unreferenced public export detection
 
 ---
 

@@ -12,12 +12,19 @@ extern "C" {
 
 void cartographer_free_string(char*);
 
+char* cartographer_version(void);
+
 char* cartographer_map_project(const char*);
 char* cartographer_health(const char*);
 char* cartographer_check_layers(const char*, const char*);
 char* cartographer_simulate_change(const char*, const char*, const char*, const char*);
 char* cartographer_skeleton_map(const char*, const char*);
 char* cartographer_module_context(const char*, const char*, unsigned int);
+
+char* cartographer_git_churn(const char*, unsigned int);
+char* cartographer_git_cochange(const char*, unsigned int, unsigned int);
+char* cartographer_hidden_coupling(const char*, unsigned int, unsigned int);
+char* cartographer_semidiff(const char*, const char*, const char*);
 
 #ifdef __cplusplus
 } // extern "C"

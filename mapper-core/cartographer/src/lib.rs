@@ -777,3 +777,247 @@ pub extern "C" fn cartographer_semidiff(
 
     result_to_json_ptr::<Vec<serde_json::Value>>(Ok(diff))
 }
+
+// ---------------------------------------------------------------------------
+// FFI: Hidden Coupling
+// ---------------------------------------------------------------------------
+
+/// Return file pairs that co-change frequently but have NO import edge between
+/// them — i.e. implicit/hidden coupling that is invisible in the static graph.
+///
+/// Inputs:
+///   `path`      — project root
+///   `limit`     — commits to analyse (0 → 500)
+///   `min_count` — minimum co-change count to include (0 → 2)
+///
+/// Response shape: same as `cartographer_git_cochange` (array of CoChangePair).
+/// Returns an empty array when the directory is not a git repo.
+#[no_mangle]
+pub extern "C" fn cartographer_hidden_coupling(
+    path: *const c_char,
+    limit: u32,
+    min_count: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let limit = if limit == 0 { 500 } else { limit as usize };
+    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+
+    // Build the static import-edge set from the dependency graph.
+    let scan_result = match scan_files_with_noise_tracking(&path) {
+        Ok(r) => r,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+    };
+    let mapped: std::collections::HashMap<String, MappedFile> = scan_result
+        .files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p
+                .strip_prefix(&path)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(path.clone());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped;
+    }
+
+    // Normalise: store both (a,b) and (b,a) so lookup is direction-agnostic.
+    let import_edges: std::collections::HashSet<(String, String)> =
+        match state.rebuild_graph() {
+            Ok(graph) => graph
+                .edges
+                .iter()
+                .flat_map(|e| {
+                    [
+                        (e.source.clone(), e.target.clone()),
+                        (e.target.clone(), e.source.clone()),
+                    ]
+                })
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        };
+
+    // Keep only pairs with no import edge — those are the hidden coupling.
+    let pairs: Vec<serde_json::Value> = git_analysis::git_cochange(&path, limit)
+        .into_iter()
+        .filter(|p| p.count >= min_count)
+        .filter(|p| !import_edges.contains(&(p.file_a.clone(), p.file_b.clone())))
+        .map(|p| {
+            serde_json::json!({
+                "fileA": p.file_a,
+                "fileB": p.file_b,
+                "count": p.count,
+                "couplingScore": p.coupling_score,
+            })
+        })
+        .collect();
+
+    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(pairs))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Ranked Skeleton (personalized PageRank, token-budget-aware)
+// ---------------------------------------------------------------------------
+
+/// Return a token-budget-aware ranked skeleton using personalized PageRank.
+///
+/// Inputs:
+///   `path`       — project root (C string)
+///   `focus_json` — JSON array of focus file paths for personalization (C string, may be null/empty)
+///   `budget`     — max tokens to include (0 = unlimited)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": [
+///     {
+///       "path": "src/api.rs",
+///       "moduleId": "src/api.rs",
+///       "rank": 0.0842,
+///       "signatureCount": 45,
+///       "estimatedTokens": 680,
+///       "role": "core",
+///       "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
+///     }
+///   ]
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_ranked_skeleton(
+    path: *const c_char,
+    focus_json: *const c_char,
+    budget: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let focus: Vec<String> = if !focus_json.is_null() {
+        let s = unsafe {
+            match CStr::from_ptr(focus_json).to_str() {
+                Ok(s) => s,
+                Err(_) => "",
+            }
+        };
+        serde_json::from_str(s).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let mapped_files = match build_mapped_files(&path) {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let state = ApiState::new(path.clone());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    if let Err(e) = state.rebuild_graph() {
+        return result_to_json_ptr::<serde_json::Value>(Err(e));
+    }
+
+    let ranked = match state.ranked_skeleton(&focus, budget as usize) {
+        Ok(r) => r,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let data: Vec<serde_json::Value> = ranked
+        .into_iter()
+        .map(|f| serde_json::json!({
+            "path": f.path,
+            "moduleId": f.module_id,
+            "rank": f.rank,
+            "signatureCount": f.signature_count,
+            "estimatedTokens": f.estimated_tokens,
+            "role": f.role,
+            "signatures": f.signatures,
+        }))
+        .collect();
+
+    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(data))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Unreferenced Symbols
+// ---------------------------------------------------------------------------
+
+/// Return public symbols that appear unreferenced across the project (heuristic).
+///
+/// Input:  `path` — project root (C string)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "totalCount": 12,
+///     "files": [
+///       {
+///         "path": "src/utils.rs",
+///         "symbols": ["pub fn unused_helper(...)", "pub const OLD_VALUE: ..."]
+///       }
+///     ]
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_unreferenced_symbols(path: *const c_char) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let mapped_files = match build_mapped_files(&path) {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let state = ApiState::new(path.clone());
+    {
+        let mut files = state.mapped_files.lock().unwrap();
+        *files = mapped_files;
+    }
+
+    let graph = match state.rebuild_graph() {
+        Ok(g) => g,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let mut total_count = 0usize;
+    let files: Vec<serde_json::Value> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let exports = n.unreferenced_exports.as_ref()?;
+            if exports.is_empty() {
+                return None;
+            }
+            total_count += exports.len();
+            Some(serde_json::json!({
+                "path": n.path,
+                "symbols": exports,
+            }))
+        })
+        .collect();
+
+    let data = serde_json::json!({
+        "totalCount": total_count,
+        "files": files,
+    });
+
+    result_to_json_ptr::<serde_json::Value>(Ok(data))
+}
