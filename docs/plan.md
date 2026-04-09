@@ -1,22 +1,30 @@
-# Cartographer — Implementation Status
-
-All planned features are complete as of v1.6.0.
+# Cartographer — Feature Status
 
 ---
 
-## ✅ Completed
+## Completed
 
-### Core Infrastructure
+### Core extraction
 - [x] Regex skeleton extraction — JS/TS, Rust, Python, Go, Java/Kotlin/Scala, C/C++, Ruby, PHP
-- [x] `DetailLevel` enum (Minimal / Standard / Extended) with docstrings, return types, parameters
-- [x] Symbol-level context retrieval (`get_symbol_context` MCP tool)
-- [x] "Blast radius" context (`get_blast_radius` MCP tool: callers + callees up to depth)
+- [x] `DetailLevel` enum (Minimal / Standard / Extended)
 - [x] Versioned local memory with hash-based incremental sync
 - [x] Background file watching with debounce (`notify`)
 - [x] Cloud sync (push/pull to UltraContext)
-- [x] Agent management (Cursor, Copilot, Claude)
 
-### Architectural Analysis
+### Symbol model (LIP-aligned)
+- [x] `SymbolKind` taxonomy — Function, Method, Class, Struct, Interface, Enum, TypeAlias, Variable, Macro, Namespace, Field (matches LIP §4.1 + Struct extension)
+- [x] `line_start` — 0-indexed line number on every signature
+- [x] `confidence: u8` — 30 = Tier 1 regex heuristic; ready for LIP Tier 2 upgrade
+- [x] `qualified_name` — scope-qualified symbol names (`Foo.bar`) via brace-depth scope tracker
+- [x] `doc_comment` — preceding `///` / `#` / `/**` lines attached to each signature
+- [x] LIP symbol URI as `ckb_id` — `lip://local/<path>#<qualified_name>` replaces FNV hash
+
+### Import resolution
+- [x] Three-strategy cascade: exact stem → path segment → symbol-name match
+- [x] Language-aware import parsing: Rust `use`, Python `from … import`, JS/TS `import … from`, Java, `require()`
+- [x] Symbol-level match: resolves `import { useState }` to the file that defines `useState`
+
+### Architectural analysis
 - [x] Dependency graph (petgraph) with import resolution
 - [x] Cycle detection (Tarjan SCC)
 - [x] Bridge detection (Brandes betweenness centrality)
@@ -24,49 +32,43 @@ All planned features are complete as of v1.6.0.
 - [x] Layer violation checking (`layers.toml`)
 - [x] Predictive impact simulation
 - [x] Architectural health score
-- [x] **Role classification** — entry / core / utility / leaf / dead / bridge / standard per node
-- [x] **Dead code detection** — in-degree=0 nodes, excluding entry points and test files
+- [x] Role classification — entry / core / utility / leaf / dead / bridge / standard
+- [x] Dead code detection — in-degree=0, excluding entry points and test files
+- [x] Unreferenced public export detection
 
-### Git History Analysis
-- [x] **`git_churn`** — per-file commit count over N commits
-- [x] **`git_cochange`** — temporal coupling pairs (Adam Tornhill formula: `count / min(churn_a, churn_b)`)
-- [x] **Hotspot scoring** — churn × signature_count, normalised 0–100
-- [x] **`git_diff_files`** — file-level diff between two commits
-- [x] **`git_show_file`** — file contents at a given commit
-- [x] **Semantic diff** — function-level diff using skeleton extraction at two revisions
-- [x] **Bot-author filtering** — commits from bots/automation excluded from all git metrics
-- [x] **Formatting-commit filtering** — prettier/rustfmt/eslint-only commits excluded from all git metrics
+### Git history analysis
+- [x] `git_churn` — per-file commit count
+- [x] `git_cochange` — temporal coupling pairs
+- [x] Hotspot scoring — churn × signature_count, normalised 0–100
+- [x] Semantic diff — function-level diff between any two commits
+- [x] Bot-author filtering
+- [x] Formatting-commit filtering
+- [x] Hidden coupling detection — co-change pairs with no static import edge
 
-### Output / Export
+### Output and export
 - [x] Mermaid diagram export (role-based node colouring)
 - [x] Graphviz DOT export
-- [x] `llms.txt` generation (entry points first, sorted by symbol count)
-- [x] `CLAUDE.md` generation (health, entry points, core modules, hotspots, cycles, hidden coupling)
+- [x] `llms.txt` generation
+- [x] `CLAUDE.md` generation
+- [x] Personalized PageRank skeleton (`cartographer context --focus <file> --budget N`)
 
 ### Integrations
 - [x] MCP server — JSON-RPC 2.0 stdio, 8 tools
-- [x] C FFI (`libcartographer.a`) — 13 functions for CKB via CGo
-  - `cartographer_version()` — compatibility gating
-  - `cartographer_git_churn()` — hotspot prioritization for CKB
-  - `cartographer_git_cochange()` — hidden coupling for CKB
-  - `cartographer_semidiff()` — semantic context for `reviewPR` / `summarizeDiff`
-  - `cartographer_ranked_skeleton()` — token-budget-aware context via personalized PageRank
-  - `cartographer_unreferenced_symbols()` — unreferenced public export detection
-- [x] CCE context compression — `compressor.py` + `tools/cce_bridge.mjs`
-- [x] `launch.py` — cross-platform installer (Rust + Node + CCE)
+- [x] C FFI (`libcartographer.a`) — 15 functions for CKB via CGo
+- [x] `cartographer check` — CI gate, exits non-zero on cycles or layer violations
+- [x] `cartographer symbols --unreferenced`
 - [x] Global config (`~/.config/cartographer/config.toml`)
 - [x] Per-repo `.cartographerignore`
-- [x] Webhook notifications
-- [x] **`cartographer check`** — CI gate, exits non-zero on cycles or layer violations
-- [x] **`cartographer context`** — ranked skeleton pruned to token budget (personalized PageRank)
-- [x] **`cartographer symbols --unreferenced`** — unreferenced public export detection
+- [x] Content search (`cartographer_search_content`)
 
 ---
 
 ## Deferred
 
-| Feature | Reason |
-|---------|--------|
-| Tree-sitter skeleton extraction | Full rewrite of `mapper.rs` + ~15 grammar crates; separate PR |
-| Hybrid BM25 + embedding search | Needs local model (bge-small via llama.cpp) + vector store |
-| PKG retrieval layer | Context pruning in MCP server — builds on tree-sitter; after that lands |
+| Feature | Why deferred |
+|---------|-------------|
+| Tree-sitter extraction | Full rewrite of mapper.rs + ~15 grammar crates; blocked on LIP readiness |
+| LIP daemon integration | LIP protocol not yet implemented; data structures are already compatible |
+| Hybrid BM25 + embedding search | Needs local model (bge-small) + vector store |
+| `confidence` Tier 2 upgrade | Requires LIP Tier 2 (incremental compiler) to be available |
+| Cross-file reference graph | Requires LIP Occurrence table; current import resolution is heuristic |

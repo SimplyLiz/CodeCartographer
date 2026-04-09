@@ -18,6 +18,7 @@ mod git_analysis;
 mod layers;
 mod mapper;
 mod scanner;
+mod search;
 
 use api::ApiState;
 use mapper::{extract_skeleton, MappedFile};
@@ -1020,4 +1021,83 @@ pub extern "C" fn cartographer_unreferenced_symbols(path: *const c_char) -> *mut
     });
 
     result_to_json_ptr::<serde_json::Value>(Ok(data))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Content Search (grep-like)
+// ---------------------------------------------------------------------------
+
+/// Search for text or regex patterns across all project files.
+///
+/// Inputs:
+///   `path`      — project root (C string)
+///   `pattern`   — search pattern (C string; regex unless `literal` is set in opts)
+///   `opts_json` — JSON-encoded search options (may be null → defaults)
+///
+/// Options JSON shape:
+/// ```json
+/// {
+///   "literal":       false,
+///   "caseSensitive": true,
+///   "contextLines":  0,
+///   "maxResults":    100,
+///   "fileGlob":      "*.rs"
+/// }
+/// ```
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "matches": [
+///       {
+///         "path": "src/api.rs",
+///         "lineNumber": 42,
+///         "line": "pub fn rebuild_graph(&self) -> Result<...",
+///         "beforeContext": [{"lineNumber": 40, "line": "// comment"}, ...],
+///         "afterContext":  [{"lineNumber": 43, "line": "    let g = Graph::new();"}, ...]
+///       }
+///     ],
+///     "totalMatches": 1,
+///     "filesSearched": 18,
+///     "truncated": false
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_search_content(
+    path: *const c_char,
+    pattern: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    if pattern.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null pattern".into()));
+    }
+    let pat = unsafe {
+        match std::ffi::CStr::from_ptr(pattern).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+
+    let opts: search::SearchOptions = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        search::SearchOptions::default()
+    };
+
+    let result = search::search_content(&path, &pat, &opts);
+    result_to_json_ptr(result)
 }

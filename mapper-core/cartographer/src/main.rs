@@ -7,6 +7,7 @@ mod mapper;
 mod mcp;
 mod memory;
 mod scanner;
+mod search;
 mod sync;
 mod uc_agents;
 mod uc_analytics;

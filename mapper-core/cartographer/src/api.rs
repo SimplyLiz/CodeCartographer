@@ -769,6 +769,133 @@ impl ApiState {
 // Role-classification helpers (free functions, not methods)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Import resolution helpers
+// ---------------------------------------------------------------------------
+
+/// Parse a raw import statement into (module_path, optional_symbol_hint).
+///
+/// Examples:
+///   `use crate::mapper::MappedFile;`       → ("mapper",       Some("MappedFile"))
+///   `import { useState } from 'react'`     → ("react",        Some("useState"))
+///   `from mymodule.auth import verify`     → ("mymodule/auth", Some("verify"))
+///   `import "github.com/user/repo/pkg"`    → ("pkg",           None)
+fn parse_import_parts(import: &str) -> (String, Option<String>) {
+    let raw = import.trim().trim_end_matches(';');
+
+    // Python: from foo.bar import Baz
+    if let Some(rest) = raw.strip_prefix("from ") {
+        if let Some((module, symbol)) = rest.split_once(" import ") {
+            let sym = symbol.trim().split(',').next().unwrap_or("").trim().to_string();
+            return (
+                module.trim().replace('.', "/"),
+                if sym.is_empty() { None } else { Some(sym) },
+            );
+        }
+    }
+
+    // JS/TS: import { Foo } from './bar'  /  import Foo from 'bar'
+    if raw.starts_with("import ") && raw.contains(" from ") {
+        if let Some(from_pos) = raw.rfind(" from ") {
+            let path = raw[from_pos + 6..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            let lhs = raw[7..from_pos].trim();
+            let symbol = extract_js_import_symbol(lhs);
+            return (path, symbol);
+        }
+    }
+
+    // Rust: use crate::foo::Bar  /  use foo::{A, B}
+    if let Some(rest) = raw.strip_prefix("use ") {
+        let path = rest
+            .trim()
+            .split('{')
+            .next()
+            .unwrap_or(rest)
+            .trim_end_matches(':')
+            .trim();
+        let segments: Vec<&str> = path.split("::").collect();
+        if let Some(&last) = segments.last() {
+            if last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                // Uppercase last segment → type name; use second-to-last as module
+                let module = segments
+                    .get(segments.len().saturating_sub(2))
+                    .copied()
+                    .unwrap_or("")
+                    .to_string();
+                return (module, Some(last.to_string()));
+            }
+        }
+        return (segments.last().copied().unwrap_or(path).to_string(), None);
+    }
+
+    // Java/Kotlin: import com.example.MyClass
+    if let Some(rest) = raw.strip_prefix("import ") {
+        let path = rest.trim().trim_end_matches(';');
+        let segments: Vec<&str> = path.split('.').collect();
+        if let Some(&last) = segments.last() {
+            if last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                let module = segments
+                    .get(segments.len().saturating_sub(2))
+                    .copied()
+                    .unwrap_or("")
+                    .to_string();
+                return (module, Some(last.to_string()));
+            }
+        }
+        return (path.replace('.', "/"), None);
+    }
+
+    // require() / require_relative (Ruby/Node)
+    if raw.contains("require") {
+        let path = raw
+            .split('"')
+            .nth(1)
+            .or_else(|| raw.split('\'').nth(1))
+            .unwrap_or("")
+            .trim_start_matches("./")
+            .to_string();
+        return (path, None);
+    }
+
+    // Fallback: last token
+    let last = raw.split_whitespace().last().unwrap_or(raw);
+    let last = last.trim_matches('"').trim_matches('\'').trim_end_matches(';');
+    (last.to_string(), None)
+}
+
+fn extract_js_import_symbol(lhs: &str) -> Option<String> {
+    let lhs = lhs.trim();
+    if lhs.starts_with('{') {
+        lhs.trim_matches(|c| c == '{' || c == '}')
+            .split(',')
+            .next()
+            .map(|s| s.trim().split(" as ").next().unwrap_or("").trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else if lhs.starts_with('*') || lhs.is_empty() {
+        None
+    } else {
+        Some(lhs.split(" as ").next().unwrap_or(lhs).trim().to_string())
+    }
+}
+
+/// Return the last meaningful path component to use as a file-stem candidate.
+fn derive_module_stem(module_path: &str) -> String {
+    module_path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .last()
+        .unwrap_or(module_path)
+        .trim_start_matches('@')   // strip npm scope prefix
+        .split('-')                // treat kebab-case first word as stem
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 pub fn is_entry_point_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     matches!(
@@ -962,30 +1089,60 @@ impl ApiState {
     fn resolve_import_target(&self, import: &str, source: &str) -> Option<String> {
         let files = self.mapped_files.lock().ok()?;
 
-        let import_name = import
-            .split_whitespace()
-            .last()
-            .unwrap_or(import)
-            .trim_end_matches(';')
-            .trim_matches('"')
-            .trim_matches('\'');
+        let (module_path, symbol_hint) = parse_import_parts(import);
+        let stem = derive_module_stem(&module_path);
+
+        let mut segment_match: Option<String> = None;
+        let mut symbol_match: Option<String> = None;
 
         for (module_id, file) in files.iter() {
             if module_id == source {
                 continue;
             }
 
-            let file_name = Path::new(&file.path)
+            let file_stem = Path::new(&file.path)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
 
-            if import_name == file_name || import_name == &file.path {
+            // 1. Exact stem or full path match
+            let norm_path = module_path.trim_start_matches("./");
+            if file_stem == stem
+                || file.path.trim_start_matches("./") == norm_path
+                || file_stem == norm_path
+            {
                 return Some(module_id.clone());
+            }
+
+            // 2. Path segment: file path contains the module stem as a component
+            if segment_match.is_none() && stem.len() >= 3 {
+                let file_lower = file.path.to_lowercase();
+                let stem_lower = stem.to_lowercase();
+                if file_lower
+                    .split('/')
+                    .any(|seg| Path::new(seg).file_stem().and_then(|s| s.to_str()).unwrap_or(seg) == stem_lower)
+                {
+                    segment_match = Some(module_id.clone());
+                }
+            }
+
+            // 3. Symbol-level: a file that defines the imported symbol name
+            if symbol_match.is_none() {
+                if let Some(sym) = &symbol_hint {
+                    if sym.len() >= 4 {
+                        let defines = file.signatures.iter().any(|sig| {
+                            sig.symbol_name.as_deref() == Some(sym.as_str())
+                        });
+                        if defines {
+                            symbol_match = Some(module_id.clone());
+                        }
+                    }
+                }
             }
         }
 
-        None
+        // Prefer path-segment match (fewer false positives) over symbol match
+        segment_match.or(symbol_match)
     }
 
     pub fn set_compression_level(&self, level: CompressionLevel) {
@@ -1319,6 +1476,16 @@ impl ApiState {
             debt_indicators,
             recommendations,
         })
+    }
+
+    /// Search for `pattern` across all project files.  Delegates to
+    /// [`crate::search::search_content`] using `self.root_path` as the root.
+    pub fn search_content(
+        &self,
+        pattern: &str,
+        opts: &crate::search::SearchOptions,
+    ) -> Result<crate::search::SearchResult, String> {
+        crate::search::search_content(&self.root_path, pattern, opts)
     }
 }
 

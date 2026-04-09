@@ -261,6 +261,45 @@ impl McpServer {
                     "level" => "string" => "Compression level: minimal, standard, aggressive"
                 ),
             },
+            McpTool {
+                name: "search_content".to_string(),
+                description: "Search for text or regex patterns across project files (like grep). \
+                              Returns matching lines with optional context. Use this instead of \
+                              grep/find tool calls."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert(
+                            "pattern".to_string(),
+                            mcprop!("string", "Search pattern (regex by default, or literal string if literal=true)"),
+                        );
+                        props.insert(
+                            "literal".to_string(),
+                            mcprop!("boolean", "Treat pattern as a literal string (default false)"),
+                        );
+                        props.insert(
+                            "caseSensitive".to_string(),
+                            mcprop!("boolean", "Case-sensitive matching (default true)"),
+                        );
+                        props.insert(
+                            "contextLines".to_string(),
+                            mcprop!("number", "Lines of context before and after each match (default 0)"),
+                        );
+                        props.insert(
+                            "maxResults".to_string(),
+                            mcprop!("number", "Max matches to return — 0 = unlimited (default 100)"),
+                        );
+                        props.insert(
+                            "fileGlob".to_string(),
+                            mcprop!("string", "Optional glob to restrict files, e.g. \"*.rs\" or \"src/**/*.ts\""),
+                        );
+                        props
+                    },
+                    required: vec!["pattern".to_string()],
+                },
+            },
         ]
     }
 
@@ -709,6 +748,49 @@ impl McpServer {
                     "related": related,
                 });
 
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            "search_content" => {
+                let args = &call.arguments;
+
+                let pattern = args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing pattern")?
+                    .to_string();
+
+                // Build SearchOptions from the individual MCP arguments so callers
+                // don't need to nest a JSON object — each option is a top-level field.
+                let opts = crate::search::SearchOptions {
+                    literal: args
+                        .get("literal")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    case_sensitive: args
+                        .get("caseSensitive")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                    context_lines: args
+                        .get("contextLines")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize,
+                    max_results: args
+                        .get("maxResults")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(100) as usize,
+                    file_glob: args
+                        .get("fileGlob")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                };
+
+                let result = self.api_state.search_content(&pattern, &opts)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
