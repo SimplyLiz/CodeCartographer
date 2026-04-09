@@ -26,6 +26,9 @@ char* cartographer_git_cochange(const char*, unsigned int, unsigned int);
 char* cartographer_hidden_coupling(const char*, unsigned int, unsigned int);
 char* cartographer_semidiff(const char*, const char*, const char*);
 
+char* cartographer_ranked_skeleton(const char*, const char*, unsigned int);
+char* cartographer_unreferenced_symbols(const char*);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
