@@ -13,6 +13,11 @@ import sys
 BINARY_NAME = "cartographer"
 CARGO_DIR = os.path.join("mapper-core", "cartographer")
 
+# Default location for ContextCompressionEngine relative to this script.
+# Users can override with --cce-path <dir>.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CCE_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "ContextCompressionEngine"))
+
 
 def step(n: int, total: int, msg: str):
     print(f"[{n}/{total}] {msg}...")
@@ -24,6 +29,76 @@ def check_cargo():
         print("  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh")
         sys.exit(1)
     print("  Rust found")
+
+
+def check_node() -> bool:
+    """Return True if Node.js 20+ is available; print a warning and return False otherwise."""
+    node = shutil.which("node")
+    if not node:
+        print("  Node.js not found — CCE compression will be unavailable.")
+        print("  Install Node.js 20+ from https://nodejs.org to enable it.")
+        return False
+    result = subprocess.run([node, "--version"], capture_output=True, text=True)
+    version_str = result.stdout.strip().lstrip("v")
+    try:
+        major = int(version_str.split(".")[0])
+    except ValueError:
+        major = 0
+    if major < 20:
+        print(f"  Node.js {version_str} found, but 20+ is required for CCE.")
+        print("  Upgrade Node.js to enable CCE compression.")
+        return False
+    print(f"  Node.js {version_str} found")
+    return True
+
+
+def setup_cce(cce_dir: str) -> bool:
+    """
+    Build ContextCompressionEngine and save its dist path.
+    Returns True on success, False if CCE is unavailable/skipped.
+    """
+    if not os.path.isdir(cce_dir):
+        print(f"  ContextCompressionEngine not found at: {cce_dir}")
+        print("  CCE compression will be unavailable.")
+        print(f"  Pass --cce-path <dir> to specify its location, or clone it to {cce_dir}")
+        return False
+
+    pkg = os.path.join(cce_dir, "package.json")
+    if not os.path.isfile(pkg):
+        print(f"  {cce_dir} does not look like a valid CCE directory (no package.json).")
+        return False
+
+    npm = shutil.which("npm")
+    if not npm:
+        print("  npm not found — cannot build CCE.")
+        return False
+
+    # Install deps
+    print(f"  Installing CCE dependencies in {cce_dir}...")
+    r = subprocess.run([npm, "install"], cwd=cce_dir)
+    if r.returncode != 0:
+        print("  npm install failed.")
+        return False
+
+    # Build
+    dist_dir = os.path.join(cce_dir, "dist")
+    if not os.path.isdir(dist_dir):
+        print("  Building CCE...")
+        r = subprocess.run([npm, "run", "build"], cwd=cce_dir)
+        if r.returncode != 0:
+            print("  CCE build failed.")
+            return False
+    else:
+        print("  CCE already built")
+
+    # Persist the dist path so compressor.py can find it
+    config_dir = os.path.join(_SCRIPT_DIR, ".cartographer")
+    os.makedirs(config_dir, exist_ok=True)
+    config_file = os.path.join(config_dir, "cce_dist")
+    with open(config_file, "w", encoding="utf-8") as f:
+        f.write(dist_dir)
+    print(f"  CCE dist path saved to .cartographer/cce_dist")
+    return True
 
 
 def build():
@@ -108,12 +183,19 @@ def verify(install_dir: str):
 
 
 def main():
+    # Parse optional --cce-path argument
+    cce_dir = DEFAULT_CCE_DIR
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--cce-path" and i + 1 < len(args):
+            cce_dir = os.path.abspath(args[i + 1])
+
     print("=" * 48)
     print("  Cartographer Installation")
     print("=" * 48)
     print()
 
-    total = 4
+    total = 6
     step(1, total, "Checking Rust")
     check_cargo()
     print()
@@ -129,8 +211,19 @@ def main():
     update_path(install_dir)
     print()
 
-    step(4, total, "Verifying")
+    step(4, total, "Verifying Cartographer")
     verify(install_dir)
+    print()
+
+    step(5, total, "Checking Node.js (required for CCE compression)")
+    node_ok = check_node()
+    print()
+
+    step(6, total, "Setting up ContextCompressionEngine")
+    if node_ok:
+        setup_cce(cce_dir)
+    else:
+        print("  Skipped (Node.js unavailable)")
     print()
 
     print("=" * 48)
@@ -143,9 +236,11 @@ def main():
     print("       cartographer init --cloud --project my-project")
     print("  3. Generate your first context:")
     print("       cartographer source")
-    print("  4. Push to cloud:")
+    print("  4. Compress a conversation with CCE:")
+    print("       python compressor.py --messages chat.json --token-budget 8000")
+    print("  5. Push to cloud:")
     print("       cartographer push")
-    print("  5. Start MCP server:")
+    print("  6. Start MCP server:")
     print("       cartographer serve")
     print()
 
