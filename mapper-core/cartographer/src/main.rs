@@ -24,7 +24,7 @@ use mapper::{extract_skeleton, MappedFile};
 use memory::Memory;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebouncedEventKind};
 use scanner::{is_ignored_path, scan_files_with_noise_tracking, IgnoredFile};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -551,8 +551,11 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget, push: b
     println!("============================================");
     println!("Press Ctrl+C to stop\n");
 
+    // Cache: rel_path → (content_hash, MappedFile) for incremental re-extraction.
+    let mut extract_cache: HashMap<String, (u64, MappedFile)> = HashMap::new();
+
     // Initial skeleton map generation
-    let (mapped_files, ignored) = generate_skeleton_map(root)?;
+    let (mapped_files, ignored) = generate_skeleton_map_incremental(root, &mut extract_cache)?;
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
@@ -586,8 +589,8 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget, push: b
                 });
 
                 if relevant {
-                    // Regenerate skeleton map
-                    match generate_skeleton_map(root) {
+                    // Regenerate skeleton map (incremental — skips unchanged files)
+                    match generate_skeleton_map_incremental(root, &mut extract_cache) {
                         Ok((files, _)) => {
                             let output = format_map_output(&files, target);
                             let tokens = estimate_tokens(&output);
@@ -625,6 +628,52 @@ fn generate_skeleton_map(root: &Path) -> Result<(Vec<MappedFile>, Vec<IgnoredFil
         if let Some(content) = read_text_file(path) {
             let rel_path = path.strip_prefix(root).unwrap_or(path);
             let skeleton = extract_skeleton(rel_path, &content);
+            if !skeleton.imports.is_empty() || !skeleton.signatures.is_empty() {
+                mapped_files.push(skeleton);
+            }
+        }
+    }
+
+    Ok((mapped_files, scan_result.ignored_noise))
+}
+
+fn hash_content(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Like `generate_skeleton_map` but skips re-extraction for files whose content
+/// hash hasn't changed since the last call. Used by watch mode.
+fn generate_skeleton_map_incremental(
+    root: &Path,
+    cache: &mut HashMap<String, (u64, MappedFile)>,
+) -> Result<(Vec<MappedFile>, Vec<IgnoredFile>)> {
+    let scan_result = scan_files_with_noise_tracking(root)?;
+    let mut mapped_files: Vec<MappedFile> = Vec::new();
+
+    for path in &scan_result.files {
+        if let Some(content) = read_text_file(path) {
+            let rel_path = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = rel_path.to_string_lossy().to_string();
+            let hash = hash_content(&content);
+
+            let skeleton = if let Some((cached_hash, cached_file)) = cache.get(&rel_str) {
+                if *cached_hash == hash {
+                    cached_file.clone()
+                } else {
+                    let s = extract_skeleton(rel_path, &content);
+                    cache.insert(rel_str, (hash, s.clone()));
+                    s
+                }
+            } else {
+                let s = extract_skeleton(rel_path, &content);
+                cache.insert(rel_str, (hash, s.clone()));
+                s
+            };
+
             if !skeleton.imports.is_empty() || !skeleton.signatures.is_empty() {
                 mapped_files.push(skeleton);
             }

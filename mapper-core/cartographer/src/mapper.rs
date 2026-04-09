@@ -658,6 +658,8 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
     let mut doc_buf: Vec<String> = Vec::new();
     let mut scope = ScopeTracker::new();
     let mut in_block_comment = false;
+    let mut file_doc_buf: Vec<String> = Vec::new();
+    let mut pre_code = true; // still in the file-header comment zone
 
     for (line_idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -674,7 +676,11 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
             if trimmed.contains("*/") {
                 in_block_comment = false;
             } else {
-                doc_buf.push(strip_doc_marker(trimmed));
+                let stripped = strip_doc_marker(trimmed);
+                doc_buf.push(stripped.clone());
+                if pre_code {
+                    file_doc_buf.push(stripped);
+                }
             }
             scope.update(line, None);
             continue;
@@ -682,16 +688,26 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
 
         if trimmed.starts_with("/**") {
             in_block_comment = !trimmed.contains("*/");
-            doc_buf.push(strip_doc_marker(trimmed));
+            let stripped = strip_doc_marker(trimmed);
+            doc_buf.push(stripped.clone());
+            if pre_code {
+                file_doc_buf.push(stripped);
+            }
             scope.update(line, None);
             continue;
         }
 
         if trimmed.starts_with("//") {
-            doc_buf.push(strip_doc_marker(trimmed));
+            let stripped = strip_doc_marker(trimmed);
+            doc_buf.push(stripped.clone());
+            if pre_code {
+                file_doc_buf.push(stripped);
+            }
             scope.update(line, None);
             continue;
         }
+
+        pre_code = false;
 
         if import_re.is_match(trimmed) {
             imports.push(trimmed.to_string());
@@ -776,11 +792,17 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
         }
     }
 
+    let file_docstring = if file_doc_buf.is_empty() {
+        None
+    } else {
+        Some(vec![file_doc_buf.join(" ")])
+    };
+
     MappedFile {
         path,
         imports,
         signatures,
-        docstrings: None,
+        docstrings: file_docstring,
         parameters: None,
         return_types: None,
     }
@@ -801,6 +823,52 @@ fn extract_python(path: String, content: &str) -> MappedFile {
     let mut doc_buf: Vec<String> = Vec::new();
     // (class_name, indent_of_class_keyword)
     let mut current_class: Option<(String, usize)> = None;
+
+    // Collect module-level docstring (triple-quoted string before any imports/defs/classes).
+    let mut module_docstring: Option<String> = None;
+    {
+        let mut lines_iter = content.lines().peekable();
+        // skip shebang and encoding lines
+        while let Some(l) = lines_iter.peek() {
+            let t = l.trim();
+            if t.starts_with("#!") || t.starts_with("# -*-") || t.starts_with("# coding") || t.is_empty() {
+                lines_iter.next();
+            } else {
+                break;
+            }
+        }
+        if let Some(first) = lines_iter.peek() {
+            let t = first.trim();
+            let quote = if t.starts_with("\"\"\"") {
+                Some("\"\"\"")
+            } else if t.starts_with("'''") {
+                Some("'''")
+            } else {
+                None
+            };
+            if let Some(q) = quote {
+                let mut buf = Vec::new();
+                let first_line = lines_iter.next().unwrap().trim().to_string();
+                let inner = first_line.trim_start_matches(q);
+                // Single-line docstring: ends on the same line
+                if let Some(end) = inner.find(q) {
+                    module_docstring = Some(inner[..end].trim().to_string());
+                } else {
+                    buf.push(inner.trim().to_string());
+                    for l in lines_iter.by_ref() {
+                        let t = l.trim();
+                        if let Some(end) = t.find(q) {
+                            buf.push(t[..end].trim().to_string());
+                            break;
+                        } else {
+                            buf.push(t.to_string());
+                        }
+                    }
+                    module_docstring = Some(buf.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "));
+                }
+            }
+        }
+    }
 
     for (line_idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -881,7 +949,7 @@ fn extract_python(path: String, content: &str) -> MappedFile {
         path,
         imports,
         signatures,
-        docstrings: None,
+        docstrings: module_docstring.map(|d| vec![d]),
         parameters: None,
         return_types: None,
     }
