@@ -1,117 +1,173 @@
-# Project Cartographer - Architecture Overview
+# Cartographer — Architecture Overview
 
 ## What is Cartographer?
 
-Cartographer is a lightweight code analysis tool that provides **architectural intelligence** for AI coding assistants like ShellAI, Cursor, Copilot, and for CKB.
+Cartographer is a code intelligence tool that builds a **semantic map** of your codebase — not full source, but the shape (public APIs, imports, signatures, dependency graph) — and exposes it via CLI, MCP server, and a C FFI consumed by CKB.
 
-It builds a semantic map of your codebase - not the full code, but the **shape** (public APIs, imports, signatures) - and keeps it updated in real-time.
+**v1.5.0 feature set:**
+- Skeleton extraction (regex-based, 8+ languages, 90%+ token savings)
+- Full dependency graph with role classification, bridge detection, cycle detection, layer violation checking
+- Git history analysis: churn, temporal coupling (co-change), hotspot scoring
+- Dead code detection (in-degree=0 nodes that are not entry points)
+- Semantic diff (function-level diff between any two commits)
+- Diagram export (Mermaid / Graphviz DOT)
+- `llms.txt` and `CLAUDE.md` generation for AI context
+- MCP server (JSON-RPC 2.0 stdio) for Claude and other LLM integrations
+- Context compression via ContextCompressionEngine
+- C FFI (`libcartographer.a`) consumed by CKB via CGo
 
-## Core Capabilities
+---
 
-### 1. Skeleton Extraction (The "Header-Only" View)
-Extracts only public exports, type definitions, and signatures - completely stripping function bodies.
+## Core Pipeline
 
 ```
-Before (full source):
-```python
-def authenticate_user(username: str, password: str) -> User:
-    """Authenticate a user with username and password."""
-    hash = hashlib.sha256(password.encode())
-    # ... 50 more lines
+scan_files_with_noise_tracking()
+        │
+        ▼
+extract_skeleton()  ──── regex-based per-language
+        │
+        ▼
+ApiState.rebuild_graph()
+        │
+        ├── import resolution → petgraph edges
+        ├── Tarjan SCC → cycle detection
+        ├── Brandes betweenness → bridge detection
+        ├── role classification (entry/core/utility/leaf/dead/bridge)
+        └── layer violation checking
+        │
+        ▼ (optional)
+enrich_with_git()   ──── churn × signature_count → hotspot scores
+                          co-change pairs (temporal coupling)
 ```
 
-After (skeleton):
-```python
-def authenticate_user(username: str, password: str) -> User: ...
-```
+---
 
-**Supported Languages**: JS/TS, Rust, Python, Go, Java/Kotlin/Scala, C/C++, Ruby, PHP
+## Module Map
 
-### 2. Token Optimization
-Achieves **90%+ token savings** compared to full source. Uses AI-Lang compression:
-- Strips syntax boilerplate (`public`, `private`, `return`)
-- Multiple output formats: Claude XML, Cursor Markdown, JSON
+| Module | Responsibility |
+|--------|---------------|
+| `scanner.rs` | File discovery, noise filtering (.gitignore, .cartographerignore, binary files) |
+| `mapper.rs` | Language-specific skeleton extraction; `Signature`, `MappedFile` types |
+| `api.rs` | `ApiState`, `rebuild_graph`, `ProjectGraphResponse`; all graph analysis |
+| `git_analysis.rs` | `git_churn`, `git_cochange`, `git_show_file`, `git_diff_files` via subprocess |
+| `layers.rs` | Architectural layer config (`layers.toml`), violation detection |
+| `mcp.rs` | MCP server: JSON-RPC 2.0 stdio transport, 8 tools |
+| `memory.rs` | Versioned local memory, incremental hash-based sync |
+| `formatter.rs` | Output formatting (XML, Markdown, JSON) |
+| `global_config.rs` | `~/.config/cartographer/config.toml` — API key, default target |
+| `main.rs` | CLI (`clap`), 20+ commands, 7 git/analysis mode functions |
+| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 8 functions consumed by CKB |
 
-### 3. Project Graph (`project_graph.json`)
-Dependency graph at file/module level:
-- **Nodes**: Files with their exported signatures
-- **Edges**: Import/require/use relationships
-- **Metadata**: Language, complexity estimates, change frequency
-
-### 4. Bridge Detection
-Identifies "Bridge Modules" - files that connect disparate subsystems. These are architectural bottlenecks worth prioritizing for deep analysis.
-
-## Relationship with CMP
-
-Cartographer **uses CMP's core** for:
-- Incremental sync with hash-based dirty file detection
-- Versioned maps (time travel for historical analysis)
-- Background file watching with debounce
-- Agent management (Cursor, Copilot, Claude)
-- Cloud sync (push/pull to UltraContext)
-- Webhook notifications
-
-Cartographer **provides on top**:
-- Skeleton extraction logic (`mapper.rs` enhanced)
-- Graph generation and bridge detection
-- Token compression optimization
-- Architectural health scoring
-
-## Relationship with CKB
-
-**They complement each other:**
-
-| Aspect | Cartographer | CKB |
-|--------|-------------|-----|
-| Level | File/Module | Symbol |
-| Depth | Shape only | Full semantic |
-| Speed | Fast (regex) | Deep (AST) |
-| Use case | Quick map, LLM context | Analysis, refactoring |
-
-**Workflow:**
-1. Cartographer provides the "map" - quick overview of structure
-2. CKB uses the map to "teleport" its deep analysis to the right files
-3. CKB doesn't scan everything - just the relevant modules
-
-## Output Files
-
-| File | Description |
-|------|-------------|
-| `project_graph.json` | Full dependency graph at file level |
-| `cartographer_map.{xml,md,json}` | Skeleton map (CLI output) |
-| `.cartographer_memory.json` | Versioned memory (Cartographer core) |
+---
 
 ## CLI Commands
 
 ```bash
-# Generate skeleton map (one-shot)
-cartographer map
+# Context generation
+cartographer source          # Full skeleton map (default)
+cartographer map             # One-shot map (no cloud sync)
+cartographer watch           # Live watch + auto-update
 
-# Live watching (auto-update map on file changes)
-cartographer watch
+# Cloud sync
+cartographer init --cloud    # Provision UltraContext project
+cartographer push            # Push local map to cloud
+cartographer pull            # Pull latest version
 
-# Full source (legacy - for comparison)
-cartographer source
+# Architectural analysis
+cartographer health          # Health score, cycles, bridges, god modules
+cartographer dead            # Dead code candidates
+cartographer hotspots        # Churn × complexity (top N files)
+cartographer cochange        # Temporally coupled file pairs (hidden coupling)
+cartographer semidiff HEAD~1 # Function-level diff between two commits
+cartographer diagram         # Export graph as Mermaid or DOT
 
-# Push map to cloud
-cartographer push
+# AI context generation
+cartographer llmstxt         # Generate llms.txt index
+cartographer claudemd        # Generate CLAUDE.md architecture guide
 
-# Pull map from cloud
-cartographer pull
+# MCP server
+cartographer serve           # Start JSON-RPC 2.0 stdio server
 
-# Agent management
-cartographer agents list
-cartographer agents add --name "My Agent" --type cursor --webhook https://...
+# Dependency inspection
+cartographer deps <target>   # Show dependencies of a module as JSON
+cartographer simulate        # Predict impact of a hypothetical change
+
+# Configuration
+cartographer status          # Show tracked files and sync state
+cartographer config          # Get/set global config (API key, target)
 ```
 
-## Integration Points
+---
 
-### For ShellAI / AI Agents
-- Use `get_module_context` API to fetch skeleton of any module
-- Use project graph for workspace understanding
-- Configurable detail levels (minimal/standard/extended)
+## C FFI (lib.rs)
 
-### For CKB
-- Read `project_graph.json` for fast navigation
-- Subscribe to webhooks for change notifications
-- Use versioned maps for historical analysis
+Compiled as `libcartographer.a` (staticlib) + `rlib`. CKB loads via CGo.
+
+**Memory contract:** all output strings are heap-allocated by Rust and **must** be freed by the caller via `cartographer_free_string(ptr)`. Input strings are borrowed (caller owns them). No panics across the FFI boundary — all errors returned as `{"ok":false,"error":"..."}`.
+
+| Function | Inputs | Returns |
+|----------|--------|---------|
+| `cartographer_free_string(ptr)` | `*mut c_char` | — |
+| `cartographer_version()` | — | version string (e.g. `"1.5.0"`) |
+| `cartographer_map_project(path)` | path | `ProjectGraphResponse` JSON |
+| `cartographer_health(path)` | path | health score + counts JSON |
+| `cartographer_check_layers(path, layers_path)` | path, optional layers.toml | violations JSON |
+| `cartographer_simulate_change(path, module_id, new_sig, rem_sig)` | path, module, optional sigs | impact JSON |
+| `cartographer_skeleton_map(path, detail)` | path, "minimal"/"standard"/"extended" | skeleton JSON |
+| `cartographer_module_context(path, module_id, depth)` | path, module, depth | module + deps JSON |
+| `cartographer_git_churn(path, limit)` | path, commit limit (0=500) | `{ "file": count }` JSON |
+| `cartographer_git_cochange(path, limit, min_count)` | path, limit, min co-changes | `[{fileA,fileB,count,couplingScore}]` JSON |
+| `cartographer_semidiff(path, commit1, commit2)` | path, two commit refs | `[{path,status,added[],removed[]}]` JSON |
+
+---
+
+## MCP Tools
+
+Exposed via `cartographer serve` (JSON-RPC 2.0 stdio):
+
+| Tool | Purpose |
+|------|---------|
+| `map_project` | Full project graph |
+| `get_dependencies` | Dependency tree for a module |
+| `get_dependents` | Reverse dependencies |
+| `get_health` | Health score |
+| `get_cycles` | Circular dependency list |
+| `get_symbol_context` | Signatures matching a symbol name |
+| `get_blast_radius` | Combined deps+dependents up to depth |
+| `check_layer_violations` | Architectural layer check |
+
+---
+
+## CKB Integration
+
+Cartographer and CKB operate at complementary levels:
+
+| Aspect | Cartographer | CKB |
+|--------|-------------|-----|
+| Level | File/module | Symbol |
+| Method | Regex skeleton | AST + SCIP index |
+| Speed | Fast (milliseconds) | Deep (seconds) |
+| Git signals | Churn, co-change, semidiff | — |
+| Use case | Quick map, LLM context, hotspots | Deep analysis, refactoring |
+
+**CKB consumes Cartographer via FFI:**
+1. `cartographer_map_project()` → graph for navigation and blast-radius pre-filtering
+2. `cartographer_git_churn()` + `cartographer_git_cochange()` → hotspot prioritization
+3. `cartographer_semidiff()` → semantic context for `reviewPR` / `summarizeDiff`
+4. `cartographer_version()` → compatibility gating before any call
+
+---
+
+## Context Compression (CCE)
+
+`compressor.py` integrates [ContextCompressionEngine](https://github.com/SimplyLiz/ContextCompressionEngine) via `tools/cce_bridge.mjs`:
+
+```bash
+# Compress a conversation to fit 8k tokens
+python compressor.py --messages chat.json --token-budget 8000
+
+# Add cartographer context + compress
+python compressor.py src/api.rs --messages chat.json --token-budget 8000
+```
+
+CCE preserves code blocks verbatim, summarises prose, and is fully reversible via a verbatim store. `launch.py` auto-builds CCE during installation.

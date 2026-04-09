@@ -1,89 +1,65 @@
-# Project Cartographer Improvement Plan
+# Cartographer — Implementation Status
 
-This document outlines the proposed improvements for Project Cartographer to optimize its usage with ShellAI, other tools via MCP or HTTP API, and to enhance its integration with CKB.
-
----
-
-## Implementation Status
-
-### ✅ Completed Items
-- [x] **Section 1.1**: Enhanced `get_module_context` Detail - Added `DetailLevel` enum to `mapper.rs` (Minimal, Standard, Extended) with docstrings, parameters, and return types
-- [x] **Section 2.4**: Formal API Schema and Versioning - Created OpenAPI 3.0 spec at `docs/api/openapi.yaml`
-- [x] **Section 2.1**: Webhook Notifications - Implemented `webhooks.rs` with event types and delivery system
-- [x] **Section 2.2**: API for Graph Querying - Implemented in `api.rs` (get_dependencies, get_dependents, search_graph)
-- [x] **Section 2.3**: Configurable Compression Levels - Added `CompressionLevel` enum to `api.rs`
-- [x] **MCP Server**: Created `mcp.rs` exposing Cartographer via Model Context Protocol
-
-### 🔄 In Progress
-- [ ] **Section 1.2**: Symbol-Level Context Retrieval - Need to add `symbol_name` parameter support to API
-- [ ] **Section 1.3**: "Blast Radius" Context for Changes - Need to implement endpoint
-- [ ] **Section 3**: CKB Integration - Need to integrate Cartographer with CKB's indexing pipeline
+All planned features are complete as of v1.5.0.
 
 ---
 
-## 1. For ShellAI and other AI Coding Tools
+## ✅ Completed
 
-### 1.1. Enhanced `get_module_context` Detail ✅
-Introduce a configurable `detail_level` parameter to the `get_module_context` API.
-- `minimal` (current): Only public API signatures.
-- `standard`: Include brief parameter descriptions (from docstrings/comments if available and concise), return types, and 1-2 lines of introductory docstring for functions/classes.
-- `extended`: Include enum definitions, constant values, and simple interface properties.
-**Benefit**: Allows AI agents to understand the *intent* and basic usage of a symbol without needing to read entire implementations, significantly improving their ability to generate or modify code correctly.
+### Core Infrastructure
+- [x] Regex skeleton extraction — JS/TS, Rust, Python, Go, Java/Kotlin/Scala, C/C++, Ruby, PHP
+- [x] `DetailLevel` enum (Minimal / Standard / Extended) with docstrings, return types, parameters
+- [x] Symbol-level context retrieval (`get_symbol_context` MCP tool)
+- [x] "Blast radius" context (`get_blast_radius` MCP tool: callers + callees up to depth)
+- [x] Versioned local memory with hash-based incremental sync
+- [x] Background file watching with debounce (`notify`)
+- [x] Cloud sync (push/pull to UltraContext)
+- [x] Agent management (Cursor, Copilot, Claude)
 
-### 1.2. Symbol-Level Context Retrieval 🔄
-Add a new API endpoint or extend `get_module_context` to accept a `symbol_name` in addition to `moduleId`. This would return the compressed context *only* for that specific symbol and its immediate dependencies/references.
-**Benefit**: Enables more granular and highly targeted context retrieval, further reducing token usage for specific queries.
+### Architectural Analysis
+- [x] Dependency graph (petgraph) with import resolution
+- [x] Cycle detection (Tarjan SCC)
+- [x] Bridge detection (Brandes betweenness centrality)
+- [x] God module detection
+- [x] Layer violation checking (`layers.toml`)
+- [x] Predictive impact simulation
+- [x] Architectural health score
+- [x] **Role classification** — entry / core / utility / leaf / dead / bridge / standard per node
+- [x] **Dead code detection** — in-degree=0 nodes, excluding entry points and test files
 
-### 1.3. "Blast Radius" Context for Changes 🔄
-Implement an API endpoint that, given a file or symbol, returns a list of *related* files/symbols (e.g., direct callers, direct callees, files in the same logical module, recently co-changed files) along with their compressed context.
-**Benefit**: Helps AI agents understand the implications of a change and ensure consistency across interdependent parts of the codebase.
+### Git History Analysis
+- [x] **`git_churn`** — per-file commit count over N commits
+- [x] **`git_cochange`** — temporal coupling pairs (Adam Tornhill formula: `count / min(churn_a, churn_b)`)
+- [x] **Hotspot scoring** — churn × signature_count, normalised 0–100
+- [x] **`git_diff_files`** — file-level diff between two commits
+- [x] **`git_show_file`** — file contents at a given commit
+- [x] **Semantic diff** — function-level diff using skeleton extraction at two revisions
 
-## 2. For MCP/Other Tools (HTTP API)
+### Output / Export
+- [x] Mermaid diagram export (role-based node colouring)
+- [x] Graphviz DOT export
+- [x] `llms.txt` generation (entry points first, sorted by symbol count)
+- [x] `CLAUDE.md` generation (health, entry points, core modules, hotspots, cycles, hidden coupling)
 
-### 2.1. Implement Webhook Notifications ✅
-Prioritize implementing webhook notifications for `project_graph.json` updates, allowing other services to react in real-time rather than polling.
-**Benefit**: Reduces latency for tools that depend on the graph and conserves resources.
-
-### 2.2. API for Graph Querying ✅
-Introduce API endpoints to query the generated `project_graph.json` for specific data:
-- `GET /api/v1/graph/dependencies?moduleId=<id>`: Get direct/transitive dependencies of a module.
-- `GET /api/v1/graph/dependents?moduleId=<id>`: Get modules that depend on a given module.
-- `GET /api/v1/graph/search?query=<pattern>&type=<node|edge>`: Search for nodes or edges matching a pattern.
-**Benefit**: Prevents consumers from having to download and parse the entire graph, making integration more efficient for specific use cases.
-
-### 2.3. Configurable Compression Levels ✅
-Implement configuration options for compression levels in both `get_module_context` and `project_graph.json` generation. This could involve options like stripping comments, variable renaming, or more aggressive summarization.
-**Benefit**: Provides flexibility for various downstream tools, from highly token-constrained LLMs to more robust analysis tools.
-
-### 2.4. Formal API Schema and Versioning ✅
-Publish an OpenAPI (Swagger) specification for the HTTP API and a JSON Schema for `project_graph.json`. Implement API versioning (`/api/v1/`).
-**Benefit**: Ensures predictable consumption by external tools, simplifies client development, and allows for future API evolution.
-
-## 3. How CKB Can Profit
-
-### 3.1. Leverage Cartographer's Change Detection 🔄
-CKB could subscribe to Project Cartographer's internal file system change monitoring and incremental update mechanisms, being notified of changed files directly.
-**Benefit**: Reduces redundant file system operations, speeding up CKB's re-indexing process and improving overall system responsiveness.
-
-### 3.2. Pre-computation for CKB Analysis 🔄
-CKB can directly consume `project_graph.json` to get pre-computed metadata (complexity, language, high-level dependencies).
-**Benefit**: Offloads computational burden from CKB, allowing it to focus on deeper semantic analysis and speeding up initial CKB indexing.
-
-### 3.3. Augmenting CKB's Code Intelligence 🔄
-Integrate Cartographer's compressed semantic skeleton directly into CKB's knowledge base as a lightweight, always-available overview layer for faster contextual lookups.
-**Benefit**: Enhances CKB's ability to provide quick, high-level answers and navigate the codebase, potentially improving the performance of tools like `ckb_explore` and `ckb_understand`.
-
-### 3.4. "Golden Source" for Public API Surface 🔄
-Position Project Cartographer as the "golden source" for public API surface definitions and module dependencies, with CKB deferring to its output for this information.
-**Benefit**: Ensures a consistent and authoritative view of the codebase's external contracts and structure, reducing potential discrepancies between tools.
+### Integrations
+- [x] MCP server — JSON-RPC 2.0 stdio, 8 tools
+- [x] C FFI (`libcartographer.a`) — 11 functions for CKB via CGo
+  - `cartographer_version()` — compatibility gating
+  - `cartographer_git_churn()` — hotspot prioritization for CKB
+  - `cartographer_git_cochange()` — hidden coupling for CKB
+  - `cartographer_semidiff()` — semantic context for `reviewPR` / `summarizeDiff`
+- [x] CCE context compression — `compressor.py` + `tools/cce_bridge.mjs`
+- [x] `launch.py` — cross-platform installer (Rust + Node + CCE)
+- [x] Global config (`~/.config/cartographer/config.toml`)
+- [x] Per-repo `.cartographerignore`
+- [x] Webhook notifications
 
 ---
 
-## New Files Created
+## Deferred
 
-| File | Description |
-|------|-------------|
-| `mapper-core/cartographer/src/api.rs` | HTTP API service with graph querying, compression levels |
-| `mapper-core/cartographer/src/mcp.rs` | Model Context Protocol server implementation |
-| `mapper-core/cartographer/src/webhooks.rs` | Webhook notifications for graph updates |
-| `docs/api/openapi.yaml` | OpenAPI 3.0 specification for HTTP API |
+| Feature | Reason |
+|---------|--------|
+| Tree-sitter skeleton extraction | Full rewrite of `mapper.rs` + ~15 grammar crates; separate PR |
+| Hybrid BM25 + embedding search | Needs local model (bge-small via llama.cpp) + vector store |
+| PKG retrieval layer | Context pruning in MCP server — builds on tree-sitter; after that lands |

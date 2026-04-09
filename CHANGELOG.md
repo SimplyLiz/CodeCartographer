@@ -2,6 +2,15 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [1.5.0] - 2026-04-09
+
+### Added
+- **`cartographer_version()`** — FFI function returning the library version string; CKB uses this for compatibility checks before calling any other function
+- **`cartographer_git_churn(path, limit)`** — FFI wrapper for git churn analysis; returns `{ "src/api.rs": 42, ... }` (empty object when not a git repo)
+- **`cartographer_git_cochange(path, limit, min_count)`** — FFI wrapper for temporal coupling; returns sorted array of `{ fileA, fileB, count, couplingScore }` pairs
+- **`cartographer_semidiff(path, commit1, commit2)`** — FFI wrapper for semantic diff; returns per-file `{ path, status, added[], removed[] }` using skeleton extraction at each commit
+- `mod git_analysis` added to `lib.rs` — git subprocess helpers are now available to all FFI callers, not just the CLI binary
+
 ## [1.4.0] - 2026-04-09
 
 ### Added

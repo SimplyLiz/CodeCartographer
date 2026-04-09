@@ -14,6 +14,7 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
 mod api;
+mod git_analysis;
 mod layers;
 mod mapper;
 mod scanner;
@@ -546,4 +547,233 @@ pub extern "C" fn cartographer_module_context(
     });
 
     result_to_json_ptr::<serde_json::Value>(Ok(data))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Version
+// ---------------------------------------------------------------------------
+
+/// Return the Cartographer library version string (e.g. "9.0.0").
+///
+/// Output: raw C string — must be freed with `cartographer_free_string`.
+#[no_mangle]
+pub extern "C" fn cartographer_version() -> *mut c_char {
+    let version = env!("CARGO_PKG_VERSION");
+    match CString::new(version) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Git Churn
+// ---------------------------------------------------------------------------
+
+/// Return per-file commit counts over the last `limit` commits.
+///
+/// Inputs:
+///   `path`  — project root (C string)
+///   `limit` — number of commits to analyse (0 → 500)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "src/api.rs": 42,
+///     "src/main.rs": 18
+///   }
+/// }
+/// ```
+/// Returns an empty object when the directory is not a git repo.
+#[no_mangle]
+pub extern "C" fn cartographer_git_churn(path: *const c_char, limit: u32) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let limit = if limit == 0 { 500 } else { limit as usize };
+    let churn = git_analysis::git_churn(&path, limit);
+    result_to_json_ptr::<std::collections::HashMap<String, usize>>(Ok(churn))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Git Co-change
+// ---------------------------------------------------------------------------
+
+/// Return temporally coupled file pairs from the last `limit` commits.
+///
+/// Inputs:
+///   `path`      — project root (C string)
+///   `limit`     — number of commits to analyse (0 → 500)
+///   `min_count` — minimum co-change count to include (0 → 2)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": [
+///     {
+///       "fileA": "src/api.rs",
+///       "fileB": "src/main.rs",
+///       "count": 12,
+///       "couplingScore": 0.92
+///     }
+///   ]
+/// }
+/// ```
+/// Returns an empty array when the directory is not a git repo.
+#[no_mangle]
+pub extern "C" fn cartographer_git_cochange(
+    path: *const c_char,
+    limit: u32,
+    min_count: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let limit = if limit == 0 { 500 } else { limit as usize };
+    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+
+    let pairs: Vec<serde_json::Value> = git_analysis::git_cochange(&path, limit)
+        .into_iter()
+        .filter(|p| p.count >= min_count)
+        .map(|p| {
+            serde_json::json!({
+                "fileA": p.file_a,
+                "fileB": p.file_b,
+                "count": p.count,
+                "couplingScore": p.coupling_score,
+            })
+        })
+        .collect();
+
+    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(pairs))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Semantic Diff
+// ---------------------------------------------------------------------------
+
+/// Return a function-level diff between two commits.
+///
+/// Inputs:
+///   `path`    — project root (C string)
+///   `commit1` — base commit (C string)
+///   `commit2` — target commit (C string; use "HEAD" for latest)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": [
+///     {
+///       "path": "src/api.rs",
+///       "status": "modified",
+///       "added": ["pub fn new_handler(...)"],
+///       "removed": ["fn old_helper(...)"]
+///     },
+///     {
+///       "path": "src/old.rs",
+///       "status": "deleted",
+///       "added": [],
+///       "removed": ["pub fn foo()", "pub fn bar()"]
+///     }
+///   ]
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_semidiff(
+    path: *const c_char,
+    commit1: *const c_char,
+    commit2: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let c1 = if commit1.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null commit1".into()));
+    } else {
+        unsafe {
+            match CStr::from_ptr(commit1).to_str() {
+                Ok(s) => s.to_string(),
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        }
+    };
+
+    let c2 = if commit2.is_null() {
+        "HEAD".to_string()
+    } else {
+        unsafe {
+            match CStr::from_ptr(commit2).to_str() {
+                Ok(s) => s.to_string(),
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        }
+    };
+
+    let changed = git_analysis::git_diff_files(&path, &c1, &c2);
+
+    let diff: Vec<serde_json::Value> = changed
+        .iter()
+        .map(|(file_path, status)| {
+            let status_str = match status {
+                'A' => "added",
+                'D' => "deleted",
+                _ => "modified",
+            };
+            let fake_path = std::path::Path::new(file_path);
+
+            let before_sigs: Vec<String> = if *status != 'A' {
+                git_analysis::git_show_file(&path, &c1, file_path)
+                    .map(|content| {
+                        let mf = mapper::extract_skeleton(fake_path, &content);
+                        mf.signatures.into_iter().map(|s| s.raw).collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+
+            let after_sigs: Vec<String> = if *status != 'D' {
+                git_analysis::git_show_file(&path, &c2, file_path)
+                    .map(|content| {
+                        let mf = mapper::extract_skeleton(fake_path, &content);
+                        mf.signatures.into_iter().map(|s| s.raw).collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+
+            let before_set: std::collections::HashSet<&str> =
+                before_sigs.iter().map(|s| s.as_str()).collect();
+            let after_set: std::collections::HashSet<&str> =
+                after_sigs.iter().map(|s| s.as_str()).collect();
+
+            let added: Vec<&str> = after_sigs
+                .iter()
+                .filter(|s| !before_set.contains(s.as_str()))
+                .map(|s| s.as_str())
+                .collect();
+            let removed: Vec<&str> = before_sigs
+                .iter()
+                .filter(|s| !after_set.contains(s.as_str()))
+                .map(|s| s.as_str())
+                .collect();
+
+            serde_json::json!({
+                "path": file_path,
+                "status": status_str,
+                "added": added,
+                "removed": removed,
+            })
+        })
+        .collect();
+
+    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(diff))
 }
