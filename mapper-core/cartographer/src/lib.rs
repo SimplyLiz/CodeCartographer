@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 mod api;
+mod extractor;
 mod git_analysis;
 mod layers;
 mod mapper;

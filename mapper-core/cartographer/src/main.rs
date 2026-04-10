@@ -1,4 +1,5 @@
 mod api;
+mod extractor;
 mod formatter;
 mod git_analysis;
 mod global_config;

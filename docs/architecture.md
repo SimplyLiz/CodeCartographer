@@ -41,7 +41,8 @@ enrich_with_git()
 | Module | Responsibility |
 |--------|---------------|
 | `scanner.rs` | File discovery, noise filtering, `.cartographerignore`, security blocking |
-| `mapper.rs` | Language skeleton extraction; `Signature`, `MappedFile`, `SymbolKind` |
+| `mapper.rs` | Language skeleton extraction dispatcher; `Signature`, `MappedFile`, `SymbolKind` |
+| `extractor.rs` | Tree-sitter extraction (Tier 2, confidence=60) for Rust/Go/Python/TS/JS; called by `mapper.rs` after regex pass |
 | `api.rs` | `ApiState`, `rebuild_graph`, import resolution, all graph analysis |
 | `git_analysis.rs` | `git_churn`, `git_cochange`, `git_show_file`, `git_diff_files` via subprocess |
 | `layers.rs` | Architectural layer config (`layers.toml`), violation detection |
@@ -107,7 +108,12 @@ This makes IDs human-readable, stable across moves within a file, and directly c
 
 ### Confidence tiers
 
-`confidence: 30` on all current symbols = LIP Tier 1 (regex heuristic). When LIP is integrated, Tier 2 (compiler-verified, score 51–90) will upgrade these values in-place without changing the data structure.
+| Tier | Score | Source | Languages |
+|------|-------|--------|-----------|
+| 1 | 30 | Regex heuristic | Java, Kotlin, C/C++, Ruby, PHP, and all other languages |
+| 2 | 60 | Tree-sitter CST | Rust, Go, Python, TypeScript, JavaScript |
+
+Tree-sitter extraction (`extractor.rs`) runs after the regex pass in `extract_skeleton()`: it replaces the `signatures` field when `Some` is returned, preserving the regex-extracted `imports`. When LIP is integrated, Tier 3 (compiler-verified, score 51–90) will upgrade these values in-place without changing the data structure.
 
 ### Scope tracking
 
@@ -265,7 +271,8 @@ Cartographer and CKB operate at complementary layers:
 - FFI / MCP interface layer
 
 **Will be replaced by LIP when available**:
-- Regex-based symbol extraction → LIP Tier 1 (Tree-sitter)
+- Tree-sitter extraction → LIP Tier 2/3 (compiler-verified symbols, currently at 60)
 - `ckb_id` FNV hash → already replaced with LIP URI scheme
 - Import string → definition resolution → LIP reference graph
-- `confidence: 30` → upgraded to Tier 2/3 scores from LIP daemon
+- `confidence: 60` (tree-sitter) → upgraded to Tier 3 from LIP daemon when available
+- Regex fallback path (Java, C/C++, Ruby, etc.) → will be replaced language by language as grammars are added

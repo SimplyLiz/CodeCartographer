@@ -2,6 +2,28 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.0.0] - 2026-04-10
+
+### Added — Tree-sitter skeleton extraction (Tier 2)
+
+**`src/extractor.rs`** — new module that replaces regex heuristics for five languages:
+
+- **Rust** — `function_item`, `impl_item`, `trait_item`, `struct_item`, `enum_item`, `type_item`, `const_item`, `static_item`, `macro_definition`, `mod_item`
+- **Go** — `function_declaration`, `method_declaration` (receiver-qualified names), `type_declaration`, `const_declaration`, `var_declaration`
+- **Python** — `function_definition`, `class_definition`, `decorated_definition`, `assignment` (ALL_CAPS constants only)
+- **TypeScript / TSX** — function, class, method, interface, type alias, enum, arrow function (via `export const`), export statement wrappers
+- **JavaScript / JSX / MJS / CJS** — same as TypeScript minus interfaces/type aliases
+
+### Changed — Symbol confidence upgrade
+
+All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 60` (LIP Tier 2) instead of `30`. C/C++, Java, Ruby, PHP, and all other languages continue to use the Tier 1 regex path until their grammars are added.
+
+### Wiring
+
+`mapper.rs:extract_skeleton()` runs the regex path first (to preserve import extraction, which tree-sitter does not do), then calls `crate::extractor::ts_extract()`. When `Some(sigs)` is returned, the regex `signatures` are replaced with the higher-confidence tree-sitter result.
+
+---
+
 ## [1.8.0] - 2026-04-09
 
 ### Added — sed + awk equivalents

@@ -423,7 +423,8 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
 
     let rel_path = path.to_string_lossy().replace('\\', "/");
 
-    match ext.as_str() {
+    // Run regex extraction first to get imports (tree-sitter doesn't extract imports).
+    let mut mapped = match ext.as_str() {
         "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => extract_js_ts(rel_path, content),
         "rs" => extract_rust(rel_path, content),
         "py" => extract_python(rel_path, content),
@@ -433,16 +434,26 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
         "rb" => extract_ruby(rel_path, content),
         "php" => extract_php(rel_path, content),
         "md" | "txt" | "json" | "yaml" | "yml" | "toml" | "xml" | "html" | "css" | "scss"
-        | "less" | "svg" | "lock" => MappedFile {
-            path: rel_path,
-            imports: Vec::new(),
-            signatures: Vec::new(),
-            docstrings: None,
-            parameters: None,
-            return_types: None,
-        },
-        _ => extract_generic(rel_path, content),
+        | "less" | "svg" | "lock" => {
+            return MappedFile {
+                path: path.to_string_lossy().replace('\\', "/"),
+                imports: Vec::new(),
+                signatures: Vec::new(),
+                docstrings: None,
+                parameters: None,
+                return_types: None,
+            }
+        }
+        _ => extract_generic(path.to_string_lossy().replace('\\', "/"), content),
+    };
+
+    // Upgrade signatures to tree-sitter (Tier 2, confidence=60) for supported languages.
+    // Imports come from the regex pass above — tree-sitter only replaces signatures.
+    if let Some(ts_sigs) = crate::extractor::ts_extract(path, content) {
+        mapped.signatures = ts_sigs;
     }
+
+    mapped
 }
 
 // ---------------------------------------------------------------------------
