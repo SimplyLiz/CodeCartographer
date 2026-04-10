@@ -352,6 +352,239 @@ impl McpServer {
                     required: vec!["pattern".to_string()],
                 },
             },
+
+            // -----------------------------------------------------------------
+            // Architectural analysis
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "get_health".to_string(),
+                description: "Return the architectural health score and summary counts (cycles, \
+                              bridges, god modules, layer violations)."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "get_cycles".to_string(),
+                description: "Return all circular dependency cycles with severity and a suggested \
+                              pivot node to break each cycle."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "check_layers".to_string(),
+                description: "Check the project against its layers.toml architectural layer \
+                              config. Returns violations with source/target layer and severity."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "unreferenced_symbols".to_string(),
+                description: "Return public symbols that appear unreferenced across the project \
+                              (dead-code candidates). Heuristic — does not account for dynamic \
+                              dispatch or external consumers."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "simulate_change".to_string(),
+                description: "Predict the architectural impact of changing a module: affected \
+                              modules, cycle risk, layer violations, and health delta."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("module_id".to_string(), mcprop!("string", "Relative path of the module to change"));
+                        props.insert("new_signature".to_string(), mcprop!("string", "Optional new public signature being added"));
+                        props.insert("remove_signature".to_string(), mcprop!("string", "Optional signature being removed"));
+                        props
+                    },
+                    required: vec!["module_id".to_string()],
+                },
+            },
+
+            // -----------------------------------------------------------------
+            // Context / skeleton
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "skeleton_map".to_string(),
+                description: "Return a compressed skeleton of every project file: imports and \
+                              public signatures only. Ideal for giving a model a full structural \
+                              overview within a token budget."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("detail".to_string(), mcprop!("string", "Detail level: minimal, standard, or extended (default standard)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "ranked_skeleton".to_string(),
+                description: "Return a token-budget-aware skeleton ranked by PageRank. Optionally \
+                              personalise to a set of focus files so the most relevant modules \
+                              surface first."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("focus".to_string(), mcprop!("string", "JSON array of focus file paths for personalization, e.g. [\"src/api.rs\"]"));
+                        props.insert("budget".to_string(), mcprop!("number", "Max tokens to include (0 = unlimited)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+
+            // -----------------------------------------------------------------
+            // Git intelligence
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "git_churn".to_string(),
+                description: "Return per-file commit counts over recent git history. High-churn \
+                              files are hotspot candidates."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("limit".to_string(), mcprop!("number", "Number of commits to analyse (0 → 500)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "git_cochange".to_string(),
+                description: "Return file pairs that frequently change together (temporal \
+                              coupling). High coupling score = files that almost always change \
+                              in the same commit."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("limit".to_string(), mcprop!("number", "Commits to analyse (0 → 500)"));
+                        props.insert("min_count".to_string(), mcprop!("number", "Minimum co-change count to include (0 → 2)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "hidden_coupling".to_string(),
+                description: "Return file pairs that co-change frequently but have NO import \
+                              edge — implicit coupling invisible in the static graph."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("limit".to_string(), mcprop!("number", "Commits to analyse (0 → 500)"));
+                        props.insert("min_count".to_string(), mcprop!("number", "Minimum co-change count (0 → 2)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "semidiff".to_string(),
+                description: "Return a function-level semantic diff between two commits: which \
+                              public signatures were added, removed, or changed."
+                    .to_string(),
+                input_schema: mcinput!(
+                    "commit1" => "string" => "Base commit SHA or ref (e.g. HEAD~1)",
+                    "commit2" => "string" => "Target commit SHA or ref (default HEAD)"
+                ),
+            },
+            McpTool {
+                name: "poll_changes".to_string(),
+                description: "Return project files modified since a given epoch-millisecond \
+                              timestamp. Use 0 to get files changed in the last 60 seconds."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("since_ms".to_string(), mcprop!("number", "Epoch milliseconds; 0 = last 60 seconds"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+
+            // -----------------------------------------------------------------
+            // Surgical editing
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "replace_content".to_string(),
+                description: "Find-and-replace across project files (sed-like). Supports regex \
+                              with $1/$2 capture group references. Use dry_run=true to preview \
+                              changes as a diff before writing."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("pattern".to_string(), mcprop!("string", "Regex pattern to search for"));
+                        props.insert("replacement".to_string(), mcprop!("string", "Replacement string; supports $0 (whole match) and $1/$2 (capture groups)"));
+                        props.insert("dryRun".to_string(), mcprop!("boolean", "Preview changes without writing to disk (default false)"));
+                        props.insert("literal".to_string(), mcprop!("boolean", "Treat pattern as a literal string (default false)"));
+                        props.insert("caseSensitive".to_string(), mcprop!("boolean", "Case-sensitive matching (default true)"));
+                        props.insert("fileGlob".to_string(), mcprop!("string", "Restrict to files matching this glob, e.g. \"*.rs\""));
+                        props.insert("excludeGlob".to_string(), mcprop!("string", "Exclude files matching this glob"));
+                        props.insert("searchPath".to_string(), mcprop!("string", "Restrict to this repo-relative subdirectory"));
+                        props.insert("maxPerFile".to_string(), mcprop!("number", "Max replacements per file (0 = unlimited)"));
+                        props.insert("contextLines".to_string(), mcprop!("number", "Context lines in diff output (default 3)"));
+                        props
+                    },
+                    required: vec!["pattern".to_string(), "replacement".to_string()],
+                },
+            },
+            McpTool {
+                name: "extract_content".to_string(),
+                description: "Extract capture-group values from regex matches across project \
+                              files (awk-like). Use count=true for frequency tables, \
+                              groups=[1,2] for specific capture groups."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("pattern".to_string(), mcprop!("string", "Regex pattern with optional capture groups, e.g. \"pub fn (\\w+)\""));
+                        props.insert("groups".to_string(), mcprop!("string", "JSON array of capture group indices to extract, e.g. [1]. Empty = whole match."));
+                        props.insert("count".to_string(), mcprop!("boolean", "Return frequency table instead of raw matches (default false)"));
+                        props.insert("dedup".to_string(), mcprop!("boolean", "Deduplicate extracted values (default false)"));
+                        props.insert("sort".to_string(), mcprop!("boolean", "Sort output (default false)"));
+                        props.insert("caseSensitive".to_string(), mcprop!("boolean", "Case-sensitive matching (default true)"));
+                        props.insert("fileGlob".to_string(), mcprop!("string", "Restrict to files matching this glob"));
+                        props.insert("searchPath".to_string(), mcprop!("string", "Restrict to this repo-relative subdirectory"));
+                        props.insert("limit".to_string(), mcprop!("number", "Max total results (0 = unlimited, default 1000)"));
+                        props
+                    },
+                    required: vec!["pattern".to_string()],
+                },
+            },
         ]
     }
 
@@ -896,6 +1129,318 @@ impl McpServer {
                 };
                 Ok(McpToolResult {
                     content: vec![McpContent::text(content)],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Architectural analysis tools
+            // -----------------------------------------------------------------
+
+            "get_health" => {
+                let graph = self.api_state.rebuild_graph()?;
+                let m = &graph.metadata;
+                let result = serde_json::json!({
+                    "healthScore":         m.health_score,
+                    "totalFiles":          m.total_files,
+                    "totalEdges":          m.total_edges,
+                    "bridgeCount":         m.bridge_count,
+                    "cycleCount":          m.cycle_count,
+                    "godModuleCount":      m.god_module_count,
+                    "layerViolationCount": m.layer_violation_count,
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "get_cycles" => {
+                let graph = self.api_state.rebuild_graph()?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&graph.cycles).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "check_layers" => {
+                let graph = self.api_state.rebuild_graph()?;
+                let result = serde_json::json!({
+                    "violations":     graph.layer_violations,
+                    "violationCount": graph.layer_violations.len(),
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "unreferenced_symbols" => {
+                let graph = self.api_state.rebuild_graph()?;
+                let files: Vec<serde_json::Value> = graph.nodes.iter()
+                    .filter_map(|n| {
+                        let exports = n.unreferenced_exports.as_ref()?;
+                        if exports.is_empty() { return None; }
+                        Some(serde_json::json!({ "path": n.path, "symbols": exports }))
+                    })
+                    .collect();
+                let total: usize = files.iter()
+                    .map(|f| f["symbols"].as_array().map(|a| a.len()).unwrap_or(0))
+                    .sum();
+                let result = serde_json::json!({ "totalCount": total, "files": files });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "simulate_change" => {
+                let args = &call.arguments;
+                let module_id = args.get("module_id").and_then(|v| v.as_str()).ok_or("Missing module_id")?.to_string();
+                let new_sig = args.get("new_signature").and_then(|v| v.as_str()).map(str::to_string);
+                let rem_sig = args.get("remove_signature").and_then(|v| v.as_str()).map(str::to_string);
+                // Ensure graph is built before simulate_change
+                let _ = self.api_state.rebuild_graph()?;
+                let result = self.api_state.simulate_change(&module_id, new_sig.as_deref(), rem_sig.as_deref())?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Context / skeleton tools
+            // -----------------------------------------------------------------
+
+            "skeleton_map" => {
+                let args = &call.arguments;
+                let detail = args.get("detail").and_then(|v| v.as_str()).unwrap_or("standard");
+                // Rebuild graph ensures mapped_files is populated
+                let _ = self.api_state.rebuild_graph()?;
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let max_sigs = match detail {
+                    "minimal"  => 5usize,
+                    "extended" => usize::MAX,
+                    _          => 20,
+                };
+                let skeleton: Vec<serde_json::Value> = files.values().map(|mf| {
+                    let sigs: Vec<&str> = mf.signatures.iter()
+                        .take(max_sigs)
+                        .map(|s| s.raw.as_str())
+                        .collect();
+                    serde_json::json!({
+                        "path":       mf.path,
+                        "imports":    mf.imports,
+                        "signatures": sigs,
+                    })
+                }).collect();
+                let total_sigs: usize = files.values().map(|f| f.signatures.len()).sum();
+                let est_tokens: usize = skeleton.iter()
+                    .map(|f| serde_json::to_string(f).unwrap_or_default().len() / 4)
+                    .sum();
+                let result = serde_json::json!({
+                    "files":             skeleton,
+                    "totalFiles":        files.len(),
+                    "totalSignatures":   total_sigs,
+                    "estimatedTokens":   est_tokens,
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "ranked_skeleton" => {
+                let args = &call.arguments;
+                let focus_str = args.get("focus").and_then(|v| v.as_str()).unwrap_or("[]");
+                let focus: Vec<String> = serde_json::from_str(focus_str).unwrap_or_default();
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                // Ensure graph is built
+                let _ = self.api_state.rebuild_graph()?;
+                let result = self.api_state.ranked_skeleton(&focus, budget)?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Git intelligence tools
+            // -----------------------------------------------------------------
+
+            "git_churn" => {
+                let limit = call.arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let churn = crate::git_analysis::git_churn(&self.api_state.root_path, limit);
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&churn).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "git_cochange" => {
+                let args = &call.arguments;
+                let limit     = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let min_count = args.get("min_count").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+                let pairs: Vec<serde_json::Value> = crate::git_analysis::git_cochange(&self.api_state.root_path, limit)
+                    .into_iter()
+                    .filter(|p| p.count >= min_count)
+                    .map(|p| serde_json::json!({
+                        "fileA": p.file_a, "fileB": p.file_b,
+                        "count": p.count,  "couplingScore": p.coupling_score,
+                    }))
+                    .collect();
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&pairs).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "hidden_coupling" => {
+                let args = &call.arguments;
+                let limit     = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let min_count = args.get("min_count").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+                let graph = self.api_state.rebuild_graph()?;
+                // Build set of existing import edges for fast lookup
+                let edge_set: std::collections::HashSet<(String, String)> = graph.edges.iter()
+                    .flat_map(|e| [
+                        (e.source.clone(), e.target.clone()),
+                        (e.target.clone(), e.source.clone()),
+                    ])
+                    .collect();
+                let pairs: Vec<serde_json::Value> = crate::git_analysis::git_cochange(&self.api_state.root_path, limit)
+                    .into_iter()
+                    .filter(|p| p.count >= min_count)
+                    .filter(|p| !edge_set.contains(&(p.file_a.clone(), p.file_b.clone())))
+                    .map(|p| serde_json::json!({
+                        "fileA": p.file_a, "fileB": p.file_b,
+                        "count": p.count,  "couplingScore": p.coupling_score,
+                    }))
+                    .collect();
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&pairs).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "semidiff" => {
+                let args = &call.arguments;
+                let commit1 = args.get("commit1").and_then(|v| v.as_str()).ok_or("Missing commit1")?.to_string();
+                let commit2 = args.get("commit2").and_then(|v| v.as_str()).unwrap_or("HEAD").to_string();
+                let root = &self.api_state.root_path;
+                let changed = crate::git_analysis::git_diff_files(root, &commit1, &commit2);
+                let mut result: Vec<serde_json::Value> = Vec::new();
+                for (file_path, status) in &changed {
+                    let fake_path = std::path::Path::new(file_path);
+                    let before = if *status != 'A' {
+                        crate::git_analysis::git_show_file(root, &commit1, file_path)
+                            .map(|c| crate::mapper::extract_skeleton(fake_path, &c).signatures
+                                .iter().map(|s| s.raw.clone()).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    } else { vec![] };
+                    let after = if *status != 'D' {
+                        crate::git_analysis::git_show_file(root, &commit2, file_path)
+                            .map(|c| crate::mapper::extract_skeleton(fake_path, &c).signatures
+                                .iter().map(|s| s.raw.clone()).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    } else { vec![] };
+                    let before_set: std::collections::HashSet<&str> = before.iter().map(String::as_str).collect();
+                    let after_set:  std::collections::HashSet<&str> = after.iter().map(String::as_str).collect();
+                    let added:   Vec<&str> = after.iter().filter(|s| !before_set.contains(s.as_str())).map(String::as_str).collect();
+                    let removed: Vec<&str> = before.iter().filter(|s| !after_set.contains(s.as_str())).map(String::as_str).collect();
+                    result.push(serde_json::json!({
+                        "path": file_path,
+                        "status": match status { 'A' => "added", 'D' => "deleted", _ => "modified" },
+                        "added":   added,
+                        "removed": removed,
+                    }));
+                }
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "poll_changes" => {
+                let since_ms = call.arguments.get("since_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                use std::time::{Duration, SystemTime, UNIX_EPOCH};
+                let threshold_ms = if since_ms == 0 {
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
+                        .as_millis().saturating_sub(60_000) as u64
+                } else {
+                    since_ms
+                };
+                let threshold = UNIX_EPOCH + Duration::from_millis(threshold_ms);
+                let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                let scan = crate::scanner::scan_files_with_noise_tracking(&self.api_state.root_path)
+                    .map_err(|e| e.to_string())?;
+                let changed: Vec<String> = scan.files.iter()
+                    .filter(|p| !crate::scanner::is_ignored_path(p))
+                    .filter_map(|p| {
+                        let mtime = std::fs::metadata(p).ok()?.modified().ok()?;
+                        if mtime > threshold {
+                            let rel = p.strip_prefix(&self.api_state.root_path).unwrap_or(p)
+                                .to_string_lossy().replace('\\', "/");
+                            Some(rel)
+                        } else { None }
+                    })
+                    .collect();
+                let result = serde_json::json!({ "changedFiles": changed, "checkedAtMs": now_ms });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Surgical editing tools
+            // -----------------------------------------------------------------
+
+            "replace_content" => {
+                let args = &call.arguments;
+                let pattern = args.get("pattern").and_then(|v| v.as_str()).ok_or("Missing pattern")?.to_string();
+                let replacement = args.get("replacement").and_then(|v| v.as_str()).ok_or("Missing replacement")?.to_string();
+                let opts = crate::search::ReplaceOptions {
+                    literal:       args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false),
+                    case_sensitive: args.get("caseSensitive").and_then(|v| v.as_bool()).unwrap_or(true),
+                    dry_run:       args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false),
+                    backup:        false,
+                    context_lines: args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(3) as usize,
+                    file_glob:     args.get("fileGlob").and_then(|v| v.as_str()).map(String::from),
+                    exclude_glob:  args.get("excludeGlob").and_then(|v| v.as_str()).map(String::from),
+                    search_path:   args.get("searchPath").and_then(|v| v.as_str()).map(String::from),
+                    max_per_file:  args.get("maxPerFile").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    ..Default::default()
+                };
+                let result = crate::search::replace_content(&self.api_state.root_path, &pattern, &replacement, &opts)
+                    .map_err(|e| e)?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "extract_content" => {
+                let args = &call.arguments;
+                let pattern = args.get("pattern").and_then(|v| v.as_str()).ok_or("Missing pattern")?.to_string();
+                let groups: Vec<usize> = args.get("groups")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let opts = crate::search::ExtractOptions {
+                    groups,
+                    count:         args.get("count").and_then(|v| v.as_bool()).unwrap_or(false),
+                    dedup:         args.get("dedup").and_then(|v| v.as_bool()).unwrap_or(false),
+                    sort:          args.get("sort").and_then(|v| v.as_bool()).unwrap_or(false),
+                    case_sensitive: args.get("caseSensitive").and_then(|v| v.as_bool()).unwrap_or(true),
+                    file_glob:     args.get("fileGlob").and_then(|v| v.as_str()).map(String::from),
+                    search_path:   args.get("searchPath").and_then(|v| v.as_str()).map(String::from),
+                    limit:         args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as usize,
+                    ..Default::default()
+                };
+                let result = crate::search::extract_content(&self.api_state.root_path, &pattern, &opts)
+                    .map_err(|e| e)?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
