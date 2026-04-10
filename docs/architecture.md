@@ -49,7 +49,7 @@ enrich_with_git()
 | `search.rs` | Content search (`search_content`, `bm25_search`) and file find (`find_files`) — regex + BM25 + glob, noise-filtered. See [`docs/api/search.md`](api/search.md) |
 | `token_metrics.rs` | Context health scoring — 6 research-backed metrics, composite 0–100 score, graded A–F |
 | `mcp.rs` | MCP server — JSON-RPC 2.0 stdio transport, 28 tools |
-| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 16 functions consumed by CKB via CGo |
+| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 19 functions consumed by CKB via CGo |
 | `memory.rs` | Versioned local memory, incremental hash-based sync |
 | `formatter.rs` | Output formatting: XML, Markdown, JSON |
 | `global_config.rs` | `~/.config/cartographer/config.toml` |
@@ -180,12 +180,15 @@ Memory contract: all output strings are heap-allocated by Rust and **must** be f
 | `cartographer_find_files(path, pattern, limit, opts_json)` | glob file discovery |
 | `cartographer_replace_content(path, pattern, replacement, opts_json)` | sed-like find-and-replace; supports dry-run + diff |
 | `cartographer_extract_content(path, pattern, opts_json)` | awk-like capture-group extraction; count/dedup/sort |
+| `cartographer_bm25_search(path, query, opts_json)` | BM25 ranked file retrieval for natural language queries |
+| `cartographer_query_context(path, query, opts_json)` | Full PKG pipeline: BM25+regex → PageRank → health → ready bundle |
+| `cartographer_shotgun_surgery(path, limit, min_partners)` | Co-change dispersion — shotgun surgery candidates ranked by entropy |
 
 ---
 
 ## MCP server (`mcp.rs`)
 
-Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 28 tools covering the full FFI surface.
+Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 29 tools covering the full FFI surface.
 
 ### Graph & architecture
 

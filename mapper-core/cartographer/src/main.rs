@@ -224,6 +224,18 @@ enum Commands {
         #[arg(long, default_value = "15")]
         top: usize,
     },
+    /// Show files with high co-change dispersion (shotgun surgery candidates)
+    Shotgun {
+        /// Number of commits to analyse
+        #[arg(long, default_value = "500")]
+        commits: usize,
+        /// Number of results to show
+        #[arg(long, default_value = "20")]
+        top: usize,
+        /// Minimum distinct co-change partners to include
+        #[arg(long, default_value = "3")]
+        min_partners: usize,
+    },
     /// Find dead code candidates (unreachable in dependency graph)
     Dead,
     /// Export dependency graph as a diagram
@@ -648,6 +660,10 @@ fn main() -> Result<()> {
         Some(Commands::Hotspots { commits, top }) => {
             let root = resolve_path(&cwd, cli.path)?;
             hotspots_mode(&root, commits, top)
+        }
+        Some(Commands::Shotgun { commits, top, min_partners }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            shotgun_mode(&root, commits, top, min_partners)
         }
         Some(Commands::Dead) => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -2380,6 +2396,19 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
             coupling_score: p.coupling_score,
         })
         .collect();
+
+    // Co-change dispersion — shotgun surgery signal.
+    let dispersion = crate::git_analysis::git_cochange_dispersion(root, 500);
+    if !dispersion.is_empty() {
+        let disp_map: std::collections::HashMap<&str, &crate::git_analysis::CoChangeDispersion> =
+            dispersion.iter().map(|d| (d.file.as_str(), d)).collect();
+        for node in &mut graph.nodes {
+            if let Some(d) = disp_map.get(node.path.as_str()) {
+                node.cochange_partners = Some(d.partner_count);
+                node.cochange_entropy = Some((d.entropy * 100.0).round() / 100.0);
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -2500,6 +2529,50 @@ fn hotspots_mode(root: &Path, commits: usize, top: usize) -> Result<()> {
             label, path, c, sigs, score
         );
     }
+
+    Ok(())
+}
+
+// =============================================================================
+// SHOTGUN MODE — Co-change dispersion / shotgun surgery detection
+// =============================================================================
+
+fn shotgun_mode(root: &Path, commits: usize, top: usize, min_partners: usize) -> Result<()> {
+    let mut entries = crate::git_analysis::git_cochange_dispersion(root, commits);
+
+    entries.retain(|e| e.partner_count >= min_partners);
+    entries.truncate(top);
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║         Shotgun Surgery Detection                          ║");
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Last {} commits  |  min {} partners  |  top {}", commits, min_partners, top);
+    println!();
+
+    if entries.is_empty() {
+        println!("No shotgun surgery candidates found.");
+        return Ok(());
+    }
+
+    for e in &entries {
+        let tier = if e.dispersion_score >= 60.0 {
+            "HIGH    "
+        } else if e.dispersion_score >= 30.0 {
+            "MODERATE"
+        } else {
+            "LOW     "
+        };
+        println!(
+            "  [{}] {:<55} partners: {:>3}  entropy: {:.2}  score: {:.0}",
+            tier, e.file, e.partner_count, e.entropy, e.dispersion_score
+        );
+    }
+
+    println!();
+    println!(
+        "High entropy + many partners = changes scatter across unrelated modules (shotgun surgery)."
+    );
 
     Ok(())
 }

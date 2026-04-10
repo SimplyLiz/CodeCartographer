@@ -573,4 +573,72 @@ char *cartographer_extract_content(const char *path, const char *pattern, const 
  */
 char *cartographer_context_health(const char *content, const char *opts_json);
 
+/**
+ * Rank project files by BM25 relevance to a natural-language query.
+ *
+ * `path`      — project root (C string)
+ * `query`     — natural language query or symbol name (C string)
+ * `opts_json` — optional JSON object:
+ *               `{ "k1": 1.5, "b": 0.75, "maxResults": 20,
+ *                  "fileGlob": "*.rs", "searchPath": "src/", "noIgnore": false }`
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "ok": true,
+ *   "data": {
+ *     "matches": [
+ *       {
+ *         "path": "src/api.rs",
+ *         "score": 4.21,
+ *         "matchingTerms": ["rebuild", "graph"],
+ *         "snippets": ["pub fn rebuild_graph(&self) -> Result<..."]
+ *       }
+ *     ],
+ *     "total": 3
+ *   }
+ * }
+ * ```
+ */
+char *cartographer_bm25_search(const char *path, const char *query, const char *opts_json);
+
+/**
+ * Full retrieval pipeline: search → PageRank → health → ready-to-inject bundle.
+ *
+ * `path`      — project root (C string)
+ * `query`     — natural language query or symbol name (C string)
+ * `opts_json` — optional JSON:
+ *               `{ "budget": 8000, "model": "claude", "maxSearchResults": 20 }`
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "ok": true,
+ *   "data": {
+ *     "context": "## Ranked Context for: ...\n\n// src/api.rs ...",
+ *     "filesUsed": ["src/api.rs", "src/mapper.rs"],
+ *     "focusFiles": ["src/api.rs"],
+ *     "totalTokens": 3420,
+ *     "health": { "score": 82.1, "grade": "B", ... }
+ *   }
+ * }
+ * ```
+ */
+char *cartographer_query_context(const char *path, const char *query, const char *opts_json);
+
+/**
+ * Return files ranked by co-change dispersion — the shotgun surgery smell.
+ *
+ * `path`         — project root (C string)
+ * `limit`        — commits to analyse (0 → 500)
+ * `min_partners` — minimum distinct co-change partners (0 → 3)
+ *
+ * Response shape:
+ * ```json
+ * { "ok": true, "data": [{ "file": "src/api.rs", "partnerCount": 12,
+ *   "totalCochanges": 47, "entropy": 3.58, "dispersionScore": 87.0 }] }
+ * ```
+ */
+char *cartographer_shotgun_surgery(const char *path, uint32_t limit, uint32_t min_partners);
+
 #endif  /* CARTOGRAPHER_H */

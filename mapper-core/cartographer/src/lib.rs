@@ -1673,3 +1673,264 @@ pub extern "C" fn cartographer_context_health(
     let report = token_metrics::analyze(&text, &opts);
     result_to_json_ptr(Ok::<_, String>(report))
 }
+
+// ---------------------------------------------------------------------------
+// FFI: BM25 Search
+// ---------------------------------------------------------------------------
+
+/// Rank project files by BM25 relevance to a natural-language query.
+///
+/// `path`      — project root (C string)
+/// `query`     — natural language query or symbol name (C string)
+/// `opts_json` — optional JSON object:
+///               `{ "k1": 1.5, "b": 0.75, "maxResults": 20,
+///                  "fileGlob": "*.rs", "searchPath": "src/", "noIgnore": false }`
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "matches": [
+///       {
+///         "path": "src/api.rs",
+///         "score": 4.21,
+///         "matchingTerms": ["rebuild", "graph"],
+///         "snippets": ["pub fn rebuild_graph(&self) -> Result<..."]
+///       }
+///     ],
+///     "total": 3
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_bm25_search(
+    path: *const c_char,
+    query: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    if query.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null query".into()));
+    }
+    let q = unsafe {
+        match std::ffi::CStr::from_ptr(query).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct Bm25OptsJson {
+        k1: Option<f64>,
+        b: Option<f64>,
+        max_results: Option<usize>,
+        file_glob: Option<String>,
+        search_path: Option<String>,
+        no_ignore: Option<bool>,
+    }
+
+    let json_opts: Bm25OptsJson = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        Bm25OptsJson::default()
+    };
+
+    let mut opts = search::BM25Options::default();
+    if let Some(k1) = json_opts.k1 { opts.k1 = k1; }
+    if let Some(b) = json_opts.b { opts.b = b; }
+    if let Some(mr) = json_opts.max_results { opts.max_results = mr; }
+    if let Some(g) = json_opts.file_glob { opts.file_glob = Some(g); }
+    if let Some(sp) = json_opts.search_path { opts.search_path = Some(sp); }
+    if let Some(ni) = json_opts.no_ignore { opts.no_ignore = ni; }
+
+    let result = search::bm25_search(&path, &q, &opts);
+    result_to_json_ptr(Ok::<_, String>(result))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Query Context (PKG retrieval pipeline)
+// ---------------------------------------------------------------------------
+
+/// Full retrieval pipeline: search → PageRank → health → ready-to-inject bundle.
+///
+/// `path`      — project root (C string)
+/// `query`     — natural language query or symbol name (C string)
+/// `opts_json` — optional JSON:
+///               `{ "budget": 8000, "model": "claude", "maxSearchResults": 20 }`
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "context": "## Ranked Context for: ...\n\n// src/api.rs ...",
+///     "filesUsed": ["src/api.rs", "src/mapper.rs"],
+///     "focusFiles": ["src/api.rs"],
+///     "totalTokens": 3420,
+///     "health": { "score": 82.1, "grade": "B", ... }
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_query_context(
+    path: *const c_char,
+    query: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    if query.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null query".into()));
+    }
+    let q = unsafe {
+        match std::ffi::CStr::from_ptr(query).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct QueryOptsJson {
+        budget: Option<usize>,
+        model: Option<String>,
+        max_search_results: Option<usize>,
+    }
+
+    let json_opts: QueryOptsJson = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        QueryOptsJson::default()
+    };
+
+    let budget = json_opts.budget.unwrap_or(8000);
+    let max_search = json_opts.max_search_results.unwrap_or(20);
+    let model_str = json_opts.model.unwrap_or_else(|| "claude".to_string());
+
+    // Step 1: BM25 + regex search for focus seeds
+    let bm25_opts = search::BM25Options { max_results: max_search, ..Default::default() };
+    let bm25_result = search::bm25_search(&path, &q, &bm25_opts).unwrap_or_default();
+
+    let search_opts = search::SearchOptions { case_sensitive: false, max_results: max_search, ..Default::default() };
+    let regex_hits: Vec<String> = search::search_content(&path, &q, &search_opts)
+        .map(|sr| {
+            let mut seen = std::collections::HashSet::new();
+            sr.matches.into_iter()
+                .filter_map(|m| if seen.insert(m.path.clone()) { Some(m.path) } else { None })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Merge: BM25 first (ranked), then regex hits not already present
+    let mut focus_files: Vec<String> = bm25_result.matches.iter().map(|m| m.path.clone()).collect();
+    for p in regex_hits {
+        if !focus_files.contains(&p) {
+            focus_files.push(p);
+        }
+    }
+    focus_files.truncate(max_search);
+
+    // Step 2: ranked skeleton personalised to focus files
+    let mapped_files = match build_mapped_files(&path) {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let state = ApiState::new(path.clone());
+    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
+    if let Err(e) = state.rebuild_graph() {
+        return result_to_json_ptr::<serde_json::Value>(Err(e));
+    }
+
+    let ranked = match state.ranked_skeleton(&focus_files, budget) {
+        Ok(r) => r,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    // Step 3: build context text
+    let mut context_text = format!("## Ranked Context for: {}\n\n", q);
+    let total_tokens: usize = ranked.iter().map(|f| f.estimated_tokens).sum();
+    let sig_count: usize = ranked.iter().map(|f| f.signatures.len()).sum();
+    let files_used: Vec<String> = ranked.iter().map(|f| f.path.clone()).collect();
+
+    for f in &ranked {
+        context_text.push_str(&format!("// {} (rank: {:.4}, {} tokens)\n", f.path, f.rank, f.estimated_tokens));
+        for sig in &f.signatures {
+            context_text.push_str(&format!("  {}\n", sig));
+        }
+        context_text.push('\n');
+    }
+
+    // Step 4: health score
+    let model = model_str.parse::<token_metrics::ModelFamily>().unwrap_or_default();
+    let health_opts = token_metrics::HealthOpts {
+        model,
+        window_size: 0,
+        key_positions: token_metrics::key_positions_from_order(&files_used, &focus_files),
+        signature_count: sig_count,
+        signature_tokens: (total_tokens as f64 * 0.85) as usize,
+    };
+    let health = token_metrics::analyze(&context_text, &health_opts);
+
+    let data = serde_json::json!({
+        "context": context_text,
+        "filesUsed": files_used,
+        "focusFiles": focus_files,
+        "totalTokens": total_tokens,
+        "health": health,
+    });
+
+    result_to_json_ptr::<serde_json::Value>(Ok(data))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Shotgun Surgery (co-change dispersion)
+// ---------------------------------------------------------------------------
+
+/// Return files ranked by co-change dispersion — the shotgun surgery smell.
+///
+/// `path`         — project root (C string)
+/// `limit`        — commits to analyse (0 → 500)
+/// `min_partners` — minimum distinct co-change partners (0 → 3)
+///
+/// Response shape:
+/// ```json
+/// { "ok": true, "data": [{ "file": "src/api.rs", "partnerCount": 12,
+///   "totalCochanges": 47, "entropy": 3.58, "dispersionScore": 87.0 }] }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_shotgun_surgery(
+    path: *const c_char,
+    limit: u32,
+    min_partners: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let limit = if limit == 0 { 500 } else { limit as usize };
+    let min_partners = if min_partners == 0 { 3 } else { min_partners as usize };
+
+    let mut entries = git_analysis::git_cochange_dispersion(&path, limit);
+    entries.retain(|e| e.partner_count >= min_partners);
+
+    result_to_json_ptr(Ok::<_, String>(entries))
+}

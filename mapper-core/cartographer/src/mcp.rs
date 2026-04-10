@@ -610,6 +610,28 @@ impl McpServer {
                     required: vec!["query".to_string()],
                 },
             },
+            // Shotgun surgery / co-change dispersion
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "shotgun_surgery".to_string(),
+                description: "Detect shotgun surgery candidates — files whose changes scatter \
+                              across many unrelated modules. Computes co-change dispersion \
+                              (arXiv:2504.18511): partner count and Shannon entropy over the \
+                              co-change distribution. High entropy + many partners means a single \
+                              change forces edits in many unrelated places."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("maxResults".to_string(), mcprop!("number", "Max entries to return (default 20)"));
+                        props.insert("minPartners".to_string(), mcprop!("number", "Minimum distinct co-change partners to include (default 3)"));
+                        props.insert("commits".to_string(), mcprop!("number", "Number of commits to analyse (default 500)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
             // Context quality
             // -----------------------------------------------------------------
             McpTool {
@@ -1574,6 +1596,27 @@ impl McpServer {
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            "shotgun_surgery" => {
+                let args = &call.arguments;
+                let commits = args.get("commits").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+                let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let min_partners = args.get("minPartners").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+
+                let mut entries = crate::git_analysis::git_cochange_dispersion(
+                    &self.api_state.root_path,
+                    commits,
+                );
+                entries.retain(|e| e.partner_count >= min_partners);
+                entries.truncate(max_results);
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&entries).unwrap_or_default(),
                     )],
                     is_error: None,
                 })

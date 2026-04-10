@@ -254,6 +254,94 @@ pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
 }
 
 // ---------------------------------------------------------------------------
+// Co-change dispersion / shotgun-surgery detection
+// ---------------------------------------------------------------------------
+
+/// Per-file co-change dispersion — how widely a file's changes scatter across
+/// the codebase. High dispersion is the shotgun-surgery code smell:
+/// one change triggers edits across many unrelated modules.
+/// (arXiv:2504.18511 — Co-Change Graph Entropy for defect prediction)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CoChangeDispersion {
+    pub file: String,
+    /// Number of distinct files this file has co-changed with.
+    pub partner_count: usize,
+    /// Sum of co-change counts across all partners.
+    pub total_cochanges: usize,
+    /// Shannon entropy: −Σ p_i·log₂(p_i). Higher = more evenly spread across partners.
+    pub entropy: f64,
+    /// partner_count normalised to 0–100 across all files in the project.
+    pub dispersion_score: f64,
+}
+
+/// Compute co-change dispersion for every file that appears in the co-change graph.
+///
+/// Reuses the existing co-change pairs — no additional git call.
+pub fn git_cochange_dispersion(root: &Path, limit: usize) -> Vec<CoChangeDispersion> {
+    let pairs = git_cochange(root, limit);
+    if pairs.is_empty() {
+        return vec![];
+    }
+
+    // Build per-file partner maps: file → { partner → count }
+    let mut partner_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for p in &pairs {
+        *partner_counts
+            .entry(p.file_a.clone())
+            .or_default()
+            .entry(p.file_b.clone())
+            .or_insert(0) += p.count;
+        *partner_counts
+            .entry(p.file_b.clone())
+            .or_default()
+            .entry(p.file_a.clone())
+            .or_insert(0) += p.count;
+    }
+
+    let max_partners = partner_counts.values().map(|m| m.len()).max().unwrap_or(1).max(1) as f64;
+
+    let mut result: Vec<CoChangeDispersion> = partner_counts
+        .into_iter()
+        .map(|(file, partners)| {
+            let partner_count = partners.len();
+            let total_cochanges: usize = partners.values().sum();
+            let total = total_cochanges as f64;
+
+            // Shannon entropy
+            let entropy = if total > 0.0 {
+                partners
+                    .values()
+                    .filter(|&&c| c > 0)
+                    .map(|&c| {
+                        let p = c as f64 / total;
+                        -p * p.log2()
+                    })
+                    .sum::<f64>()
+            } else {
+                0.0
+            };
+
+            let dispersion_score = (partner_count as f64 / max_partners * 100.0).round();
+
+            CoChangeDispersion {
+                file,
+                partner_count,
+                total_cochanges,
+                entropy,
+                dispersion_score,
+            }
+        })
+        .collect();
+
+    result.sort_by(|a, b| {
+        b.dispersion_score
+            .partial_cmp(&a.dispersion_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
+}
+
+// ---------------------------------------------------------------------------
 // git_show_file
 // ---------------------------------------------------------------------------
 

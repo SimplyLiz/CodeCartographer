@@ -110,6 +110,14 @@ pub struct GraphNode {
     pub is_dead: Option<bool>,
     /// Exported symbols not found in any other file's imports (heuristic).
     pub unreferenced_exports: Option<Vec<String>>,
+    /// Number of other files that import this file (in-degree).
+    pub fan_in: Option<usize>,
+    /// Number of other files this file imports (out-degree = CBO).
+    pub fan_out: Option<usize>,
+    /// Number of distinct files this file has co-changed with (shotgun surgery signal).
+    pub cochange_partners: Option<usize>,
+    /// Shannon entropy of co-change distribution (higher = more scattered changes).
+    pub cochange_entropy: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -436,6 +444,10 @@ impl ApiState {
                 role: None,
                 is_dead: None,
                 unreferenced_exports: None,
+                fan_in: None,
+                fan_out: None,
+                cochange_partners: None,
+                cochange_entropy: None,
             });
 
             for import in &file.imports {
@@ -505,6 +517,9 @@ impl ApiState {
 
             let is_entry_name = is_entry_point_path(&node.path);
             let is_test = is_test_path(&node.path);
+
+            node.fan_in = Some(ind);
+            node.fan_out = Some(outd);
 
             // Role assignment (bridge takes priority over other roles).
             node.role = Some(if node.is_bridge == Some(true) {

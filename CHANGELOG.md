@@ -2,6 +2,28 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.4.0] - 2026-04-10
+
+### Added — Co-change dispersion / shotgun surgery detection
+
+**`src/git_analysis.rs`** — `CoChangeDispersion` struct + `git_cochange_dispersion()`:
+- For each file, computes: `partner_count` (distinct co-change partners), `total_cochanges`, Shannon entropy (`−Σ p_i·log₂(p_i)`), and `dispersion_score` (0–100 normalised). High entropy + many partners = shotgun surgery smell (arXiv:2504.18511)
+- Reuses existing `git_cochange()` output — no extra git subprocess
+
+**`src/api.rs`** — 4 new fields on `GraphNode`:
+- `fan_in` — in-degree (number of files that import this file)
+- `fan_out` — out-degree = CBO, Coupling Between Objects (number of files this imports)
+- `cochange_partners` — distinct co-change partners (populated by `enrich_with_git`)
+- `cochange_entropy` — Shannon entropy of co-change distribution
+
+**CLI**: `cartographer shotgun [--commits N] [--top N] [--min-partners N]` — ranked shotgun surgery candidates with HIGH/MODERATE/LOW tiers
+
+**MCP tool**: `shotgun_surgery` — tool #29; returns `CoChangeDispersion[]` ranked by dispersion score
+
+**FFI**: `cartographer_shotgun_surgery(path, limit, min_partners) -> *mut c_char` — #19
+
+---
+
 ## [2.3.0] - 2026-04-10
 
 ### Added — Context health scoring (`token_metrics`)
