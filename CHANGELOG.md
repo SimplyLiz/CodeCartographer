@@ -2,6 +2,40 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [1.8.0] - 2026-04-09
+
+### Added — sed + awk equivalents
+
+**`cartographer replace <PATTERN> <REPLACEMENT>`** — regex find-and-replace across project files:
+- Replacement string supports `$0` (whole match), `$1`/`$2` (capture groups)
+- `--dry-run` — preview what would change (shows colored diff, no writes)
+- `--backup` — write `.bak` before modifying each file
+- `-i` — case-insensitive; `-w` — whole-word; `--literal` — treat as literal string
+- `-C N` — context lines in diff output (default: 3)
+- `--glob "*.rs"` / `--exclude "*.gen.go"` / `--path src/api` — scope filters
+- `--max-per-file N` — cap replacements per file (0 = unlimited)
+- `--no-ignore` — operate on vendor/generated files too
+- Colored terminal diff: red `-` for removed, green `+` for added lines
+- Summary: files changed, total replacements, backup notice
+
+**`cartographer extract <PATTERN>`** — capture-group extraction across project files (awk-like):
+- `-g N` / `--group N` — capture group index (repeatable; default: 0 = whole match)
+- `--count` — aggregate: show frequency table sorted by count descending
+- `--dedup` — deduplicate extracted values
+- `--sort` — sort output alphabetically (combined with `--count` → by frequency)
+- `--format text|json|csv|tsv` — output format
+- `--sep SEP` — separator between multiple groups (default: tab)
+- `-i` — case-insensitive; `--glob` / `--exclude` / `--path` / `--no-ignore` — scope filters
+- `--limit N` — cap total results
+
+**FFI additions** (CKB + CGo consumers):
+- `cartographer_replace_content(path, pattern, replacement, opts_json)`
+- `cartographer_extract_content(path, pattern, opts_json)`
+
+**CKB bridge** — `ReplaceOptions`, `ReplaceResult`, `FileChange`, `DiffLine`, `ExtractOptions`, `ExtractResult`, `ExtractMatch`, `CountEntry` added to `internal/cartographer`
+
+---
+
 ## [1.7.0] - 2026-04-09
 
 ### Added — full grep + find parity

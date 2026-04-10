@@ -359,6 +359,90 @@ enum Commands {
         #[arg(long)]
         no_ignore: bool,
     },
+    /// Find-and-replace across project files (sed-like)
+    Replace {
+        /// Regex pattern to search for
+        #[arg(value_name = "PATTERN")]
+        pattern: String,
+        /// Replacement string; supports $0 (whole match) and $1/$2 (capture groups)
+        #[arg(value_name = "REPLACEMENT")]
+        replacement: String,
+        /// Treat pattern as a literal string (no regex metacharacters)
+        #[arg(long)]
+        literal: bool,
+        /// Case-insensitive matching
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Whole-word matching (wraps pattern in \b…\b)
+        #[arg(short = 'w', long)]
+        word_regexp: bool,
+        /// Show what would change without writing to disk
+        #[arg(long)]
+        dry_run: bool,
+        /// Write a .bak backup before modifying each file
+        #[arg(long)]
+        backup: bool,
+        /// Context lines in diff output
+        #[arg(short = 'C', long, value_name = "N", default_value = "3")]
+        context: usize,
+        /// Restrict to files matching this glob (e.g. "*.rs")
+        #[arg(long, value_name = "GLOB")]
+        glob: Option<String>,
+        /// Exclude files matching this glob
+        #[arg(long, value_name = "GLOB")]
+        exclude: Option<String>,
+        /// Restrict to this repo-relative subdirectory
+        #[arg(long, value_name = "SUBDIR")]
+        path: Option<String>,
+        /// Max replacements per file (0 = unlimited)
+        #[arg(long, value_name = "N", default_value = "0")]
+        max_per_file: usize,
+        /// Include vendor/generated/noise files (bypass ignore filter)
+        #[arg(long)]
+        no_ignore: bool,
+    },
+    /// Extract capture-group values from regex matches (awk-like)
+    Extract {
+        /// Regex pattern (use groups like `(foo)` to capture substrings)
+        #[arg(value_name = "PATTERN")]
+        pattern: String,
+        /// Capture group index to extract (repeatable; 0 = whole match)
+        #[arg(long = "group", short = 'g', value_name = "N")]
+        groups: Vec<usize>,
+        /// Separator between groups when multiple are selected
+        #[arg(long, value_name = "SEP", default_value = "\t")]
+        sep: String,
+        /// Output format: text, json, csv, or tsv
+        #[arg(long, value_name = "FMT", default_value = "text")]
+        format: String,
+        /// Aggregate: count occurrences per unique value
+        #[arg(long)]
+        count: bool,
+        /// Deduplicate extracted values
+        #[arg(long)]
+        dedup: bool,
+        /// Sort output (ascending; with --count sorts by frequency descending)
+        #[arg(long)]
+        sort: bool,
+        /// Case-insensitive matching
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Restrict to files matching this glob
+        #[arg(long, value_name = "GLOB")]
+        glob: Option<String>,
+        /// Exclude files matching this glob
+        #[arg(long, value_name = "GLOB")]
+        exclude: Option<String>,
+        /// Restrict to this repo-relative subdirectory
+        #[arg(long, value_name = "SUBDIR")]
+        path: Option<String>,
+        /// Max total results (0 = unlimited)
+        #[arg(long, default_value = "1000")]
+        limit: usize,
+        /// Include vendor/generated/noise files (bypass ignore filter)
+        #[arg(long)]
+        no_ignore: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -584,6 +668,28 @@ fn main() -> Result<()> {
         Some(Commands::Find { pattern, modified_since, newer, min_size, max_size, max_depth, limit, no_ignore }) => {
             let root = resolve_path(&cwd, cli.path)?;
             find_mode(&root, &pattern, modified_since.as_deref(), newer.as_deref(), min_size, max_size, max_depth, limit, no_ignore)
+        }
+        Some(Commands::Replace {
+            pattern, replacement, literal, ignore_case, word_regexp, dry_run,
+            backup, context, glob, exclude, path, max_per_file, no_ignore,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            replace_mode(
+                &root, &pattern, &replacement, literal, ignore_case, word_regexp,
+                dry_run, backup, context, glob.as_deref(), exclude.as_deref(),
+                path.as_deref(), max_per_file, no_ignore,
+            )
+        }
+        Some(Commands::Extract {
+            pattern, groups, sep, format, count, dedup, sort, ignore_case,
+            glob, exclude, path, limit, no_ignore,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            extract_mode(
+                &root, &pattern, &groups, &sep, &format, count, dedup, sort,
+                ignore_case, glob.as_deref(), exclude.as_deref(),
+                path.as_deref(), limit, no_ignore,
+            )
         }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -3407,6 +3513,191 @@ fn symbols_mode(root: &Path, unreferenced_only: bool) -> Result<()> {
     println!();
     println!("Note: Uses import-token heuristic. Does not account for dynamic dispatch,");
     println!("reflection, or external consumers of library crates.");
+
+    Ok(())
+}
+
+// =============================================================================
+// REPLACE MODE — sed-like find-and-replace
+// =============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn replace_mode(
+    root: &Path,
+    pattern: &str,
+    replacement: &str,
+    literal: bool,
+    ignore_case: bool,
+    word_regexp: bool,
+    dry_run: bool,
+    backup: bool,
+    context: usize,
+    glob: Option<&str>,
+    exclude: Option<&str>,
+    search_path: Option<&str>,
+    max_per_file: usize,
+    no_ignore: bool,
+) -> Result<()> {
+    use crate::search::{replace_content, ReplaceOptions};
+
+    let opts = ReplaceOptions {
+        literal,
+        case_sensitive: !ignore_case,
+        word_regexp,
+        dry_run,
+        backup,
+        context_lines: context,
+        file_glob: glob.map(str::to_string),
+        exclude_glob: exclude.map(str::to_string),
+        search_path: search_path.map(str::to_string),
+        no_ignore,
+        max_per_file,
+    };
+
+    let result = replace_content(root, pattern, replacement, &opts)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if result.changes.is_empty() {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("DRY RUN — no files will be written\n");
+    }
+
+    for change in &result.changes {
+        let action = if dry_run { "would change" } else { "changed" };
+        println!(
+            "{} — {} replacement{}",
+            change.path,
+            change.replacements,
+            if change.replacements == 1 { "" } else { "s" }
+        );
+        println!("({} {})", action, change.path);
+
+        for line in &change.diff {
+            match line.kind.as_str() {
+                "removed"   => println!("\x1b[31m- {:>4} {}\x1b[0m", line.line_number, line.content),
+                "added"     => println!("\x1b[32m+ {:>4} {}\x1b[0m", line.line_number, line.content),
+                "context"   => println!("  {:>4} {}", line.line_number, line.content),
+                "separator" => println!("  ..."),
+                _           => {}
+            }
+        }
+        println!();
+    }
+
+    println!(
+        "Summary: {} file{} {} — {} replacement{} total{}",
+        result.files_changed,
+        if result.files_changed == 1 { "" } else { "s" },
+        if dry_run { "would be changed" } else { "changed" },
+        result.total_replacements,
+        if result.total_replacements == 1 { "" } else { "s" },
+        if backup && !dry_run { " (.bak backups written)" } else { "" },
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// EXTRACT MODE — awk-like capture group extraction
+// =============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn extract_mode(
+    root: &Path,
+    pattern: &str,
+    groups: &[usize],
+    sep: &str,
+    format: &str,
+    count: bool,
+    dedup: bool,
+    sort: bool,
+    ignore_case: bool,
+    glob: Option<&str>,
+    exclude: Option<&str>,
+    search_path: Option<&str>,
+    limit: usize,
+    no_ignore: bool,
+) -> Result<()> {
+    use crate::search::{extract_content, ExtractOptions};
+
+    let opts = ExtractOptions {
+        groups: groups.to_vec(),
+        separator: sep.to_string(),
+        format: format.to_string(),
+        count,
+        dedup,
+        sort,
+        case_sensitive: !ignore_case,
+        file_glob: glob.map(str::to_string),
+        exclude_glob: exclude.map(str::to_string),
+        search_path: search_path.map(str::to_string),
+        no_ignore,
+        limit,
+    };
+
+    let result = extract_content(root, pattern, &opts)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if result.total == 0 {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    match format {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        }
+        "csv" | "tsv" => {
+            let delim = if format == "csv" { "," } else { "\t" };
+            if count {
+                for entry in &result.counts {
+                    // escape commas for CSV
+                    let val = if format == "csv" {
+                        format!("\"{}\"", entry.value.replace('"', "\"\""))
+                    } else {
+                        entry.value.clone()
+                    };
+                    println!("{}{}{}", val, delim, entry.count);
+                }
+            } else {
+                for m in &result.matches {
+                    let row: Vec<String> = if format == "csv" {
+                        m.groups.iter().map(|g| format!("\"{}\"", g.replace('"', "\"\""))).collect()
+                    } else {
+                        m.groups.clone()
+                    };
+                    println!("{}", row.join(delim));
+                }
+            }
+        }
+        _ => {
+            // text (default)
+            if count {
+                for entry in &result.counts {
+                    println!("{:>6}  {}", entry.count, entry.value);
+                }
+            } else {
+                for m in &result.matches {
+                    println!("{}", m.groups.join(sep));
+                }
+            }
+        }
+    }
+
+    if format != "json" {
+        eprintln!(
+            "\n{} match{} from {} file{}{}",
+            result.total,
+            if result.total == 1 { "" } else { "es" },
+            result.files_searched,
+            if result.files_searched == 1 { "" } else { "s" },
+            if result.truncated { " (truncated)" } else { "" },
+        );
+    }
 
     Ok(())
 }

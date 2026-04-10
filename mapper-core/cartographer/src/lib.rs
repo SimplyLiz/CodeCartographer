@@ -1434,3 +1434,153 @@ pub extern "C" fn cartographer_poll_changes(
         "checkedAtMs": now_ms,
     })))
 }
+
+/// Regex find-and-replace across project files (sed-like).
+///
+/// Inputs:
+///   `path`        — project root (C string)
+///   `pattern`     — regex pattern (C string)
+///   `replacement` — replacement string; supports `$0` / `$1` capture refs (C string)
+///   `opts_json`   — JSON-encoded `ReplaceOptions` (may be null → defaults)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "filesChanged": 3,
+///     "totalReplacements": 12,
+///     "dryRun": false,
+///     "changes": [
+///       {
+///         "path": "src/api.rs",
+///         "replacements": 4,
+///         "diff": [
+///           { "kind": "context",  "lineNumber": 9,  "content": "fn old()" },
+///           { "kind": "removed",  "lineNumber": 10, "content": "    let x = 1;" },
+///           { "kind": "added",    "lineNumber": 10, "content": "    let x = 2;" }
+///         ]
+///       }
+///     ]
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_replace_content(
+    path: *const c_char,
+    pattern: *const c_char,
+    replacement: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    if pattern.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null pattern".into()));
+    }
+    let pat = unsafe {
+        match std::ffi::CStr::from_ptr(pattern).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+    if replacement.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null replacement".into()));
+    }
+    let repl = unsafe {
+        match std::ffi::CStr::from_ptr(replacement).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+    let opts: search::ReplaceOptions = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        search::ReplaceOptions::default()
+    };
+
+    let result = search::replace_content(&path, &pat, &repl, &opts);
+    result_to_json_ptr(result)
+}
+
+/// Extract capture-group values from regex matches across project files (awk-like).
+///
+/// Inputs:
+///   `path`      — project root (C string)
+///   `pattern`   — regex pattern with optional capture groups (C string)
+///   `opts_json` — JSON-encoded `ExtractOptions` (may be null → defaults)
+///
+/// Options JSON shape:
+/// ```json
+/// {
+///   "groups":        [1, 2],
+///   "separator":     "\t",
+///   "format":        "text",
+///   "count":         false,
+///   "dedup":         false,
+///   "sort":          false,
+///   "caseSensitive": true,
+///   "fileGlob":      "*.rs",
+///   "excludeGlob":   null,
+///   "searchPath":    null,
+///   "noIgnore":      false,
+///   "limit":         0
+/// }
+/// ```
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "matches": [
+///       { "path": "src/api.rs", "lineNumber": 42, "groups": ["pub fn foo", "foo"] }
+///     ],
+///     "counts": [],
+///     "total": 1,
+///     "filesSearched": 18,
+///     "truncated": false
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_extract_content(
+    path: *const c_char,
+    pattern: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    if pattern.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null pattern".into()));
+    }
+    let pat = unsafe {
+        match std::ffi::CStr::from_ptr(pattern).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+    let opts: search::ExtractOptions = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        search::ExtractOptions::default()
+    };
+
+    let result = search::extract_content(&path, &pat, &opts);
+    result_to_json_ptr(result)
+}

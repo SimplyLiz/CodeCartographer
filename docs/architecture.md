@@ -170,6 +170,9 @@ Memory contract: all output strings are heap-allocated by Rust and **must** be f
 | `cartographer_ranked_skeleton(path, focus_json, budget)` | PageRank-ordered skeleton |
 | `cartographer_unreferenced_symbols(path)` | `{totalCount, files:[{path,symbols}]}` |
 | `cartographer_search_content(path, pattern, opts_json)` | grep-like search results |
+| `cartographer_find_files(path, pattern, limit, opts_json)` | glob file discovery |
+| `cartographer_replace_content(path, pattern, replacement, opts_json)` | sed-like find-and-replace; supports dry-run + diff |
+| `cartographer_extract_content(path, pattern, opts_json)` | awk-like capture-group extraction; count/dedup/sort |
 
 ---
 

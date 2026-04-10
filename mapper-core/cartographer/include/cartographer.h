@@ -460,4 +460,85 @@ char *cartographer_evolution(const char *path, uint32_t days);
  */
 char *cartographer_poll_changes(const char *path, uint64_t since_ms);
 
+/**
+ * Regex find-and-replace across project files (sed-like).
+ *
+ * Inputs:
+ *   `path`        — project root (C string)
+ *   `pattern`     — regex pattern (C string)
+ *   `replacement` — replacement string; supports `$0` / `$1` capture refs (C string)
+ *   `opts_json`   — JSON-encoded `ReplaceOptions` (may be null → defaults)
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "ok": true,
+ *   "data": {
+ *     "filesChanged": 3,
+ *     "totalReplacements": 12,
+ *     "dryRun": false,
+ *     "changes": [
+ *       {
+ *         "path": "src/api.rs",
+ *         "replacements": 4,
+ *         "diff": [
+ *           { "kind": "context",  "lineNumber": 9,  "content": "fn old()" },
+ *           { "kind": "removed",  "lineNumber": 10, "content": "    let x = 1;" },
+ *           { "kind": "added",    "lineNumber": 10, "content": "    let x = 2;" }
+ *         ]
+ *       }
+ *     ]
+ *   }
+ * }
+ * ```
+ */
+char *cartographer_replace_content(const char *path,
+                                   const char *pattern,
+                                   const char *replacement,
+                                   const char *opts_json);
+
+/**
+ * Extract capture-group values from regex matches across project files (awk-like).
+ *
+ * Inputs:
+ *   `path`      — project root (C string)
+ *   `pattern`   — regex pattern with optional capture groups (C string)
+ *   `opts_json` — JSON-encoded `ExtractOptions` (may be null → defaults)
+ *
+ * Options JSON shape:
+ * ```json
+ * {
+ *   "groups":        [1, 2],
+ *   "separator":     "\t",
+ *   "format":        "text",
+ *   "count":         false,
+ *   "dedup":         false,
+ *   "sort":          false,
+ *   "caseSensitive": true,
+ *   "fileGlob":      "*.rs",
+ *   "excludeGlob":   null,
+ *   "searchPath":    null,
+ *   "noIgnore":      false,
+ *   "limit":         0
+ * }
+ * ```
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "ok": true,
+ *   "data": {
+ *     "matches": [
+ *       { "path": "src/api.rs", "lineNumber": 42, "groups": ["pub fn foo", "foo"] }
+ *     ],
+ *     "counts": [],
+ *     "total": 1,
+ *     "filesSearched": 18,
+ *     "truncated": false
+ *   }
+ * }
+ * ```
+ */
+char *cartographer_extract_content(const char *path, const char *pattern, const char *opts_json);
+
 #endif  /* CARTOGRAPHER_H */

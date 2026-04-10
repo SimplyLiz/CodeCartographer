@@ -631,6 +631,409 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Replace (sed equivalent)
+// ---------------------------------------------------------------------------
+
+/// Options for `replace_content`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceOptions {
+    /// Treat pattern as a literal string.
+    #[serde(default)]
+    pub literal: bool,
+    /// Case-sensitive match (default: true).
+    #[serde(default = "default_true")]
+    pub case_sensitive: bool,
+    /// Whole-word matching (`\b…\b`).
+    #[serde(default)]
+    pub word_regexp: bool,
+    /// Report changes without writing to disk.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Write a `.bak` backup before modifying each file.
+    #[serde(default)]
+    pub backup: bool,
+    /// Context lines to include in the diff output.
+    #[serde(default = "default_ctx3")]
+    pub context_lines: usize,
+    /// Restrict to files matching this glob.
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    /// Exclude files matching this glob.
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
+    /// Restrict to this repo-relative subdirectory.
+    #[serde(default)]
+    pub search_path: Option<String>,
+    /// Bypass noise/vendor filter.
+    #[serde(default)]
+    pub no_ignore: bool,
+    /// Max replacements per file (0 = unlimited).
+    #[serde(default)]
+    pub max_per_file: usize,
+}
+
+fn default_ctx3() -> usize { 3 }
+
+impl Default for ReplaceOptions {
+    fn default() -> Self {
+        Self {
+            literal: false,
+            case_sensitive: true,
+            word_regexp: false,
+            dry_run: false,
+            backup: false,
+            context_lines: 3,
+            file_glob: None,
+            exclude_glob: None,
+            search_path: None,
+            no_ignore: false,
+            max_per_file: 0,
+        }
+    }
+}
+
+/// One line in a contextual unified-style diff.
+#[derive(Debug, Serialize, Clone)]
+pub struct DiffLine {
+    /// `"context"`, `"removed"`, `"added"`, or `"separator"`.
+    pub kind: String,
+    pub line_number: usize,
+    pub content: String,
+}
+
+/// Changes applied (or previewed) for a single file.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    pub path: String,
+    pub replacements: usize,
+    pub diff: Vec<DiffLine>,
+}
+
+/// Top-level result of `replace_content`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceResult {
+    pub files_changed: usize,
+    pub total_replacements: usize,
+    pub changes: Vec<FileChange>,
+    pub dry_run: bool,
+}
+
+/// Regex find-and-replace across project files.
+///
+/// `replacement` supports `$0` (whole match) and `$1`/`$2` (capture groups).
+/// When `dry_run = true` files are not written; only the diff is returned.
+pub fn replace_content(
+    root: &Path,
+    pattern: &str,
+    replacement: &str,
+    opts: &ReplaceOptions,
+) -> Result<ReplaceResult, String> {
+    if pattern.is_empty() {
+        return Err("pattern must not be empty".into());
+    }
+    let re = build_re(pattern, opts.literal, opts.word_regexp, opts.case_sensitive)?;
+
+    let effective_root = match &opts.search_path {
+        Some(sp) => root.join(sp),
+        None => root.to_path_buf(),
+    };
+    let file_glob_re = opts.file_glob.as_deref().and_then(build_glob_regex);
+    let excl_re = opts.exclude_glob.as_deref().and_then(build_glob_regex);
+    let file_list = enumerate_files(&effective_root, opts.no_ignore)?;
+
+    let mut changes: Vec<FileChange> = Vec::new();
+    let mut total_replacements: usize = 0;
+
+    for abs_path in &file_list {
+        let rel = rel_path(root, abs_path);
+        if let Some(ref gr) = file_glob_re { if !gr.is_match(&rel) { continue; } }
+        if let Some(ref er) = excl_re { if er.is_match(&rel) { continue; } }
+
+        let original = match std::fs::read_to_string(abs_path) {
+            Ok(s) => s,
+            Err(_) => continue, // binary / unreadable
+        };
+
+        let match_count = re.find_iter(&original).count();
+        if match_count == 0 { continue; }
+
+        // 0 in regex crate = replace all
+        let regex_limit = opts.max_per_file; // 0 = all
+        let n = if opts.max_per_file == 0 { match_count } else { match_count.min(opts.max_per_file) };
+
+        let replaced = re.replacen(&original, regex_limit, replacement as &str).into_owned();
+        let diff = build_diff(&original, &replaced, opts.context_lines);
+
+        if !opts.dry_run {
+            if opts.backup {
+                let bak = format!("{}.bak", abs_path.to_string_lossy());
+                let _ = std::fs::copy(abs_path, bak);
+            }
+            std::fs::write(abs_path, replaced.as_bytes())
+                .map_err(|e| format!("write {}: {}", rel, e))?;
+        }
+
+        total_replacements += n;
+        changes.push(FileChange { path: rel, replacements: n, diff });
+    }
+
+    Ok(ReplaceResult {
+        files_changed: changes.len(),
+        total_replacements,
+        changes,
+        dry_run: opts.dry_run,
+    })
+}
+
+/// Build a contextual diff between two versions of a file.
+/// Since replacements are in-place (same line numbers), a simple line comparison suffices.
+fn build_diff(old: &str, new: &str, ctx: usize) -> Vec<DiffLine> {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let n = old_lines.len().max(new_lines.len());
+
+    // Collect changed line indices
+    let changed: Vec<usize> = (0..n)
+        .filter(|&i| old_lines.get(i) != new_lines.get(i))
+        .collect();
+    if changed.is_empty() { return vec![]; }
+
+    // Merge into context hunks
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for &ci in &changed {
+        let start = ci.saturating_sub(ctx);
+        let end = (ci + ctx + 1).min(n);
+        if let Some(last) = hunks.last_mut() {
+            if start <= last.1 { last.1 = last.1.max(end); continue; }
+        }
+        hunks.push((start, end));
+    }
+
+    let mut result: Vec<DiffLine> = Vec::new();
+    let mut last_end = 0usize;
+
+    for (start, end) in hunks {
+        if start > last_end && last_end > 0 {
+            result.push(DiffLine { kind: "separator".into(), line_number: 0, content: "---".into() });
+        }
+        for i in start..end {
+            match (old_lines.get(i), new_lines.get(i)) {
+                (Some(&ol), Some(&nl)) if ol == nl => {
+                    result.push(DiffLine { kind: "context".into(), line_number: i + 1, content: ol.to_string() });
+                }
+                (Some(&ol), Some(&nl)) => {
+                    result.push(DiffLine { kind: "removed".into(), line_number: i + 1, content: ol.to_string() });
+                    result.push(DiffLine { kind: "added".into(), line_number: i + 1, content: nl.to_string() });
+                }
+                (Some(&ol), None) => {
+                    result.push(DiffLine { kind: "removed".into(), line_number: i + 1, content: ol.to_string() });
+                }
+                (None, Some(&nl)) => {
+                    result.push(DiffLine { kind: "added".into(), line_number: i + 1, content: nl.to_string() });
+                }
+                _ => {}
+            }
+        }
+        last_end = end;
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Extract (awk equivalent)
+// ---------------------------------------------------------------------------
+
+/// Options for `extract_content`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractOptions {
+    /// Capture group indices to extract (empty = group 0 = whole match).
+    #[serde(default)]
+    pub groups: Vec<usize>,
+    /// Separator between groups when multiple are selected (default: tab).
+    #[serde(default = "default_tab")]
+    pub separator: String,
+    /// Output format: `"text"`, `"json"`, `"csv"`, or `"tsv"`.
+    #[serde(default = "default_text_fmt")]
+    pub format: String,
+    /// Aggregate: count occurrences per unique extracted value.
+    #[serde(default)]
+    pub count: bool,
+    /// Deduplicate extracted values.
+    #[serde(default)]
+    pub dedup: bool,
+    /// Sort output (ascending; combined with `count` → sort by frequency desc).
+    #[serde(default)]
+    pub sort: bool,
+    /// Case-sensitive match (default: true).
+    #[serde(default = "default_true")]
+    pub case_sensitive: bool,
+    /// Restrict to files matching this glob.
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    /// Exclude files matching this glob.
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
+    /// Restrict to this repo-relative subdirectory.
+    #[serde(default)]
+    pub search_path: Option<String>,
+    /// Bypass noise/vendor filter.
+    #[serde(default)]
+    pub no_ignore: bool,
+    /// Max total results (0 = unlimited).
+    #[serde(default)]
+    pub limit: usize,
+}
+
+fn default_tab() -> String { "\t".to_string() }
+fn default_text_fmt() -> String { "text".to_string() }
+
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            groups: vec![],
+            separator: "\t".to_string(),
+            format: "text".to_string(),
+            count: false,
+            dedup: false,
+            sort: false,
+            case_sensitive: true,
+            file_glob: None,
+            exclude_glob: None,
+            search_path: None,
+            no_ignore: false,
+            limit: 0,
+        }
+    }
+}
+
+/// A single extracted match row.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractMatch {
+    pub path: String,
+    pub line_number: usize,
+    /// Extracted group values (one entry per requested group, or whole match if none specified).
+    pub groups: Vec<String>,
+}
+
+/// Frequency-count entry used when `count = true`.
+#[derive(Debug, Serialize, Clone)]
+pub struct CountEntry {
+    pub value: String,
+    pub count: usize,
+}
+
+/// Top-level result of `extract_content`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractResult {
+    /// Raw matches (populated when `count = false`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub matches: Vec<ExtractMatch>,
+    /// Frequency table (populated when `count = true`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub counts: Vec<CountEntry>,
+    pub total: usize,
+    pub files_searched: usize,
+    pub truncated: bool,
+}
+
+/// Extract capture-group values from every regex match across project files.
+///
+/// Specify groups via `opts.groups` (e.g. `[1, 2]`); empty = group 0 (whole match).
+/// Use `opts.count = true` for frequency aggregation, `opts.dedup`/`sort` for post-processing.
+pub fn extract_content(
+    root: &Path,
+    pattern: &str,
+    opts: &ExtractOptions,
+) -> Result<ExtractResult, String> {
+    if pattern.is_empty() {
+        return Err("pattern must not be empty".into());
+    }
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(!opts.case_sensitive)
+        .build()
+        .map_err(|e| format!("invalid pattern {:?}: {}", pattern, e))?;
+
+    let effective_root = match &opts.search_path {
+        Some(sp) => root.join(sp),
+        None => root.to_path_buf(),
+    };
+    let file_glob_re = opts.file_glob.as_deref().and_then(build_glob_regex);
+    let excl_re = opts.exclude_glob.as_deref().and_then(build_glob_regex);
+    let file_list = enumerate_files(&effective_root, opts.no_ignore)?;
+
+    let cap_limit = if opts.limit == 0 { usize::MAX } else { opts.limit };
+    let mut all_matches: Vec<ExtractMatch> = Vec::new();
+    let mut files_searched: usize = 0;
+    let mut truncated = false;
+
+    'outer: for abs_path in &file_list {
+        let rel = rel_path(root, abs_path);
+        if let Some(ref gr) = file_glob_re { if !gr.is_match(&rel) { continue; } }
+        if let Some(ref er) = excl_re { if er.is_match(&rel) { continue; } }
+
+        let content = match std::fs::read_to_string(abs_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        files_searched += 1;
+
+        for (line_idx, line) in content.lines().enumerate() {
+            for caps in re.captures_iter(line) {
+                let groups: Vec<String> = if opts.groups.is_empty() {
+                    vec![caps.get(0).map_or("", |m| m.as_str()).to_string()]
+                } else {
+                    opts.groups.iter().map(|&g| {
+                        caps.get(g).map_or("", |m| m.as_str()).to_string()
+                    }).collect()
+                };
+                all_matches.push(ExtractMatch {
+                    path: rel.clone(),
+                    line_number: line_idx + 1,
+                    groups,
+                });
+                if all_matches.len() >= cap_limit {
+                    truncated = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    let total = all_matches.len();
+
+    if opts.count {
+        use std::collections::HashMap;
+        let mut freq: HashMap<String, usize> = HashMap::new();
+        for m in &all_matches {
+            *freq.entry(m.groups.join(&opts.separator)).or_insert(0) += 1;
+        }
+        let mut counts: Vec<CountEntry> = freq.into_iter()
+            .map(|(value, count)| CountEntry { value, count })
+            .collect();
+        counts.sort_by(|a, b| b.count.cmp(&a.count).then(a.value.cmp(&b.value)));
+        return Ok(ExtractResult { matches: vec![], counts, total, files_searched, truncated });
+    }
+
+    if opts.dedup {
+        let mut seen = std::collections::HashSet::new();
+        all_matches.retain(|m| seen.insert(m.groups.join("\x00")));
+    }
+
+    if opts.sort {
+        all_matches.sort_by(|a, b| a.groups.cmp(&b.groups));
+    }
+
+    Ok(ExtractResult { matches: all_matches, counts: vec![], total, files_searched, truncated })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
