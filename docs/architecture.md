@@ -178,18 +178,58 @@ Memory contract: all output strings are heap-allocated by Rust and **must** be f
 
 ## MCP server (`mcp.rs`)
 
-Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio.
+Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 26 tools covering the full FFI surface.
+
+### Graph & architecture
 
 | Tool | Purpose |
 |------|---------|
-| `map_project` | Full project graph |
+| `get_project_graph` | Full dependency graph |
 | `get_dependencies` | Dependency tree for a module |
 | `get_dependents` | Reverse dependencies |
-| `get_health` | Health score |
-| `get_cycles` | Circular dependency list |
+| `get_blast_radius` | Deps + dependents (change impact) |
+| `get_health` | Health score + counts |
+| `get_cycles` | Circular dependencies with pivot suggestions |
+| `check_layers` | Layer violation detection (`layers.toml`) |
+| `unreferenced_symbols` | Dead-code candidates |
+| `simulate_change` | Predict impact of modifying a module |
+
+### Context / skeleton
+
+| Tool | Purpose |
+|------|---------|
+| `get_module_context` | Public API surface of a single module |
 | `get_symbol_context` | Signatures matching a symbol name |
-| `get_blast_radius` | Combined deps + dependents up to depth |
-| `check_layer_violations` | Architectural layer check |
+| `skeleton_map` | Compressed skeleton of all files (imports + signatures) |
+| `ranked_skeleton` | PageRank-ordered skeleton within a token budget |
+
+### Git intelligence
+
+| Tool | Purpose |
+|------|---------|
+| `git_churn` | Per-file commit counts (hotspot signal) |
+| `git_cochange` | Temporally coupled file pairs |
+| `hidden_coupling` | Co-change pairs with no import edge |
+| `semidiff` | Function-level diff between two commits |
+| `get_evolution` | Health trend + debt indicators over time |
+| `poll_changes` | Files modified since an epoch-ms timestamp |
+
+### Search & editing
+
+| Tool | Purpose |
+|------|---------|
+| `search_content` | Grep-like text/regex search across files |
+| `find_files` | Glob file discovery |
+| `replace_content` | Sed-like find-and-replace (supports dry-run) |
+| `extract_content` | Awk-like capture-group extraction |
+
+### Utility
+
+| Tool | Purpose |
+|------|---------|
+| `search_project` | Search graph nodes/edges by pattern |
+| `watch_status` | Check for changes since last watch cycle |
+| `set_compression_level` | Configure response detail level |
 
 ---
 
