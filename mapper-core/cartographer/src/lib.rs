@@ -22,6 +22,7 @@ mod layers;
 mod mapper;
 mod scanner;
 mod search;
+mod token_metrics;
 
 use api::ApiState;
 use mapper::{extract_skeleton, MappedFile};
@@ -1584,4 +1585,91 @@ pub extern "C" fn cartographer_extract_content(
 
     let result = search::extract_content(&path, &pat, &opts);
     result_to_json_ptr(result)
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Context Health
+// ---------------------------------------------------------------------------
+
+/// Analyse the quality of an LLM context bundle and return a health report.
+///
+/// `content`   — the context text to analyse (C string)
+/// `opts_json` — optional JSON object with scoring options:
+///               `{ "model": "claude"|"gpt4"|"llama"|"gpt35",
+///                  "windowSize": 0,           // 0 = use model default
+///                  "signatureCount": 0,        // number of symbols in content
+///                  "signatureTokens": 0,       // tokens used by signatures
+///                  "keyPositions": [0.0, 1.0]  // relative positions of key modules
+///               }`
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "tokenCount": 4200,
+///     "charCount": 17500,
+///     "windowSize": 200000,
+///     "utilizationPct": 2.1,
+///     "score": 78.4,
+///     "grade": "B",
+///     "metrics": { "signalDensity": 0.42, ... },
+///     "warnings": [...],
+///     "recommendations": [...]
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_context_health(
+    content: *const c_char,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    if content.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null content".into()));
+    }
+    let text = unsafe {
+        match std::ffi::CStr::from_ptr(content).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct HealthOptsJson {
+        model: Option<String>,
+        window_size: Option<usize>,
+        signature_count: Option<usize>,
+        signature_tokens: Option<usize>,
+        key_positions: Option<Vec<f64>>,
+    }
+
+    let json_opts: HealthOptsJson = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        HealthOptsJson::default()
+    };
+
+    let model = json_opts
+        .model
+        .as_deref()
+        .and_then(|s| s.parse::<token_metrics::ModelFamily>().ok())
+        .unwrap_or_default();
+
+    let opts = token_metrics::HealthOpts {
+        model,
+        window_size:      json_opts.window_size.unwrap_or(0),
+        key_positions:    json_opts.key_positions.unwrap_or_default(),
+        signature_count:  json_opts.signature_count.unwrap_or(0),
+        signature_tokens: json_opts.signature_tokens.unwrap_or(0),
+    };
+
+    let report = token_metrics::analyze(&text, &opts);
+    result_to_json_ptr(Ok::<_, String>(report))
 }

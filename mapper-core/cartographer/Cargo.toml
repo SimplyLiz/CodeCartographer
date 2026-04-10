@@ -1,6 +1,6 @@
 [package]
 name = "cartographer"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Code Cartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
@@ -42,6 +42,7 @@ toml = { version = "0.8", features = ["parse"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 petgraph = "0.6"
 rayon = "1.10"
+flate2 = "1.0"
 tree-sitter          = { version = "0.22", optional = true }
 tree-sitter-rust     = { version = "0.21", optional = true }
 tree-sitter-go       = { version = "0.21", optional = true }

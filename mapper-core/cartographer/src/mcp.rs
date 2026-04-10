@@ -585,6 +585,32 @@ impl McpServer {
                     required: vec!["pattern".to_string()],
                 },
             },
+            // Context quality
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "context_health".to_string(),
+                description: "Analyse the quality of an LLM context bundle. Returns a \
+                              composite health score (0–100, graded A–F) plus per-metric \
+                              breakdown: signal density, compression density, position health, \
+                              entity density, utilisation headroom, and dedup ratio. Warnings \
+                              and recommendations are included when thresholds are breached. \
+                              Pair with ranked_skeleton to produce high-scoring context bundles."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("content".to_string(), mcprop!("string", "The context text to score (e.g. a ranked_skeleton output)"));
+                        props.insert("model".to_string(), mcprop!("string", "Target model family: claude (default, 200K), gpt4 (128K), llama (128K), gpt35 (16K)"));
+                        props.insert("windowSize".to_string(), mcprop!("number", "Override context window size in tokens (0 = use model default)"));
+                        props.insert("signatureCount".to_string(), mcprop!("number", "Number of symbol signatures in the content (improves entity density scoring)"));
+                        props.insert("signatureTokens".to_string(), mcprop!("number", "Tokens occupied by signature text (improves signal density scoring)"));
+                        props.insert("keyPositions".to_string(), mcprop!("string", "JSON array of 0.0–1.0 relative positions of key modules in the output"));
+                        props
+                    },
+                    required: vec!["content".to_string()],
+                },
+            },
         ]
     }
 
@@ -1441,6 +1467,41 @@ impl McpServer {
                     .map_err(|e| e)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "context_health" => {
+                let args = &call.arguments;
+                let content = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing content")?
+                    .to_string();
+
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<crate::token_metrics::ModelFamily>().ok())
+                    .unwrap_or_default();
+
+                let opts = crate::token_metrics::HealthOpts {
+                    model,
+                    window_size: args.get("windowSize").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    signature_count: args.get("signatureCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    signature_tokens: args.get("signatureTokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    key_positions: args
+                        .get("keyPositions")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| serde_json::from_str::<Vec<f64>>(s).ok())
+                        .unwrap_or_default(),
+                };
+
+                let report = crate::token_metrics::analyze(&content, &opts);
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&report).unwrap_or_default(),
+                    )],
                     is_error: None,
                 })
             }

@@ -541,4 +541,36 @@ char *cartographer_replace_content(const char *path,
  */
 char *cartographer_extract_content(const char *path, const char *pattern, const char *opts_json);
 
+/**
+ * Analyse the quality of an LLM context bundle and return a health report.
+ *
+ * `content`   — the context text to analyse (C string)
+ * `opts_json` — optional JSON object with scoring options:
+ *               `{ "model": "claude"|"gpt4"|"llama"|"gpt35",
+ *                  "windowSize": 0,           // 0 = use model default
+ *                  "signatureCount": 0,        // number of symbols in content
+ *                  "signatureTokens": 0,       // tokens used by signatures
+ *                  "keyPositions": [0.0, 1.0]  // relative positions of key modules
+ *               }`
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "ok": true,
+ *   "data": {
+ *     "tokenCount": 4200,
+ *     "charCount": 17500,
+ *     "windowSize": 200000,
+ *     "utilizationPct": 2.1,
+ *     "score": 78.4,
+ *     "grade": "B",
+ *     "metrics": { "signalDensity": 0.42, ... },
+ *     "warnings": [...],
+ *     "recommendations": [...]
+ *   }
+ * }
+ * ```
+ */
+char *cartographer_context_health(const char *content, const char *opts_json);
+
 #endif  /* CARTOGRAPHER_H */

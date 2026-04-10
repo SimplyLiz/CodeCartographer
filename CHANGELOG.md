@@ -2,6 +2,30 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.2.0] - 2026-04-10
+
+### Added — Context health scoring (`token_metrics`)
+
+**`src/token_metrics.rs`** — new module with research-backed context quality analysis:
+
+- **Signal density** — ratio of symbol-bearing tokens to total. Below 5% triggers the attention dilution warning from Morph 2024 "Context Rot" (effective attention reduced to 1/40th at 2.5% density)
+- **Compression density** — zlib ratio as an information entropy proxy (Entropy Law, arXiv:2407.06645). Below 30% = high boilerplate/redundancy
+- **Position health** — U-shaped attention bias score; key modules at context boundaries score higher (Liu et al., TACL 2024: >30% accuracy drop for middle-placed content)
+- **Entity density** — symbols per 1K tokens, BudgetMem-style signal (arXiv:2511.04919)
+- **Utilisation headroom** — buffer between used tokens and model window (penalises >85%)
+- **Dedup ratio** — unique-line fraction as quick redundancy check
+- Composite score (0–100, graded A–F) with BudgetMem-informed weights: signal_density 25%, compression_density 20%, position_health 20%, entity_density 15%, utilisation_headroom 10%, dedup_ratio 10%
+
+**CLI**: `cartographer context-health [FILE] [--model claude|gpt4|llama|gpt35] [--window N] [--format text|json]`
+
+**MCP tool**: `context_health` — tool #27; scores any context string passed directly as an argument
+
+**FFI**: `cartographer_context_health(content, opts_json) -> *mut c_char` for CKB
+
+**13 tests** covering all individual metrics, composite analysis, and warning generation
+
+---
+
 ## [2.1.0] - 2026-04-10
 
 ### Added — C/C++ tree-sitter extraction, import extraction, tests

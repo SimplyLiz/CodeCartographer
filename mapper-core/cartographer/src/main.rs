@@ -1,6 +1,7 @@
 mod api;
 mod extractor;
 mod formatter;
+mod token_metrics;
 mod git_analysis;
 mod global_config;
 mod layers;
@@ -444,6 +445,21 @@ enum Commands {
         #[arg(long)]
         no_ignore: bool,
     },
+    /// Score the quality of an LLM context bundle (signal density, entropy, position health)
+    ContextHealth {
+        /// Read context from this file (default: stdin)
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Target model family for window size: claude, gpt4, llama, gpt35 (default: claude)
+        #[arg(long, default_value = "claude")]
+        model: String,
+        /// Override context window size in tokens (0 = use model default)
+        #[arg(long, default_value = "0")]
+        window: usize,
+        /// Output format: text (default) or json
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -691,6 +707,9 @@ fn main() -> Result<()> {
                 ignore_case, glob.as_deref(), exclude.as_deref(),
                 path.as_deref(), limit, no_ignore,
             )
+        }
+        Some(Commands::ContextHealth { file, model, window, format }) => {
+            context_health_mode(file.as_deref(), &model, window, &format)
         }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -3700,5 +3719,90 @@ fn extract_mode(
         );
     }
 
+    Ok(())
+}
+
+fn context_health_mode(
+    file: Option<&std::path::Path>,
+    model: &str,
+    window: usize,
+    format: &str,
+) -> Result<()> {
+    use token_metrics::{HealthOpts, ModelFamily};
+
+    let content = if let Some(path) = file {
+        fs::read_to_string(path).with_context(|| format!("Reading {}", path.display()))?
+    } else {
+        use io::Read;
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        buf
+    };
+
+    let model_family: ModelFamily = model.parse().unwrap_or_default();
+    let opts = HealthOpts {
+        model: model_family,
+        window_size: window,
+        // Without positional info, position_health uses its neutral default (0.5).
+        key_positions: Vec::new(),
+        // Token-level signal info not available from raw stdin input; leave at 0
+        // so signal_density/entity_density reflect a pessimistic baseline.
+        signature_count: 0,
+        signature_tokens: 0,
+    };
+
+    let report = token_metrics::analyze(&content, &opts);
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    // Text output
+    let score_bar = {
+        let filled = (report.score / 5.0).round() as usize;
+        let empty  = 20usize.saturating_sub(filled);
+        format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+    };
+
+    println!("\nContext Health Report");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!(
+        "  Score: {:.1}/100  Grade: {}  {}",
+        report.score, report.grade, score_bar
+    );
+    println!(
+        "  Tokens: {}  /  window: {} ({:.1}% utilisation)",
+        format_token_count(report.token_count),
+        format_token_count(report.window_size),
+        report.utilization_pct,
+    );
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let m = &report.metrics;
+    println!("  Metrics");
+    println!("    Signal density        {:.1}%  (symbol tokens / total)", m.signal_density * 100.0);
+    println!("    Compression density   {:.1}%  (entropy proxy, higher = denser)", m.compression_density * 100.0);
+    println!("    Position health       {:.1}%  (key-module U-bias score)", m.position_health * 100.0);
+    println!("    Entity density        {:.1}%  (symbols per 1K tokens)", m.entity_density * 100.0);
+    println!("    Utilisation headroom  {:.1}%  (window buffer score)", m.utilization_headroom * 100.0);
+    println!("    Dedup ratio           {:.1}%  (unique-line fraction)", m.dedup_ratio * 100.0);
+
+    if !report.warnings.is_empty() {
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("  Warnings");
+        for w in &report.warnings {
+            println!("  ⚠  {}", w);
+        }
+    }
+
+    if !report.recommendations.is_empty() {
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("  Recommendations");
+        for r in &report.recommendations {
+            println!("  →  {}", r);
+        }
+    }
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     Ok(())
 }
