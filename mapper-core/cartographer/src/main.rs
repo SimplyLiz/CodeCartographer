@@ -445,6 +445,24 @@ enum Commands {
         #[arg(long)]
         no_ignore: bool,
     },
+    /// Query-driven context retrieval: search → PageRank → context_health in one step
+    Query {
+        /// Natural language question or symbol/pattern to search for
+        #[arg(value_name = "QUERY")]
+        query: String,
+        /// Token budget for the skeleton (default: 8000)
+        #[arg(long, default_value = "8000")]
+        budget: usize,
+        /// Target model family: claude, gpt4, llama, gpt35 (default: claude)
+        #[arg(long, default_value = "claude")]
+        model: String,
+        /// Output format: text (default) or json
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Max search hits used as PageRank focus seeds (default: 20)
+        #[arg(long, default_value = "20")]
+        max_seeds: usize,
+    },
     /// Score the quality of an LLM context bundle (signal density, entropy, position health)
     ContextHealth {
         /// Read context from this file (default: stdin)
@@ -707,6 +725,10 @@ fn main() -> Result<()> {
                 ignore_case, glob.as_deref(), exclude.as_deref(),
                 path.as_deref(), limit, no_ignore,
             )
+        }
+        Some(Commands::Query { query, budget, model, format, max_seeds }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            query_mode(&root, &query, budget, &model, &format, max_seeds)
         }
         Some(Commands::ContextHealth { file, model, window, format }) => {
             context_health_mode(file.as_deref(), &model, window, &format)
@@ -3718,6 +3740,138 @@ fn extract_mode(
             if result.truncated { " (truncated)" } else { "" },
         );
     }
+
+    Ok(())
+}
+
+fn query_mode(
+    root: &Path,
+    query: &str,
+    budget: usize,
+    model: &str,
+    format: &str,
+    max_seeds: usize,
+) -> Result<()> {
+    use crate::api::ApiState;
+    use crate::mapper::extract_skeleton;
+    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+    use crate::search::{bm25_search, BM25Options};
+    use token_metrics::{HealthOpts, ModelFamily};
+
+    // Step 1: BM25 + regex search to find focus files
+    let bm25_opts = BM25Options {
+        max_results: max_seeds,
+        ..Default::default()
+    };
+    let bm25_hits = bm25_search(root, query, &bm25_opts).unwrap_or_default();
+
+    let search_opts = crate::search::SearchOptions {
+        case_sensitive: false,
+        max_results: max_seeds,
+        ..Default::default()
+    };
+    let regex_hits = crate::search::search_content(root, query, &search_opts)
+        .unwrap_or_else(|_| crate::search::SearchResult {
+            matches: vec![],
+            total_matches: 0,
+            files_searched: 0,
+            truncated: false,
+            files_with_matches: vec![],
+            files_without_match: vec![],
+            file_counts: vec![],
+        });
+
+    // Merge: BM25 first (ranked), then any additional regex-only hits
+    let mut seen = std::collections::HashSet::new();
+    let mut focus_files: Vec<String> = Vec::new();
+    for m in &bm25_hits.matches {
+        if seen.insert(m.path.clone()) {
+            focus_files.push(m.path.clone());
+        }
+    }
+    for m in &regex_hits.matches {
+        if seen.insert(m.path.clone()) {
+            focus_files.push(m.path.clone());
+        }
+        if focus_files.len() >= max_seeds { break; }
+    }
+
+    eprintln!("Query: {:?}", query);
+    eprintln!("Focus seeds: {} file(s) ({} BM25, {} regex)", focus_files.len(), bm25_hits.matches.len(), regex_hits.total_matches);
+
+    // Step 2: build mapped files + ranked skeleton
+    let scan = scan_files_with_noise_tracking(root)?;
+    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = scan.files.iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    let state = ApiState::new(root.to_path_buf());
+    { let mut files = state.mapped_files.lock().unwrap(); *files = mapped_files; }
+    state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+
+    let ranked = state.ranked_skeleton(&focus_files, budget).map_err(|e| anyhow::anyhow!(e))?;
+    let total_tokens: usize = ranked.iter().map(|f| f.estimated_tokens).sum();
+    let sig_count: usize = ranked.iter().map(|f| f.signatures.len()).sum();
+
+    // Step 3: build context text
+    let mut context_text = format!("## Ranked Context for: {}\n\n", query);
+    for f in &ranked {
+        context_text.push_str(&format!("// {} (rank: {:.4}, {} tokens)\n", f.path, f.rank, f.estimated_tokens));
+        for sig in &f.signatures {
+            context_text.push_str(&format!("  {}\n", sig));
+        }
+        context_text.push('\n');
+    }
+
+    // Step 4: health score
+    let model_family: ModelFamily = model.parse().unwrap_or_default();
+    let health_opts = HealthOpts {
+        model: model_family,
+        window_size: 0,
+        key_positions: token_metrics::key_positions_from_order(
+            &ranked.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            &focus_files,
+        ),
+        signature_count: sig_count,
+        signature_tokens: (total_tokens as f64 * 0.85) as usize,
+    };
+    let health = token_metrics::analyze(&context_text, &health_opts);
+
+    if format == "json" {
+        let out = serde_json::json!({
+            "query": query,
+            "context": context_text,
+            "filesUsed": ranked.iter().map(|f| &f.path).collect::<Vec<_>>(),
+            "focusFiles": focus_files,
+            "totalTokens": total_tokens,
+            "health": health,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    // Text output
+    println!("{}", context_text);
+
+    let score_bar = {
+        let filled = (health.score / 5.0).round() as usize;
+        let empty = 20usize.saturating_sub(filled);
+        format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+    };
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("  {} files  ~{} tokens  health: {:.0}/100 {} grade {}",
+        ranked.len(), total_tokens, health.score, score_bar, health.grade);
+    for w in &health.warnings {
+        eprintln!("  ⚠  {}", w);
+    }
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     Ok(())
 }

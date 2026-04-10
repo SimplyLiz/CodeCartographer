@@ -2,7 +2,7 @@
 
 All notable changes to Cartographer will be documented in this file.
 
-## [2.2.0] - 2026-04-10
+## [2.3.0] - 2026-04-10
 
 ### Added — Context health scoring (`token_metrics`)
 
@@ -23,6 +23,19 @@ All notable changes to Cartographer will be documented in this file.
 **FFI**: `cartographer_context_health(content, opts_json) -> *mut c_char` for CKB
 
 **13 tests** covering all individual metrics, composite analysis, and warning generation
+
+### Added — PKG retrieval pipeline (`query_context`, `cartographer query`)
+
+**MCP tool #28: `query_context`** — single-call retrieval pipeline replacing the manual search → ranked_skeleton → context_health sequence:
+1. Searches the codebase for files matching the query (regex)
+2. Uses matching files as the PageRank personalization seed
+3. Builds a token-budget-aware skeleton ranked by relevance
+4. Scores the bundle with context_health
+5. Returns `{ context, filesUsed, focusFiles, totalTokens, health }` — ready to inject
+
+**CLI**: `cartographer query <QUERY> [--budget N] [--model claude|gpt4|llama|gpt35] [--format text|json]`
+
+**BM25 search** (`src/search.rs`): `bm25_search(root, query, opts)` — TF-IDF ranked file search for natural language queries, used by `query_context` as a complement to regex matching. No external dependencies; pure Rust with standard BM25 (k1=1.5, b=0.75). Returns ranked `Vec<BM25Match>` with per-file scores and matching term snippets.
 
 ---
 

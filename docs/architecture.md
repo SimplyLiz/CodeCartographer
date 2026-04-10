@@ -46,9 +46,10 @@ enrich_with_git()
 | `api.rs` | `ApiState`, `rebuild_graph`, import resolution, all graph analysis |
 | `git_analysis.rs` | `git_churn`, `git_cochange`, `git_show_file`, `git_diff_files` via subprocess |
 | `layers.rs` | Architectural layer config (`layers.toml`), violation detection |
-| `search.rs` | Content search (`search_content`) and file find (`find_files`) — regex + glob, noise-filtered. See [`docs/api/search.md`](api/search.md) |
-| `mcp.rs` | MCP server — JSON-RPC 2.0 stdio transport, 8 tools |
-| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 15 functions consumed by CKB via CGo |
+| `search.rs` | Content search (`search_content`, `bm25_search`) and file find (`find_files`) — regex + BM25 + glob, noise-filtered. See [`docs/api/search.md`](api/search.md) |
+| `token_metrics.rs` | Context health scoring — 6 research-backed metrics, composite 0–100 score, graded A–F |
+| `mcp.rs` | MCP server — JSON-RPC 2.0 stdio transport, 28 tools |
+| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 16 functions consumed by CKB via CGo |
 | `memory.rs` | Versioned local memory, incremental hash-based sync |
 | `formatter.rs` | Output formatting: XML, Markdown, JSON |
 | `global_config.rs` | `~/.config/cartographer/config.toml` |
@@ -184,7 +185,7 @@ Memory contract: all output strings are heap-allocated by Rust and **must** be f
 
 ## MCP server (`mcp.rs`)
 
-Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 26 tools covering the full FFI surface.
+Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 28 tools covering the full FFI surface.
 
 ### Graph & architecture
 

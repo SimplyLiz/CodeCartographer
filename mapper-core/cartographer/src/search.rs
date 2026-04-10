@@ -220,6 +220,217 @@ pub struct FindResult {
 }
 
 // ---------------------------------------------------------------------------
+// BM25 ranked search
+// ---------------------------------------------------------------------------
+
+/// Options for a BM25 ranked search request.
+#[derive(Debug, Clone)]
+pub struct BM25Options {
+    /// BM25 term saturation parameter (default 1.5).
+    pub k1: f64,
+    /// BM25 length normalisation parameter (default 0.75).
+    pub b: f64,
+    /// Maximum number of results to return (0 = unlimited, default 20).
+    pub max_results: usize,
+    /// Include only files matching this glob (e.g. `"*.rs"`).
+    pub file_glob: Option<String>,
+    /// Restrict search to this repo-relative subdirectory.
+    pub search_path: Option<String>,
+    /// Bypass noise/vendor filter.
+    pub no_ignore: bool,
+}
+
+impl Default for BM25Options {
+    fn default() -> Self {
+        Self {
+            k1: 1.5,
+            b: 0.75,
+            max_results: 20,
+            file_glob: None,
+            search_path: None,
+            no_ignore: false,
+        }
+    }
+}
+
+/// A file ranked by BM25 relevance.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BM25Match {
+    /// Repo-relative path.
+    pub path: String,
+    /// BM25 score (higher = more relevant).
+    pub score: f64,
+    /// Query terms found in this file.
+    pub matching_terms: Vec<String>,
+    /// Up to 3 representative lines containing query terms.
+    pub snippets: Vec<String>,
+}
+
+/// Result returned by [`bm25_search`].
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BM25Result {
+    pub matches: Vec<BM25Match>,
+    pub total: usize,
+}
+
+/// Rank files in `root` by BM25 relevance to `query`.
+///
+/// Tokenises query and documents on word boundaries (alphanumeric runs),
+/// lowercased. No stemming — exact term matching only.
+/// Standard BM25 with k1=1.5, b=0.75 (overridable via `opts`).
+pub fn bm25_search(root: &Path, query: &str, opts: &BM25Options) -> Result<BM25Result, String> {
+    let files = enumerate_files_bm25(root, opts)?;
+
+    let query_terms: Vec<String> = tokenize(query);
+    if query_terms.is_empty() {
+        return Ok(BM25Result { matches: vec![], total: 0 });
+    }
+
+    // Build per-document term frequencies and collect corpus-wide doc frequencies
+    struct DocInfo {
+        path: String,
+        tf: std::collections::HashMap<String, usize>,
+        length: usize,
+        content: String,
+    }
+
+    let mut docs: Vec<DocInfo> = Vec::new();
+    for path in &files {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let tokens = tokenize(&content);
+        let length = tokens.len();
+        let mut tf: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for t in &tokens {
+            *tf.entry(t.clone()).or_insert(0) += 1;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(path)
+            .to_string_lossy().replace('\\', "/");
+        docs.push(DocInfo { path: rel, tf, length, content });
+    }
+
+    let n = docs.len() as f64;
+    if n == 0.0 {
+        return Ok(BM25Result { matches: vec![], total: 0 });
+    }
+
+    // Average document length
+    let avg_len: f64 = docs.iter().map(|d| d.length as f64).sum::<f64>() / n;
+
+    // Document frequency per query term
+    let df: std::collections::HashMap<String, usize> = {
+        let mut map = std::collections::HashMap::new();
+        for term in &query_terms {
+            let count = docs.iter().filter(|d| d.tf.contains_key(term)).count();
+            map.insert(term.clone(), count);
+        }
+        map
+    };
+
+    // Score each document
+    let mut scored: Vec<(f64, usize)> = docs.iter().enumerate().filter_map(|(i, doc)| {
+        let mut score = 0.0_f64;
+        let mut has_match = false;
+        for term in &query_terms {
+            let tf_val = *doc.tf.get(term).unwrap_or(&0);
+            if tf_val == 0 { continue; }
+            has_match = true;
+            let df_val = *df.get(term).unwrap_or(&0) as f64;
+            let idf = ((n - df_val + 0.5) / (df_val + 0.5) + 1.0).ln();
+            let tf_norm = (tf_val as f64 * (opts.k1 + 1.0))
+                / (tf_val as f64 + opts.k1 * (1.0 - opts.b + opts.b * doc.length as f64 / avg_len));
+            score += idf * tf_norm;
+        }
+        if has_match { Some((score, i)) } else { None }
+    }).collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let limit = if opts.max_results == 0 { scored.len() } else { opts.max_results.min(scored.len()) };
+    let total = scored.len();
+
+    let matches: Vec<BM25Match> = scored.into_iter().take(limit).map(|(score, i)| {
+        let doc = &docs[i];
+        let matching_terms: Vec<String> = query_terms.iter()
+            .filter(|t| doc.tf.contains_key(*t))
+            .cloned()
+            .collect();
+
+        // Collect up to 3 snippets — lines that contain a query term
+        let snippets: Vec<String> = doc.content.lines()
+            .filter(|line| {
+                let lower = line.to_lowercase();
+                query_terms.iter().any(|t| lower.contains(t.as_str()))
+            })
+            .take(3)
+            .map(|l| l.trim().to_string())
+            .collect();
+
+        BM25Match { path: doc.path.clone(), score, matching_terms, snippets }
+    }).collect();
+
+    Ok(BM25Result { matches, total })
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    // Split on non-alphanumeric runs; lowercase; drop single-char tokens and stop words
+    const STOP: &[&str] = &[
+        "the","a","an","is","in","on","at","to","of","and","or","for",
+        "with","this","that","it","be","as","by","from","are","was","were",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() > 1)
+        .map(|s| s.to_lowercase())
+        .filter(|s| !STOP.contains(&s.as_str()))
+        .collect()
+}
+
+fn enumerate_files_bm25(root: &Path, opts: &BM25Options) -> Result<Vec<std::path::PathBuf>, String> {
+    let scan_root = if let Some(sp) = &opts.search_path {
+        root.join(sp)
+    } else {
+        root.to_path_buf()
+    };
+
+    let glob_re = opts.file_glob.as_deref().and_then(build_glob_regex);
+
+    let files: Vec<std::path::PathBuf> = if opts.no_ignore {
+        walkdir::WalkDir::new(&scan_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                if let Some(re) = &glob_re {
+                    re.is_match(&e.path().to_string_lossy())
+                } else {
+                    true
+                }
+            })
+            .map(|e| e.into_path())
+            .collect()
+    } else {
+        let scan = scan_files_with_noise_tracking(&scan_root).map_err(|e| e.to_string())?;
+        scan.files.into_iter()
+            .filter(|p| !is_ignored_path(p))
+            .filter(|p| {
+                if let Some(re) = &glob_re {
+                    re.is_match(&p.to_string_lossy())
+                } else {
+                    true
+                }
+            })
+            .collect()
+    };
+
+    Ok(files)
+}
+
+// ---------------------------------------------------------------------------
 // Core: search_content
 // ---------------------------------------------------------------------------
 
