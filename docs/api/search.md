@@ -356,6 +356,316 @@ When `cartographer serve` is running, both tools are available to any MCP client
 
 ---
 
+## `cartographer replace <PATTERN> <REPLACEMENT>`
+
+Sed-like in-place find-and-replace across all project files. Supports full regex with capture-group back-references, dry-run preview, and per-file `.bak` backups.
+
+```
+cartographer replace <PATTERN> <REPLACEMENT> [OPTIONS]
+```
+
+`REPLACEMENT` supports `$0` (whole match) and `$1`/`$2` … (numbered capture groups).
+
+### Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--literal` | | false | Treat pattern as a literal string, not regex |
+| `--ignore-case` | `-i` | false | Case-insensitive matching |
+| `--word-regexp` | `-w` | false | Whole-word matching (`\b…\b`) |
+| `--dry-run` | | false | Show a diff of what would change; write nothing |
+| `--backup` | | false | Write a `.bak` copy before modifying each file |
+| `--context N` | `-C` | 3 | Context lines shown in diff output |
+| `--glob GLOB` | | — | Include only files matching glob (e.g. `"*.rs"`) |
+| `--exclude GLOB` | | — | Exclude files matching glob |
+| `--path SUBDIR` | | — | Restrict to this repo-relative subdirectory |
+| `--max-per-file N` | | 0 | Cap replacements per file (0 = unlimited) |
+| `--no-ignore` | | false | Bypass noise/vendor filter |
+
+### Examples
+
+```bash
+# Dry-run: preview renaming a function across all Rust files
+cartographer replace "fn authenticate\b" "fn auth" --glob "*.rs" --dry-run
+
+# Rename with capture groups — reorder two arguments
+cartographer replace "connect\((\w+),\s*(\w+)\)" "connect($2, $1)" --glob "*.go"
+
+# Case-insensitive literal rename, with backup safety net
+cartographer replace --literal --ignore-case "TODO" "FIXME" --backup --glob "*.rs"
+
+# Whole-word rename: "ctx" but not "context"
+cartographer replace "ctx" "rctx" -w --glob "*.go"
+
+# Cap to 1 replacement per file (first occurrence only)
+cartographer replace "import React" "import React, { StrictMode }" --glob "*.tsx" --max-per-file 1
+
+# Replace inside a subdirectory only
+cartographer replace "v1/api" "v2/api" --path src/http --glob "*.go"
+
+# Bump a hard-coded version string across all config files
+cartographer replace "version = \"1\.7\.\d+\"" "version = \"1.8.0\"" --glob "*.toml" --no-ignore
+```
+
+### Output format
+
+Dry-run and live runs both emit a per-file diff followed by a summary:
+
+```
+src/api.rs  (4 replacements)
+  10 - pub fn authenticate(user: &User) -> Result<Token> {
+  10 + pub fn auth(user: &User) -> Result<Token> {
+  ...
+
+Summary: 3 files changed, 12 replacements total
+```
+
+Without `--dry-run` the summary line also confirms `(written)`.
+
+---
+
+## `cartographer extract <PATTERN>`
+
+Awk-like value extraction — pull specific pieces of text out of every matching line across the project. Supports capture groups, frequency tables, deduplication, and structured output.
+
+```
+cartographer extract <PATTERN> [OPTIONS]
+```
+
+`PATTERN` is a regex. Wrap the portion you care about in capture groups: e.g. `pub fn (\w+)` to extract function names.
+
+### Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--group N` | `-g` | 0 | Capture group index to extract (repeatable; 0 = whole match) |
+| `--sep SEP` | | `\t` | Separator between groups when multiple `-g` are given |
+| `--format text\|json\|csv\|tsv` | | `text` | Output format |
+| `--count` | | false | Aggregate: emit a frequency table sorted by count descending |
+| `--dedup` | | false | Deduplicate extracted values |
+| `--sort` | | false | Sort output alphabetically; with `--count` sorts by frequency |
+| `--ignore-case` | `-i` | false | Case-insensitive matching |
+| `--glob GLOB` | | — | Include only files matching glob |
+| `--exclude GLOB` | | — | Exclude files matching glob |
+| `--path SUBDIR` | | — | Restrict to this repo-relative subdirectory |
+| `--limit N` | | 1000 | Cap total results returned (0 = unlimited) |
+| `--no-ignore` | | false | Bypass noise/vendor filter |
+
+### Examples
+
+```bash
+# Extract all public function names from Rust source
+cartographer extract "pub fn (\w+)" -g 1 --glob "*.rs" --dedup --sort
+
+# Frequency table: which functions are called most often?
+cartographer extract "(\w+)\s*\(" -g 1 --glob "*.rs" --count
+
+# Extract HTTP status codes returned in Go handlers
+cartographer extract "http\.StatusCode\((\d+)\)|w\.WriteHeader\((\d+)\)" -g 1 -g 2 --glob "*.go" --count
+
+# Pull all import paths from Go files, deduplicated
+cartographer extract '"([^"]+)"' -g 1 --glob "*.go" --path src --dedup --sort
+
+# Find every TODO author tag — emit as CSV
+cartographer extract "TODO\((\w+)\)" -g 1 --glob "*.go" --format csv --count
+
+# Extract semver strings across all TOML/JSON config files
+cartographer extract "(\d+\.\d+\.\d+)" -g 1 --glob "*.toml" --dedup --sort --no-ignore
+
+# Whole-match extraction (group 0): pull all URLs from docs
+cartographer extract "https?://[^\s\)]+" --glob "*.md" --dedup
+```
+
+### Output format
+
+**text** (default): one extracted value per line, prefixed with location:
+```
+src/api.rs:42       authenticate
+src/api.rs:67       validate_token
+src/auth.rs:103     refresh_token
+```
+
+**`--count`** mode: frequency table, highest first:
+```
+  42  authenticate
+  17  validate_token
+   8  refresh_token
+```
+
+**json**: see Extract response shape in the FFI section below.
+
+**csv** / **tsv**: header row (`path,line,group0[,group1,…]`), one row per match.
+
+---
+
+## FFI (CKB / CGo)
+
+Both functions are exposed in `libcartographer.a` via `include/cartographer.h`.
+
+### `cartographer_replace_content`
+
+```c
+char *cartographer_replace_content(
+    const char *path,         // absolute repo root
+    const char *pattern,      // regex (or literal) pattern
+    const char *replacement,  // replacement string; $0/$1/$2 back-references
+    const char *opts_json     // JSON ReplaceOptions or NULL for defaults
+);
+```
+
+`opts_json` fields (all optional):
+
+```json
+{
+  "literal":      false,
+  "caseSensitive": true,
+  "wordRegexp":   false,
+  "dryRun":       false,
+  "backup":       false,
+  "contextLines": 3,
+  "fileGlob":     "*.rs",
+  "excludeGlob":  null,
+  "searchPath":   null,
+  "noIgnore":     false,
+  "maxPerFile":   0
+}
+```
+
+Returns JSON envelope `{ "ok": true, "data": ReplaceResult }`.
+
+**ReplaceResult shape:**
+```json
+{
+  "filesChanged": 3,
+  "totalReplacements": 12,
+  "dryRun": false,
+  "changes": [
+    {
+      "path": "src/api.rs",
+      "replacements": 4,
+      "diff": [
+        { "kind": "removed", "lineNumber": 10, "content": "old line" },
+        { "kind": "added",   "lineNumber": 10, "content": "new line" }
+      ]
+    }
+  ]
+}
+```
+
+### `cartographer_extract_content`
+
+```c
+char *cartographer_extract_content(
+    const char *path,       // absolute repo root
+    const char *pattern,    // regex with optional capture groups
+    const char *opts_json   // JSON ExtractOptions or NULL for defaults
+);
+```
+
+`opts_json` fields (all optional):
+
+```json
+{
+  "groups":       [1, 2],
+  "separator":    "\t",
+  "format":       "text",
+  "count":        false,
+  "dedup":        false,
+  "sort":         false,
+  "caseSensitive": true,
+  "fileGlob":     null,
+  "excludeGlob":  null,
+  "searchPath":   null,
+  "noIgnore":     false,
+  "limit":        0
+}
+```
+
+`groups` is a list of capture-group indices to extract. An empty list or `[0]` returns the whole match.
+
+Returns JSON envelope `{ "ok": true, "data": ExtractResult }`.
+
+**ExtractResult shape:**
+```json
+{
+  "matches": [
+    {
+      "path": "src/api.rs",
+      "lineNumber": 42,
+      "groups": ["pub fn foo", "foo"]
+    }
+  ],
+  "counts": [],
+  "total": 1,
+  "filesSearched": 18,
+  "truncated": false
+}
+```
+
+`counts` is populated when `"count": true`; each entry is `{ "value": "foo", "count": 42 }`. `matches` is empty in that mode.
+
+---
+
+## Go bridge (CKB)
+
+```go
+import "github.com/SimplyLiz/CodeMCP/internal/cartographer"
+
+// Replace — nil opts = defaults
+result, err := cartographer.ReplaceContent(repoRoot, `fn authenticate\b`, "fn auth", &cartographer.ReplaceOptions{
+    FileGlob: "*.rs",
+    DryRun:   true,
+})
+
+// Extract — nil opts = defaults
+result, err := cartographer.ExtractContent(repoRoot, `pub fn (\w+)`, &cartographer.ExtractOptions{
+    Groups: []int{1},
+    Dedup:  true,
+    Sort:   true,
+    FileGlob: "*.rs",
+})
+```
+
+`ReplaceOptions` and `ExtractOptions` mirror the JSON fields above (camelCase → Go PascalCase).
+
+Both functions return `ErrUnavailable` when built without `-tags cartographer`.
+
+---
+
+## MCP tools
+
+When `cartographer serve` is running, both tools are available to any MCP client:
+
+**`replace_content`** — arguments map 1:1 to `ReplaceOptions` fields plus `pattern` and `replacement`:
+
+```json
+{
+  "name": "replace_content",
+  "arguments": {
+    "pattern": "fn authenticate",
+    "replacement": "fn auth",
+    "fileGlob": "*.rs",
+    "dryRun": true
+  }
+}
+```
+
+**`extract_content`** — arguments map to `ExtractOptions` fields plus `pattern`:
+
+```json
+{
+  "name": "extract_content",
+  "arguments": {
+    "pattern": "pub fn (\\w+)",
+    "groups": [1],
+    "count": true,
+    "fileGlob": "*.rs"
+  }
+}
+```
+
+---
+
 ## Noise filter
 
 By default both commands skip:
