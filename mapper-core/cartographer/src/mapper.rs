@@ -447,10 +447,13 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
         _ => extract_generic(path.to_string_lossy().replace('\\', "/"), content),
     };
 
-    // Upgrade signatures to tree-sitter (Tier 2, confidence=60) for supported languages.
-    // Imports come from the regex pass above — tree-sitter only replaces signatures.
-    if let Some(ts_sigs) = crate::extractor::ts_extract(path, content) {
-        mapped.signatures = ts_sigs;
+    // Upgrade to tree-sitter (Tier 2, confidence=60) for supported languages.
+    // Tree-sitter replaces signatures; also replaces imports when non-empty.
+    if let Some(ts_out) = crate::extractor::ts_extract(path, content) {
+        mapped.signatures = ts_out.signatures;
+        if !ts_out.imports.is_empty() {
+            mapped.imports = ts_out.imports;
+        }
     }
 
     mapped

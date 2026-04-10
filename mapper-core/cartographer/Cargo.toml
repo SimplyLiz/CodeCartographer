@@ -1,6 +1,6 @@
 [package]
 name = "cartographer"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "Code Cartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
@@ -15,12 +15,14 @@ crate-type = ["staticlib", "rlib"]
 path = "src/lib.rs"
 
 [features]
-default = ["lang-rust", "lang-go", "lang-python", "lang-typescript", "lang-javascript"]
+default = ["lang-rust", "lang-go", "lang-python", "lang-typescript", "lang-javascript", "lang-c", "lang-cpp"]
 lang-rust       = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 lang-go         = ["dep:tree-sitter", "dep:tree-sitter-go"]
 lang-python     = ["dep:tree-sitter", "dep:tree-sitter-python"]
 lang-typescript = ["dep:tree-sitter", "dep:tree-sitter-typescript"]
 lang-javascript = ["dep:tree-sitter", "dep:tree-sitter-javascript"]
+lang-c          = ["dep:tree-sitter", "dep:tree-sitter-c"]
+lang-cpp        = ["dep:tree-sitter", "dep:tree-sitter-cpp"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
@@ -46,6 +48,8 @@ tree-sitter-go       = { version = "0.21", optional = true }
 tree-sitter-python   = { version = "0.21", optional = true }
 tree-sitter-javascript  = { version = "0.21", optional = true }
 tree-sitter-typescript  = { version = "0.21", optional = true }
+tree-sitter-c        = { version = "0.21", optional = true }
+tree-sitter-cpp      = { version = "0.22", optional = true }
 
 [build-dependencies]
 cbindgen = "0.27"

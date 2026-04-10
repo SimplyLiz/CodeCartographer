@@ -2,6 +2,26 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.1.0] - 2026-04-10
+
+### Added — C/C++ tree-sitter extraction, import extraction, tests
+
+**C and C++ grammars** (`lang-c`, `lang-cpp` features):
+- C: `function_definition`, `declaration` (prototypes), `struct_specifier`, `union_specifier`, `enum_specifier`, `type_definition`, `preproc_def`, `preproc_function_def`, `preproc_include` (→ imports)
+- C++: all of C plus `class_specifier` (with body walk for inline methods), `namespace_definition` (scoped), `template_declaration` (unwrapped), `linkage_specification` (`extern "C"`)
+- `.h`/`.hpp`/`.cpp`/`.cc`/`.cxx` routed to C++ grammar when `lang-cpp` is enabled; `.c` uses C grammar
+
+**Import extraction** — tree-sitter now also replaces the regex import pass for all supported languages:
+- Rust: `use_declaration` nodes → strip `use ` / `;`
+- Go: `import_declaration` → `import_spec` path strings (quoted paths stripped)
+- Python: `import_statement` module names, `import_from_statement` module_name field
+- TypeScript / JavaScript: `import_statement` source field (quotes stripped)
+- C/C++: `preproc_include` path field (retains `<>` / `""` delimiters)
+
+**Tests** — 27 tests across all 7 languages covering function extraction, method qualification, import extraction, visibility filtering, and symbol kinds.
+
+---
+
 ## [2.0.0] - 2026-04-10
 
 ### Added — Tree-sitter skeleton extraction (Tier 2)
