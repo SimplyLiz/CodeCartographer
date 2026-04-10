@@ -2,6 +2,43 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [1.7.0] - 2026-04-09
+
+### Added — full grep + find parity
+
+**`cartographer search <PATTERN>`** — complete grep parity:
+- `-e PATTERN` — additional patterns OR'd together (like `grep -e`)
+- `-i` — case-insensitive
+- `-v` — invert match (lines that don't match)
+- `-w` — whole-word match (`\b…\b`)
+- `-o` — only-matching: print just the matched portion
+- `-l` — files-with-matches: print only file paths
+- `--files-without-match` — print only files with no matches
+- `-c` — count matches per file
+- `-A N` / `-B N` / `-C N` — after/before/symmetric context lines
+- `--glob "*.rs"` — include filter; `--exclude "*.gen.go"` — exclude filter
+- `--path src/api` — restrict to subdirectory
+- `--no-ignore` — search vendor/generated/noise files too
+- `--limit N` — cap results
+
+**`cartographer find <PATTERN>`** — complete find parity:
+- `--modified-since 24h` / `7d` / `30m` / `3600s` — mtime filter
+- `--newer <FILE>` — files newer than reference file's mtime
+- `--min-size N` / `--max-size N` — size filter in bytes
+- `--max-depth N` — depth limit (0 = root only)
+- `--no-ignore` — include vendor/noise directories
+- Reports language + human-readable size + ISO-8601 mtime per file
+
+**`cartographer context --query <PATTERN>`** — bundles ranked skeleton + search results for context injection into models without tool-call support (Qwen3, Llama 3, local models)
+
+**FFI additions** (CKB + any CGo consumer):
+- `cartographer_search_content(path, pattern, opts_json)` — all grep options exposed via JSON; `opts_json` can be null for defaults
+- `cartographer_find_files(path, pattern, limit, opts_json)` — all find options via JSON
+
+**MCP tool expansion** — `search_content` and `find_files` tools now expose all new options as top-level MCP arguments
+
+**CKB bridge** — `SearchContentOptions`, `FindOptions`, `FileCount`, `MatchedTexts`, `FilesWithMatches`, `FilesWithoutMatch`, `FileCounts` added to `internal/cartographer` package
+
 ## [1.6.0] - 2026-04-09
 
 ### Added

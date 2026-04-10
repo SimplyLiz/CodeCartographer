@@ -13,6 +13,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 mod api;
 mod git_analysis;
 mod layers;
@@ -70,12 +72,72 @@ fn result_to_json_ptr<T: serde::Serialize>(result: Result<T, String>) -> *mut c_
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers: git HEAD, cache
+// ---------------------------------------------------------------------------
+
+/// Return the current git HEAD SHA for `root`, or `""` if not a git repo.
+fn git_head(root: &Path) -> String {
+    std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Persistent cache envelope stored at `<root>/.cartographer_cache.json`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MapCache {
+    head: String,
+    files: HashMap<String, MappedFile>,
+}
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".cartographer_cache.json")
+}
+
+fn load_cache(root: &Path, current_head: &str) -> Option<HashMap<String, MappedFile>> {
+    if current_head.is_empty() {
+        return None; // not a git repo — skip cache
+    }
+    let data = std::fs::read(cache_path(root)).ok()?;
+    let cache: MapCache = serde_json::from_slice(&data).ok()?;
+    if cache.head == current_head {
+        Some(cache.files)
+    } else {
+        None
+    }
+}
+
+fn save_cache(root: &Path, head: &str, files: &HashMap<String, MappedFile>) {
+    if head.is_empty() {
+        return;
+    }
+    let cache = MapCache { head: head.to_string(), files: files.clone() };
+    if let Ok(json) = serde_json::to_vec(&cache) {
+        let _ = std::fs::write(cache_path(root), json);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_mapped_files: parallel scan + optional cache
+// ---------------------------------------------------------------------------
+
 fn build_mapped_files(root: &Path) -> Result<HashMap<String, MappedFile>, String> {
+    // Check persistent cache first
+    let head = git_head(root);
+    if let Some(cached) = load_cache(root, &head) {
+        return Ok(cached);
+    }
+
     let scan_result = scan_files_with_noise_tracking(root).map_err(|e| e.to_string())?;
 
-    let result = scan_result
+    // Parallel extraction — extract_skeleton is pure, each file is independent.
+    let result: HashMap<String, MappedFile> = scan_result
         .files
-        .iter()
+        .par_iter()
         .filter(|p| !is_ignored_path(p))
         .filter_map(|p| {
             let content = std::fs::read_to_string(p).ok()?;
@@ -89,6 +151,7 @@ fn build_mapped_files(root: &Path) -> Result<HashMap<String, MappedFile>, String
         })
         .collect();
 
+    save_cache(root, &head, &result);
     Ok(result)
 }
 
@@ -1100,4 +1163,274 @@ pub extern "C" fn cartographer_search_content(
 
     let result = search::search_content(&path, &pat, &opts);
     result_to_json_ptr(result)
+}
+
+/// Find files matching a glob pattern across the project.
+///
+/// Parameters:
+/// - `path`      – absolute path to repo root (UTF-8 C string)
+/// - `pattern`   – glob pattern, e.g. `"*.rs"` or `"src/**/*.go"` (C string)
+/// - `limit`     – max files to return; 0 = unlimited
+/// - `opts_json` – optional JSON `FindOptions` or null for defaults:
+///   `{ modifiedSinceSecs, newerThan, minSizeBytes, maxSizeBytes, maxDepth, noIgnore }`
+///
+/// Returns a JSON envelope:
+/// ```json
+/// { "ok": true, "data": { "files": [...], "totalMatches": N, "truncated": false } }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_find_files(
+    path: *const c_char,
+    pattern: *const c_char,
+    limit: u32,
+    opts_json: *const c_char,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    if pattern.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null pattern".into()));
+    }
+    let pat = unsafe {
+        match std::ffi::CStr::from_ptr(pattern).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+
+    let opts: search::FindOptions = if !opts_json.is_null() {
+        let raw = unsafe {
+            match std::ffi::CStr::from_ptr(opts_json).to_str() {
+                Ok(s) => s,
+                Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+            }
+        };
+        serde_json::from_str(raw).unwrap_or_default()
+    } else {
+        search::FindOptions::default()
+    };
+
+    let result = search::find_files(&path, &pat, limit as usize, &opts);
+    result_to_json_ptr(result)
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Blast Radius
+// ---------------------------------------------------------------------------
+
+/// Get files/modules directly impacted by changing a target module.
+///
+/// Inputs:
+///   `path`        — project root (C string)
+///   `target`      — module ID or path fragment (C string)
+///   `max_related` — cap on returned entries (0 → 10)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "target": "src/api.rs",
+///     "moduleId": "src/api.rs",
+///     "related": [
+///       { "moduleId": "src/main.rs", "path": "src/main.rs", "relationship": "dependent" },
+///       { "moduleId": "src/lib.rs",  "path": "src/lib.rs",  "relationship": "dependency" }
+///     ]
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_blast_radius(
+    path: *const c_char,
+    target: *const c_char,
+    max_related: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    if target.is_null() {
+        return result_to_json_ptr::<serde_json::Value>(Err("null target".into()));
+    }
+    let target = unsafe {
+        match CStr::from_ptr(target).to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+        }
+    };
+    let max = if max_related == 0 { 10 } else { max_related as usize };
+
+    let mapped_files = match build_mapped_files(&path) {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let state = ApiState::new(path.clone());
+    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
+
+    if let Err(e) = state.rebuild_graph() {
+        return result_to_json_ptr::<serde_json::Value>(Err(e));
+    }
+
+    // Resolve module_id (exact match or path substring)
+    let module_id = {
+        let graph = state.project_graph.lock().unwrap();
+        graph.as_ref().and_then(|g| {
+            g.nodes.iter().find(|n| {
+                n.module_id == target || n.path.contains(&*target)
+            }).map(|n| n.module_id.clone())
+        })
+    };
+
+    let module_id = match module_id {
+        Some(id) => id,
+        None => return result_to_json_ptr::<serde_json::Value>(
+            Err(format!("target not found: {}", target))
+        ),
+    };
+
+    let deps = state.get_dependencies_internal(&module_id, 1)
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let dependents = state.get_dependents(&module_id).unwrap_or_default();
+
+    let mut related: Vec<serde_json::Value> = Vec::new();
+    for d in &deps {
+        if related.len() >= max { break; }
+        related.push(serde_json::json!({
+            "moduleId": d.module_id, "path": d.path, "relationship": "dependency"
+        }));
+    }
+    for d in &dependents {
+        if related.len() >= max { break; }
+        related.push(serde_json::json!({
+            "moduleId": d.module_id, "path": d.path, "relationship": "dependent"
+        }));
+    }
+
+    result_to_json_ptr::<serde_json::Value>(Ok(serde_json::json!({
+        "target": target,
+        "moduleId": module_id,
+        "related": related,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Architecture Evolution
+// ---------------------------------------------------------------------------
+
+/// Return architecture health and debt indicators for a project.
+///
+/// Inputs:
+///   `path` — project root (C string)
+///   `days` — look-back window in days (0 → default 30)
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "snapshots": [{ "timestamp": ..., "healthScore": 72.5, ... }],
+///     "healthTrend": "At Risk",
+///     "debtIndicators": ["2 dependency cycles detected"],
+///     "recommendations": ["Resolve dependency cycles to improve health score"]
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_evolution(
+    path: *const c_char,
+    days: u32,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let mapped_files = match build_mapped_files(&path) {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let state = ApiState::new(path.clone());
+    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
+
+    let days_opt = if days == 0 { None } else { Some(days) };
+    let result = state.get_evolution(days_opt);
+    result_to_json_ptr(result)
+}
+
+// ---------------------------------------------------------------------------
+// FFI: Poll Changes
+// ---------------------------------------------------------------------------
+
+/// Return project files modified since a given epoch-millisecond timestamp.
+///
+/// Inputs:
+///   `path`     — project root (C string)
+///   `since_ms` — epoch milliseconds; 0 → last 60 seconds
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "data": {
+///     "changedFiles": ["src/api.rs", "src/main.rs"],
+///     "checkedAtMs": 1712345678901
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn cartographer_poll_changes(
+    path: *const c_char,
+    since_ms: u64,
+) -> *mut c_char {
+    let path = match c_str_to_path(path) {
+        Ok(p) => p,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+
+    let threshold_ms = if since_ms == 0 {
+        // default: last 60 seconds
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .saturating_sub(60_000) as u64
+    } else {
+        since_ms
+    };
+
+    let threshold = std::time::UNIX_EPOCH
+        + std::time::Duration::from_millis(threshold_ms);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let scan = match scan_files_with_noise_tracking(&path) {
+        Ok(s) => s,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+    };
+
+    let changed: Vec<String> = scan.files
+        .iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let mtime = std::fs::metadata(p).ok()?.modified().ok()?;
+            if mtime > threshold {
+                let rel = p.strip_prefix(&path).unwrap_or(p)
+                    .to_string_lossy().replace('\\', "/");
+                Some(rel)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    result_to_json_ptr::<serde_json::Value>(Ok(serde_json::json!({
+        "changedFiles": changed,
+        "checkedAtMs": now_ms,
+    })))
 }

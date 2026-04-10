@@ -2,6 +2,15 @@
 // This provides endpoints for AI tools like ShellAI to query module context
 
 use crate::layers::{detect_layer_violations, LayerConfig, LayerViolation};
+
+/// Public symbol names too generic to flag as unreferenced exports.
+const COMMON_SYMBOL_NAMES: &[&str] = &[
+    "parse", "build", "create", "format", "display", "default",
+    "clone", "debug", "assert", "error", "result", "option",
+    "update", "delete", "insert", "select", "render", "handle",
+    "encode", "decode", "serialize", "deserialize", "validate",
+    "connect", "execute", "process", "generate", "convert",
+];
 use crate::mapper::{DetailLevel, MappedFile, Signature};
 use petgraph::algo;
 use petgraph::graphmap::{DiGraphMap, UnGraphMap};
@@ -532,7 +541,7 @@ impl ApiState {
             .flat_map(|mf| {
                 mf.imports.iter().flat_map(|imp| {
                     imp.split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .filter(|s| s.len() >= 4)
+                        .filter(|s| s.len() >= 6)
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
                 })
@@ -555,7 +564,9 @@ impl ApiState {
                             return false;
                         }
                         if let Some(name) = &sig.symbol_name {
-                            name.len() >= 4 && !import_tokens.contains(name.as_str())
+                            name.len() >= 6
+                                && !import_tokens.contains(name.as_str())
+                                && !COMMON_SYMBOL_NAMES.contains(&name.to_lowercase().as_str())
                         } else {
                             false
                         }
@@ -743,7 +754,12 @@ impl ApiState {
                 .get(&node.module_id)
                 .map(|mf| mf.signatures.iter().map(|s| s.raw.clone()).collect())
                 .unwrap_or_default();
-            let estimated = sigs.len() * 15 + 5;
+            let estimated = {
+                let text = sigs.join("\n");
+                tiktoken_rs::cl100k_base()
+                    .map(|bpe| bpe.encode_with_special_tokens(&text).len())
+                    .unwrap_or_else(|_| sigs.len() * 15 + 5)
+            };
 
             if token_budget > 0 && tokens_used + estimated > token_budget {
                 break;

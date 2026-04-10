@@ -54,12 +54,14 @@
 
 ### Integrations
 - [x] MCP server — JSON-RPC 2.0 stdio, 8 tools
-- [x] C FFI (`libcartographer.a`) — 15 functions for CKB via CGo
+- [x] C FFI (`libcartographer.a`) — 16 functions for CKB via CGo
 - [x] `cartographer check` — CI gate, exits non-zero on cycles or layer violations
 - [x] `cartographer symbols --unreferenced`
 - [x] Global config (`~/.config/cartographer/config.toml`)
 - [x] Per-repo `.cartographerignore`
-- [x] Content search (`cartographer_search_content`)
+- [x] Content search — `cartographer search <PATTERN>` + `cartographer_search_content` FFI
+- [x] File find — `cartographer find <GLOB>` + `cartographer_find_files` FFI
+- [x] Context injection for tool-call-less models — `cartographer context --query <PATTERN>` bundles ranked skeleton + search results in one invocation
 
 ---
 

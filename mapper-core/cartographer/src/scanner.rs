@@ -150,6 +150,9 @@ pub const IGNORED_FILES: &[&str] = &[
     "cartographer_map.md",
     "cartographer_map.json",
     ".cartographer_memory.json",
+    // Cartographer runtime state files
+    ".cartographer_cache.json",
+    ".cartographer_watch_state.json",
 ];
 
 // Patterns for extension-based blocking

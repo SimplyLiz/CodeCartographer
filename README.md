@@ -104,14 +104,49 @@ Track architecture over time - see debt indicators, health trends, and get recom
 
 ## CLI Commands
 
+### Architecture & analysis
+
 | Command | Description |
 |---------|-------------|
-| `cartographer map` | Generate skeleton map |
-| `cartographer watch` | Live file watching |
-| `cartographer health` | Show health score |
-| `cartographer simulate` | Predict change impact |
-| `cartographer evolution` | Architectural trends |
-| `cartographer init-ckb` | Setup CKB integration |
+| `cartographer map` | Skeleton map — imports + signatures only |
+| `cartographer health` | Architectural health score (cycles, bridges, god modules) |
+| `cartographer simulate --module <FILE>` | Predict impact before making a change |
+| `cartographer check` | CI gate — exits non-zero on cycles or layer violations |
+| `cartographer dead` | Dead code candidates (in-degree = 0) |
+| `cartographer symbols --unreferenced` | Public exports not referenced anywhere |
+| `cartographer diagram --format mermaid` | Dependency graph as Mermaid or Graphviz DOT |
+
+### Git history signals
+
+| Command | Description |
+|---------|-------------|
+| `cartographer hotspots` | High churn × high complexity files |
+| `cartographer cochange --min-count 3` | Temporal coupling — files that always change together |
+| `cartographer semidiff HEAD~1` | Function-level semantic diff between two commits |
+
+### Search & file discovery
+
+| Command | Description |
+|---------|-------------|
+| `cartographer search <PATTERN>` | Grep-like content search; `-i -v -w -o -l -c -A -B -C`, `--glob`, `--exclude`, `--path`, `--no-ignore` |
+| `cartographer find <PATTERN>` | File find by glob; `--modified-since 24h`, `--newer`, `--min-size`, `--max-size`, `--max-depth` |
+
+### Context injection (AI / local models)
+
+| Command | Description |
+|---------|-------------|
+| `cartographer context --focus <FILE> --budget 8000` | Ranked skeleton pruned to token budget (personalized PageRank) |
+| `cartographer context --query <PATTERN>` | Skeleton + search results bundled for models without tool calls |
+| `cartographer llmstxt` | Generate `llms.txt` project index |
+| `cartographer claudemd` | Generate `CLAUDE.md` architecture guide |
+
+### Sync & MCP
+
+| Command | Description |
+|---------|-------------|
+| `cartographer serve` | Start MCP server (JSON-RPC 2.0 stdio) |
+| `cartographer watch` | Live file watching with optional cloud push |
+| `cartographer evolution --days 30` | Architectural trends over time |
 
 ## Token Efficiency
 
@@ -128,6 +163,12 @@ Cartographer achieves **90%+ token reduction** vs full source code:
 
 ## Version History
 
+- **v1.7.0** - Full grep + find parity: `-v`, `-w`, `-o`, `-l`, `-c`, `-e`, `-A/-B/-C`, `--exclude`, `--no-ignore`, `--path`; find with `--modified-since`, `--newer`, `--min/max-size`, `--max-depth`; ISO-8601 mtime in results; FFI + MCP updated
+- **v1.6.0** - Bot/formatting-commit filtering in git history; personalized PageRank context (`cartographer context`); CI gate (`cartographer check`); unreferenced export detection
+- **v1.5.0** - FFI wrappers for git churn, co-change, semidiff; `cartographer_version()` for compatibility checks
+- **v1.4.0** - CCE integration, context compression
+- **v1.3.0** - `cochange`, `hotspots`, `dead`, `diagram`, `llmstxt`, `claudemd`, `semidiff`; role classification; hotspot scoring
+- **v1.2.0** - Hidden coupling detection; `cartographer_hidden_coupling` FFI; CKB query engine integration
 - **v1.1.0** - Predictive simulation, historical evolution
 - **v1.0.0** - CKB integration, symbol mapping
 - **v0.5.0** - Layer enforcement, border patrol

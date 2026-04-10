@@ -45,8 +45,9 @@ enrich_with_git()
 | `api.rs` | `ApiState`, `rebuild_graph`, import resolution, all graph analysis |
 | `git_analysis.rs` | `git_churn`, `git_cochange`, `git_show_file`, `git_diff_files` via subprocess |
 | `layers.rs` | Architectural layer config (`layers.toml`), violation detection |
+| `search.rs` | Content search (`search_content`) and file find (`find_files`) — regex + glob, noise-filtered. See [`docs/api/search.md`](api/search.md) |
 | `mcp.rs` | MCP server — JSON-RPC 2.0 stdio transport, 8 tools |
-| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 13 functions consumed by CKB via CGo |
+| `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 15 functions consumed by CKB via CGo |
 | `memory.rs` | Versioned local memory, incremental hash-based sync |
 | `formatter.rs` | Output formatting: XML, Markdown, JSON |
 | `global_config.rs` | `~/.config/cartographer/config.toml` |

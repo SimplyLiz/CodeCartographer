@@ -255,11 +255,63 @@ impl McpServer {
                 ),
             },
             McpTool {
+                name: "get_evolution".to_string(),
+                description: "Get architectural health trend, debt indicators, and recommendations. \
+                              Useful for understanding how code quality is trending."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert(
+                            "days".to_string(),
+                            mcprop!("number", "Look-back window in days (default 30)"),
+                        );
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "watch_status".to_string(),
+                description: "Check whether files changed since the last `cartographer watch` \
+                              cycle. Returns { lastChangedMs, changedFiles } or \
+                              { watching: false } if watch is not running."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
                 name: "set_compression_level".to_string(),
                 description: "Configure compression level for responses".to_string(),
                 input_schema: mcinput!(
                     "level" => "string" => "Compression level: minimal, standard, aggressive"
                 ),
+            },
+            McpTool {
+                name: "find_files".to_string(),
+                description: "Find files matching a glob pattern (like find). Returns path, \
+                              language, and size. Use instead of find/ls tool calls."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert(
+                            "pattern".to_string(),
+                            mcprop!("string", "Glob pattern, e.g. \"*.rs\" or \"src/**/*.ts\". Patterns without \"/\" match filename anywhere in tree."),
+                        );
+                        props.insert(
+                            "limit".to_string(),
+                            mcprop!("number", "Max files to return — 0 = unlimited (default 200)"),
+                        );
+                        props
+                    },
+                    required: vec!["pattern".to_string()],
+                },
             },
             McpTool {
                 name: "search_content".to_string(),
@@ -756,6 +808,29 @@ impl McpServer {
                 })
             }
 
+            "find_files" => {
+                let args = &call.arguments;
+                let pattern = args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing pattern")?
+                    .to_string();
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(200) as usize;
+
+                let result =
+                    crate::search::find_files(&self.api_state.root_path, &pattern, limit, &crate::search::FindOptions::default())
+                        .map_err(|e| e)?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
             "search_content" => {
                 let args = &call.arguments;
 
@@ -768,26 +843,26 @@ impl McpServer {
                 // Build SearchOptions from the individual MCP arguments so callers
                 // don't need to nest a JSON object — each option is a top-level field.
                 let opts = crate::search::SearchOptions {
-                    literal: args
-                        .get("literal")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    case_sensitive: args
-                        .get("caseSensitive")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true),
-                    context_lines: args
-                        .get("contextLines")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize,
-                    max_results: args
-                        .get("maxResults")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(100) as usize,
-                    file_glob: args
-                        .get("fileGlob")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    literal: args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false),
+                    case_sensitive: args.get("caseSensitive").and_then(|v| v.as_bool()).unwrap_or(true),
+                    context_lines: args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    before_context: args.get("beforeContext").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    after_context: args.get("afterContext").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    max_results: args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(100) as usize,
+                    file_glob: args.get("fileGlob").and_then(|v| v.as_str()).map(String::from),
+                    exclude_glob: args.get("excludeGlob").and_then(|v| v.as_str()).map(String::from),
+                    invert_match: args.get("invertMatch").and_then(|v| v.as_bool()).unwrap_or(false),
+                    word_regexp: args.get("wordRegexp").and_then(|v| v.as_bool()).unwrap_or(false),
+                    only_matching: args.get("onlyMatching").and_then(|v| v.as_bool()).unwrap_or(false),
+                    files_with_matches: args.get("filesWithMatches").and_then(|v| v.as_bool()).unwrap_or(false),
+                    files_without_match: args.get("filesWithoutMatch").and_then(|v| v.as_bool()).unwrap_or(false),
+                    count_only: args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+                    no_ignore: args.get("noIgnore").and_then(|v| v.as_bool()).unwrap_or(false),
+                    search_path: args.get("searchPath").and_then(|v| v.as_str()).map(String::from),
+                    extra_patterns: args.get("extraPatterns")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
                 };
 
                 let result = self.api_state.search_content(&pattern, &opts)?;
@@ -795,6 +870,32 @@ impl McpServer {
                     content: vec![McpContent::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
                     )],
+                    is_error: None,
+                })
+            }
+
+            "get_evolution" => {
+                let days = call.arguments
+                    .get("days")
+                    .and_then(|v| v.as_u64())
+                    .map(|d| d as u32);
+                let result = self.api_state.get_evolution(days)?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            "watch_status" => {
+                let state_path = self.api_state.root_path.join(".cartographer_watch_state.json");
+                let content = match std::fs::read_to_string(&state_path) {
+                    Ok(s) => s,
+                    Err(_) => r#"{"watching":false}"#.to_string(),
+                };
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(content)],
                     is_error: None,
                 })
             }

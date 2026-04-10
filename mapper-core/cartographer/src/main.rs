@@ -265,12 +265,99 @@ enum Commands {
         /// Maximum tokens to include (0 = unlimited)
         #[arg(long, default_value = "8000")]
         budget: usize,
+        /// Also search for this pattern and bundle results into the context output
+        #[arg(long, value_name = "PATTERN")]
+        query: Option<String>,
     },
     /// Show symbol-level analysis (unreferenced public exports)
     Symbols {
         /// Show only unreferenced public exports
         #[arg(long)]
         unreferenced: bool,
+    },
+    /// Search for text or regex pattern across project files (grep-like)
+    Search {
+        /// Pattern to search for (regex by default)
+        #[arg(value_name = "PATTERN")]
+        pattern: String,
+        /// Additional patterns OR'd with the primary (repeatable, like grep -e)
+        #[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
+        extra_patterns: Vec<String>,
+        /// Treat pattern as a literal string (no regex metacharacters)
+        #[arg(long)]
+        literal: bool,
+        /// Case-insensitive matching
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Invert match — show lines that do NOT match
+        #[arg(short = 'v', long)]
+        invert_match: bool,
+        /// Whole-word matching (wraps pattern in \b…\b)
+        #[arg(short = 'w', long)]
+        word_regexp: bool,
+        /// Print only the matched portion of each line
+        #[arg(short = 'o', long)]
+        only_matching: bool,
+        /// Print only file names that have matches
+        #[arg(short = 'l', long)]
+        files_with_matches: bool,
+        /// Print only file names that have NO matches
+        #[arg(long)]
+        files_without_match: bool,
+        /// Print match count per file
+        #[arg(short = 'c', long)]
+        count: bool,
+        /// Lines of context after each match
+        #[arg(short = 'A', long, value_name = "N", default_value = "0")]
+        after_context: usize,
+        /// Lines of context before each match
+        #[arg(short = 'B', long, value_name = "N", default_value = "0")]
+        before_context: usize,
+        /// Lines of context before and after (sets both -A and -B)
+        #[arg(short = 'C', long, value_name = "N", default_value = "0")]
+        context: usize,
+        /// Include only files matching this glob (e.g. "*.rs")
+        #[arg(long, value_name = "GLOB")]
+        glob: Option<String>,
+        /// Exclude files matching this glob
+        #[arg(long, value_name = "GLOB")]
+        exclude: Option<String>,
+        /// Restrict search to this repo-relative subdirectory
+        #[arg(long, value_name = "SUBDIR")]
+        path: Option<String>,
+        /// Maximum results (0 = unlimited)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Include vendor/generated/noise files (bypass ignore filter)
+        #[arg(long)]
+        no_ignore: bool,
+    },
+    /// Find files by name or path glob (e.g. "*.rs" or "src/**/*.go")
+    Find {
+        /// Glob pattern
+        #[arg(value_name = "PATTERN")]
+        pattern: String,
+        /// Files modified within this duration (e.g. "24h", "7d", "30m")
+        #[arg(long, value_name = "DURATION")]
+        modified_since: Option<String>,
+        /// Files newer than this file's modification time
+        #[arg(long, value_name = "FILE")]
+        newer: Option<String>,
+        /// Minimum file size in bytes
+        #[arg(long, value_name = "BYTES")]
+        min_size: Option<u64>,
+        /// Maximum file size in bytes
+        #[arg(long, value_name = "BYTES")]
+        max_size: Option<u64>,
+        /// Maximum directory depth (0 = root files only)
+        #[arg(long, value_name = "N")]
+        max_depth: Option<usize>,
+        /// Maximum files to return (0 = unlimited)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Include vendor/generated/noise files (bypass ignore filter)
+        #[arg(long)]
+        no_ignore: bool,
     },
 }
 
@@ -471,13 +558,32 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, cli.path)?;
             check_mode(&root)
         }
-        Some(Commands::Context { focus, budget }) => {
+        Some(Commands::Context { focus, budget, query }) => {
             let root = resolve_path(&cwd, cli.path)?;
-            context_mode(&root, &focus, budget)
+            context_mode(&root, &focus, budget, query.as_deref())
         }
         Some(Commands::Symbols { unreferenced }) => {
             let root = resolve_path(&cwd, cli.path)?;
             symbols_mode(&root, unreferenced)
+        }
+        Some(Commands::Search {
+            pattern, extra_patterns, literal, ignore_case, invert_match,
+            word_regexp, only_matching, files_with_matches, files_without_match,
+            count, after_context, before_context, context, glob, exclude,
+            path, limit, no_ignore,
+        }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            search_mode(
+                &root, &pattern, extra_patterns, literal, ignore_case,
+                invert_match, word_regexp, only_matching, files_with_matches,
+                files_without_match, count, after_context, before_context,
+                context, glob.as_deref(), exclude.as_deref(),
+                path.as_deref(), limit, no_ignore,
+            )
+        }
+        Some(Commands::Find { pattern, modified_since, newer, min_size, max_size, max_depth, limit, no_ignore }) => {
+            let root = resolve_path(&cwd, cli.path)?;
+            find_mode(&root, &pattern, modified_since.as_deref(), newer.as_deref(), min_size, max_size, max_depth, limit, no_ignore)
         }
         None => {
             let root = resolve_path(&cwd, cli.path)?;
@@ -602,6 +708,28 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget, push: b
                                     format_token_count(tokens)
                                 );
                             }
+                            // Write watch-state sentinel so MCP clients can poll for changes.
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let changed_paths: Vec<String> = events
+                                .iter()
+                                .filter(|e| e.kind == DebouncedEventKind::Any)
+                                .filter_map(|e| {
+                                    e.path.strip_prefix(root).ok()
+                                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                                })
+                                .collect();
+                            let sentinel = serde_json::json!({
+                                "watching": true,
+                                "lastChangedMs": now_ms,
+                                "changedFiles": changed_paths,
+                            });
+                            let _ = fs::write(
+                                root.join(".cartographer_watch_state.json"),
+                                serde_json::to_string_pretty(&sentinel).unwrap_or_default(),
+                            );
                         }
                         Err(e) => eprintln!("Error updating map: {}", e),
                     }
@@ -2918,10 +3046,187 @@ fn check_mode(root: &Path) -> Result<()> {
 }
 
 // =============================================================================
+// SEARCH MODE — grep-like text/regex search across project files
+// =============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn search_mode(
+    root: &Path,
+    pattern: &str,
+    extra_patterns: Vec<String>,
+    literal: bool,
+    ignore_case: bool,
+    invert_match: bool,
+    word_regexp: bool,
+    only_matching: bool,
+    files_with_matches: bool,
+    files_without_match: bool,
+    count: bool,
+    after_context: usize,
+    before_context: usize,
+    context: usize,
+    glob: Option<&str>,
+    exclude: Option<&str>,
+    path: Option<&str>,
+    limit: usize,
+    no_ignore: bool,
+) -> Result<()> {
+    use crate::search::{search_content, SearchOptions};
+
+    let opts = SearchOptions {
+        literal,
+        case_sensitive: !ignore_case,
+        context_lines: context,
+        before_context,
+        after_context,
+        max_results: limit,
+        file_glob: glob.map(|s| s.to_string()),
+        exclude_glob: exclude.map(|s| s.to_string()),
+        extra_patterns,
+        invert_match,
+        word_regexp,
+        only_matching,
+        files_with_matches,
+        files_without_match,
+        count_only: count,
+        no_ignore,
+        search_path: path.map(|s| s.to_string()),
+    };
+
+    let result = search_content(root, pattern, &opts).map_err(|e| anyhow::anyhow!(e))?;
+
+    eprintln!(
+        "Search {:?} — {} match(es) across {} file(s){}",
+        pattern, result.total_matches, result.files_searched,
+        if result.truncated { " [truncated]" } else { "" }
+    );
+
+    // -l
+    if opts.files_with_matches {
+        for f in &result.files_with_matches { println!("{}", f); }
+        return Ok(());
+    }
+    // --files-without-match
+    if opts.files_without_match {
+        for f in &result.files_without_match { println!("{}", f); }
+        return Ok(());
+    }
+    // -c
+    if opts.count_only {
+        for fc in &result.file_counts { println!("{}:{}", fc.path, fc.count); }
+        return Ok(());
+    }
+
+    if result.matches.is_empty() { return Ok(()); }
+
+    eprintln!();
+    let mut cur_file = String::new();
+    for m in &result.matches {
+        if m.path != cur_file {
+            if !cur_file.is_empty() { println!(); }
+            println!("{}:", m.path);
+            cur_file = m.path.clone();
+        }
+        for ctx in &m.before_context {
+            println!("  {:>5}-{}", ctx.line_number, ctx.line);
+        }
+        if opts.only_matching {
+            for t in &m.matched_texts { println!("  {:>5}:{}", m.line_number, t); }
+        } else {
+            println!("  {:>5}:{}", m.line_number, m.line);
+        }
+        for ctx in &m.after_context {
+            println!("  {:>5}-{}", ctx.line_number, ctx.line);
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// FIND MODE — find files by glob + optional mtime/size/depth filters
+// =============================================================================
+
+fn find_mode(
+    root: &Path,
+    pattern: &str,
+    modified_since: Option<&str>,
+    newer: Option<&str>,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    max_depth: Option<usize>,
+    limit: usize,
+    no_ignore: bool,
+) -> Result<()> {
+    use crate::search::{find_files, FindOptions};
+
+    let modified_since_secs = modified_since.map(parse_duration_secs).transpose()?;
+
+    let opts = FindOptions {
+        modified_since_secs,
+        newer_than: newer.map(|s| s.to_string()),
+        min_size_bytes: min_size,
+        max_size_bytes: max_size,
+        max_depth,
+        no_ignore,
+    };
+
+    let result = find_files(root, pattern, limit, &opts).map_err(|e| anyhow::anyhow!(e))?;
+
+    eprintln!(
+        "Find {:?} — {} file(s){}",
+        pattern, result.total_matches,
+        if result.truncated { " [truncated]" } else { "" }
+    );
+
+    if result.files.is_empty() { return Ok(()); }
+
+    eprintln!();
+    for f in &result.files {
+        let lang = f.language.as_deref().unwrap_or("");
+        let size = fmt_size(f.size_bytes);
+        let mtime = f.modified.as_deref().unwrap_or("");
+        if lang.is_empty() {
+            println!("  {}  ({})  {}", f.path, size, mtime);
+        } else {
+            println!("  {}  [{}, {}]  {}", f.path, lang, size, mtime);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_duration_secs(s: &str) -> Result<u64> {
+    let (num, mul) = if let Some(n) = s.strip_suffix('d') {
+        (n, 86400u64)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1)
+    } else {
+        (s, 1)
+    };
+    let n: u64 = num.parse().context("invalid duration (use: 24h, 7d, 30m, 3600s)")?;
+    Ok(n * mul)
+}
+
+fn fmt_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+// =============================================================================
 // CONTEXT MODE — Ranked skeleton pruned to token budget (personalized PageRank)
 // =============================================================================
 
-fn context_mode(root: &Path, focus: &[String], budget: usize) -> Result<()> {
+fn context_mode(root: &Path, focus: &[String], budget: usize, query: Option<&str>) -> Result<()> {
     use crate::api::ApiState;
     use crate::mapper::extract_skeleton;
     use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
@@ -2964,14 +3269,65 @@ fn context_mode(root: &Path, focus: &[String], budget: usize) -> Result<()> {
     if !focus.is_empty() {
         eprintln!("Focus: {}", focus.join(", "));
     }
+    if let Some(q) = query {
+        eprintln!("Query: {:?}", q);
+    }
     eprintln!();
 
+    // Print ranked skeleton
+    println!("## Ranked Architecture Skeleton\n");
     for f in &ranked {
         println!("// {} (rank: {:.4}, {} tokens)", f.path, f.rank, f.estimated_tokens);
         for sig in &f.signatures {
             println!("  {}", sig);
         }
         println!();
+    }
+
+    // If --query was given, bundle matching lines below the skeleton
+    if let Some(q) = query {
+        use crate::search::{search_content, SearchOptions};
+        let opts = SearchOptions {
+            case_sensitive: false, // case-insensitive for context queries
+            context_lines: 2,
+            max_results: 50,
+            ..Default::default()
+        };
+        match search_content(root, q, &opts) {
+            Ok(sr) if !sr.matches.is_empty() => {
+                println!("## Search Results for {:?}\n", q);
+                let mut cur_file = String::new();
+                for m in &sr.matches {
+                    if m.path != cur_file {
+                        if !cur_file.is_empty() {
+                            println!();
+                        }
+                        println!("// {}", m.path);
+                        cur_file = m.path.clone();
+                    }
+                    for ctx in &m.before_context {
+                        println!("  {:>4}  {}", ctx.line_number, ctx.line);
+                    }
+                    println!("  {:>4}> {}", m.line_number, m.line);
+                    for ctx in &m.after_context {
+                        println!("  {:>4}  {}", ctx.line_number, ctx.line);
+                    }
+                }
+                println!();
+                eprintln!(
+                    "Search: {} match(es) in {} file(s){}",
+                    sr.total_matches,
+                    sr.files_searched,
+                    if sr.truncated { " [truncated]" } else { "" }
+                );
+            }
+            Ok(_) => {
+                eprintln!("Search: no matches for {:?}", q);
+            }
+            Err(e) => {
+                eprintln!("Search error: {}", e);
+            }
+        }
     }
 
     Ok(())

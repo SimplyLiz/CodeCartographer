@@ -1,6 +1,6 @@
 [package]
 name = "cartographer"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 description = "Code Cartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
@@ -31,6 +31,10 @@ chrono = "0.4"
 toml = { version = "0.8", features = ["parse"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 petgraph = "0.6"
+rayon = "1.10"
+
+[build-dependencies]
+cbindgen = "0.27"
 
 [profile.release]
 opt-level = 3
