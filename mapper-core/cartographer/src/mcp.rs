@@ -247,7 +247,10 @@ impl McpServer {
             },
             McpTool {
                 name: "get_blast_radius".to_string(),
-                description: "Get related files/symbols for understanding change impact"
+                description: "Get files and symbols affected by changing a target module. \
+                              Each related entry includes lip_uris — the LIP symbol URIs \
+                              (lip://local/<path>#<symbol>) of public symbols in that file — \
+                              so CKB can drill into any affected symbol without a second lookup."
                     .to_string(),
                 input_schema: mcinput!(
                     "target" => "string" => "File path or symbol name",
@@ -1078,6 +1081,21 @@ impl McpServer {
 
                 let dependents = self.api_state.get_dependents(&module_id)?;
 
+                // Pre-fetch mapped_files once for LIP URI extraction.
+                let files_snapshot = self.api_state.mapped_files.lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+
+                let lip_uris_for = |path: &str| -> Vec<String> {
+                    files_snapshot.get(path)
+                        .map(|mf| {
+                            mf.signatures.iter()
+                                .filter_map(|s| s.ckb_id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+
                 let mut related: Vec<serde_json::Value> = Vec::new();
                 for dep in &deps {
                     if related.len() >= max_related {
@@ -1086,7 +1104,8 @@ impl McpServer {
                     related.push(serde_json::json!({
                         "module_id": dep.module_id,
                         "path": dep.path,
-                        "relationship": "dependency"
+                        "relationship": "dependency",
+                        "lip_uris": lip_uris_for(&dep.path),
                     }));
                 }
                 for dep in &dependents {
@@ -1096,13 +1115,15 @@ impl McpServer {
                     related.push(serde_json::json!({
                         "module_id": dep.module_id,
                         "path": dep.path,
-                        "relationship": "dependent"
+                        "relationship": "dependent",
+                        "lip_uris": lip_uris_for(&dep.path),
                     }));
                 }
 
                 let result = serde_json::json!({
                     "target": target,
                     "module_id": module_id,
+                    "lip_uris": lip_uris_for(&node.path),
                     "related": related,
                 });
 
