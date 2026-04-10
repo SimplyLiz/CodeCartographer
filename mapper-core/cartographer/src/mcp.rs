@@ -585,6 +585,31 @@ impl McpServer {
                     required: vec!["pattern".to_string()],
                 },
             },
+            // PKG retrieval — full query → rank → score pipeline
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "query_context".to_string(),
+                description: "Full retrieval pipeline for code-question context injection. \
+                              Given a natural-language query or symbol name: (1) searches \
+                              the codebase for matching files, (2) uses PageRank personalised \
+                              to those files to build a token-budget-aware skeleton, \
+                              (3) scores the bundle with context_health. Returns the ready-to-inject \
+                              context string plus health metadata. Use this instead of calling \
+                              search_content + ranked_skeleton + context_health separately."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("query".to_string(), mcprop!("string", "Natural language question or symbol/pattern to search for"));
+                        props.insert("budget".to_string(), mcprop!("number", "Max tokens for the skeleton portion (default: 8000)"));
+                        props.insert("model".to_string(), mcprop!("string", "Target model family for health scoring: claude (default), gpt4, llama, gpt35"));
+                        props.insert("maxSearchResults".to_string(), mcprop!("number", "Max search hits used as focus seeds (default: 20)"));
+                        props
+                    },
+                    required: vec!["query".to_string()],
+                },
+            },
             // Context quality
             // -----------------------------------------------------------------
             McpTool {
@@ -1467,6 +1492,89 @@ impl McpServer {
                     .map_err(|e| e)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            "query_context" => {
+                let args = &call.arguments;
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing query")?
+                    .to_string();
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+                let max_search = args.get("maxSearchResults").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let model_str = args.get("model").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+
+                // Step 1: search for files matching the query
+                let search_opts = crate::search::SearchOptions {
+                    case_sensitive: false,
+                    max_results: max_search,
+                    ..Default::default()
+                };
+                let focus_files: Vec<String> = match crate::search::search_content(
+                    &self.api_state.root_path,
+                    &query,
+                    &search_opts,
+                ) {
+                    Ok(sr) => {
+                        let mut seen = std::collections::HashSet::new();
+                        sr.matches.into_iter()
+                            .filter_map(|m| if seen.insert(m.path.clone()) { Some(m.path) } else { None })
+                            .collect()
+                    }
+                    Err(_) => vec![],
+                };
+
+                // Step 2: ranked skeleton personalised to those files
+                let ranked = self.api_state.ranked_skeleton(&focus_files, budget)
+                    .map_err(|e| e)?;
+
+                // Step 3: build context text
+                let mut context_text = format!("## Ranked Context for: {}\n\n", query);
+                let total_tokens: usize = ranked.iter().map(|f| f.estimated_tokens).sum();
+                let sig_count: usize = ranked.iter().map(|f| f.signatures.len()).sum();
+
+                for f in &ranked {
+                    context_text.push_str(&format!(
+                        "// {} (rank: {:.4}, {} tokens)\n",
+                        f.path, f.rank, f.estimated_tokens
+                    ));
+                    for sig in &f.signatures {
+                        context_text.push_str(&format!("  {}\n", sig));
+                    }
+                    context_text.push('\n');
+                }
+
+                // Step 4: score the bundle
+                let model = model_str
+                    .parse::<crate::token_metrics::ModelFamily>()
+                    .unwrap_or_default();
+                let health_opts = crate::token_metrics::HealthOpts {
+                    model,
+                    window_size: 0,
+                    key_positions: crate::token_metrics::key_positions_from_order(
+                        &ranked.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+                        &focus_files,
+                    ),
+                    signature_count: sig_count,
+                    signature_tokens: (total_tokens as f64 * 0.85) as usize, // approximate
+                };
+                let health = crate::token_metrics::analyze(&context_text, &health_opts);
+
+                let result = serde_json::json!({
+                    "context": context_text,
+                    "filesUsed": ranked.iter().map(|f| &f.path).collect::<Vec<_>>(),
+                    "focusFiles": focus_files,
+                    "totalTokens": total_tokens,
+                    "health": health,
+                });
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
                     is_error: None,
                 })
             }
