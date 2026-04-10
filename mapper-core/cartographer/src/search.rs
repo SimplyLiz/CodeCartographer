@@ -737,7 +737,14 @@ pub fn replace_content(
     let re = build_re(pattern, opts.literal, opts.word_regexp, opts.case_sensitive)?;
 
     let effective_root = match &opts.search_path {
-        Some(sp) => root.join(sp),
+        Some(sp) => {
+            let candidate = root.join(sp);
+            let canon = candidate.canonicalize().unwrap_or(candidate);
+            if !canon.starts_with(root) {
+                return Err("search_path escapes project root".into());
+            }
+            canon
+        }
         None => root.to_path_buf(),
     };
     let file_glob_re = opts.file_glob.as_deref().and_then(build_glob_regex);
@@ -789,7 +796,11 @@ pub fn replace_content(
 }
 
 /// Build a contextual diff between two versions of a file.
-/// Since replacements are in-place (same line numbers), a simple line comparison suffices.
+///
+/// For single-line replacements both versions have the same number of lines, so
+/// position `i` in old and new correspond directly. For replacements whose
+/// replacement string contains `\n`, the new content has more lines; the
+/// `(None, Some(&nl))` arm emits the extra added lines correctly in that case.
 fn build_diff(old: &str, new: &str, ctx: usize) -> Vec<DiffLine> {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
@@ -960,8 +971,28 @@ pub fn extract_content(
         .build()
         .map_err(|e| format!("invalid pattern {:?}: {}", pattern, e))?;
 
+    // Validate group indices upfront so callers get a clear error instead of silent empty strings.
+    let num_groups = re.captures_len(); // includes group 0
+    for &g in &opts.groups {
+        if g >= num_groups {
+            return Err(format!(
+                "group {} out of range — pattern has {} capture group{}",
+                g,
+                num_groups.saturating_sub(1),
+                if num_groups == 2 { "" } else { "s" },
+            ));
+        }
+    }
+
     let effective_root = match &opts.search_path {
-        Some(sp) => root.join(sp),
+        Some(sp) => {
+            let candidate = root.join(sp);
+            let canon = candidate.canonicalize().unwrap_or(candidate);
+            if !canon.starts_with(root) {
+                return Err("search_path escapes project root".into());
+            }
+            canon
+        }
         None => root.to_path_buf(),
     };
     let file_glob_re = opts.file_glob.as_deref().and_then(build_glob_regex);
