@@ -433,8 +433,15 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
         "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => extract_c_cpp(rel_path, content),
         "rb" => extract_ruby(rel_path, content),
         "php" => extract_php(rel_path, content),
-        "md" | "txt" | "json" | "yaml" | "yml" | "toml" | "xml" | "html" | "css" | "scss"
-        | "less" | "svg" | "lock" => {
+        "cs" => extract_csharp(rel_path, content),
+        "swift" => extract_swift(rel_path, content),
+        "lua" => extract_lua(rel_path, content),
+        "sh" | "bash" | "zsh" | "fish" => extract_shell(rel_path, content),
+        "sql" => extract_sql(rel_path, content),
+        "md" | "markdown" => extract_markdown(rel_path, content),
+        "yaml" | "yml" => extract_yaml(rel_path, content),
+        "toml" => extract_toml(rel_path, content),
+        "txt" | "json" | "xml" | "html" | "css" | "scss" | "less" | "svg" | "lock" => {
             return MappedFile {
                 path: path.to_string_lossy().replace('\\', "/"),
                 imports: Vec::new(),
@@ -1710,6 +1717,456 @@ fn extract_php(path: String, content: &str) -> MappedFile {
         parameters: None,
         return_types: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// C#
+// ---------------------------------------------------------------------------
+
+fn extract_csharp(path: String, content: &str) -> MappedFile {
+    let import_re = Regex::new(r"^using\s+([\w.]+)").unwrap();
+    let type_re = Regex::new(
+        r"^(?:(?:public|private|protected|internal|static|abstract|sealed|virtual|override|readonly|partial)\s+)*(?:class|interface|enum|struct|record)\s+(\w+)",
+    )
+    .unwrap();
+    let fn_re = Regex::new(
+        r"^(?:(?:public|private|protected|internal|static|abstract|sealed|virtual|override|readonly|async)\s+)+[\w<>\[\]?]+\s+(\w+)\s*\(",
+    )
+    .unwrap();
+
+    let mut imports = Vec::new();
+    let mut signatures = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+    let mut scope = ScopeTracker::new();
+    let mut in_block_comment = false;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            if !in_block_comment { doc_buf.clear(); }
+            scope.update(line, None);
+            continue;
+        }
+
+        if in_block_comment {
+            if trimmed.contains("*/") { in_block_comment = false; }
+            else { doc_buf.push(strip_doc_marker(trimmed)); }
+            scope.update(line, None);
+            continue;
+        }
+
+        if trimmed.starts_with("/**") || trimmed.starts_with("/*") {
+            in_block_comment = !trimmed.contains("*/");
+            doc_buf.push(strip_doc_marker(trimmed));
+            scope.update(line, None);
+            continue;
+        }
+
+        if trimmed.starts_with("///") || trimmed.starts_with("//") {
+            doc_buf.push(strip_doc_marker(trimmed));
+            scope.update(line, None);
+            continue;
+        }
+
+        if import_re.is_match(trimmed) {
+            imports.push(trimmed.to_string());
+            doc_buf.clear();
+            scope.update(line, None);
+            continue;
+        }
+
+        if let Some(caps) = type_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let kind = if trimmed.contains("interface") {
+                SymbolKind::Interface
+            } else if trimmed.contains("enum") {
+                SymbolKind::Enum
+            } else if trimmed.contains("struct") {
+                SymbolKind::Struct
+            } else {
+                SymbolKind::Class
+            };
+            let doc = take_doc(&mut doc_buf);
+            let raw = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            signatures.push(Signature::new(raw, kind, line_idx, &path, name.clone(), doc));
+            scope.update(line, Some(name));
+            continue;
+        }
+
+        if let Some(caps) = fn_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if !matches!(name.as_str(), "if" | "for" | "while" | "switch" | "foreach" | "catch") {
+                let qualified = scope.qualify(&name);
+                let kind = if scope.current().is_some() { SymbolKind::Method } else { SymbolKind::Function };
+                let raw = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+                let doc = take_doc(&mut doc_buf);
+                signatures.push(Signature::new(raw, kind, line_idx, &path, qualified, doc));
+            }
+            scope.update(line, None);
+            continue;
+        }
+
+        doc_buf.clear();
+        scope.update(line, None);
+    }
+
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// Swift
+// ---------------------------------------------------------------------------
+
+fn extract_swift(path: String, content: &str) -> MappedFile {
+    let import_re = Regex::new(r"^import\s+(\w+)").unwrap();
+    let type_re = Regex::new(
+        r"^(?:(?:public|private|internal|fileprivate|open|final)\s+)*(?:class|struct|enum|protocol|actor)\s+(\w+)",
+    )
+    .unwrap();
+    let fn_re = Regex::new(
+        r"^(?:(?:public|private|internal|fileprivate|open|final|override|static|class|mutating|lazy)\s+)*func\s+(\w+)",
+    )
+    .unwrap();
+    let prop_re = Regex::new(
+        r"^(?:(?:public|private|internal|fileprivate|open|final|lazy|static)\s+)*(?:var|let)\s+(\w+)\s*:",
+    )
+    .unwrap();
+    let ext_re = Regex::new(r"^extension\s+(\w+)").unwrap();
+    let alias_re = Regex::new(r"^typealias\s+(\w+)").unwrap();
+
+    let mut imports = Vec::new();
+    let mut signatures = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+    let mut scope = ScopeTracker::new();
+    let mut in_block_comment = false;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            if !in_block_comment { doc_buf.clear(); }
+            scope.update(line, None);
+            continue;
+        }
+
+        if in_block_comment {
+            if trimmed.contains("*/") { in_block_comment = false; }
+            else { doc_buf.push(strip_doc_marker(trimmed)); }
+            scope.update(line, None);
+            continue;
+        }
+
+        if trimmed.starts_with("/**") || trimmed.starts_with("/*") {
+            in_block_comment = !trimmed.contains("*/");
+            doc_buf.push(strip_doc_marker(trimmed));
+            scope.update(line, None);
+            continue;
+        }
+
+        if trimmed.starts_with("///") || trimmed.starts_with("//") {
+            doc_buf.push(strip_doc_marker(trimmed));
+            scope.update(line, None);
+            continue;
+        }
+
+        if import_re.is_match(trimmed) {
+            imports.push(trimmed.to_string());
+            doc_buf.clear();
+            scope.update(line, None);
+            continue;
+        }
+
+        if let Some(caps) = type_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let kind = if trimmed.contains("protocol") { SymbolKind::Interface }
+                else if trimmed.contains("enum") { SymbolKind::Enum }
+                else if trimmed.contains("struct") { SymbolKind::Struct }
+                else { SymbolKind::Class };
+            let doc = take_doc(&mut doc_buf);
+            let raw = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            signatures.push(Signature::new(raw, kind, line_idx, &path, name.clone(), doc));
+            scope.update(line, Some(name));
+            continue;
+        }
+
+        if let Some(caps) = ext_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            let raw = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            signatures.push(Signature::new(raw, SymbolKind::Namespace, line_idx, &path, name.clone(), doc));
+            scope.update(line, Some(name));
+            continue;
+        }
+
+        if let Some(caps) = alias_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            signatures.push(Signature::new(trimmed.to_string(), SymbolKind::TypeAlias, line_idx, &path, name, doc));
+            scope.update(line, None);
+            continue;
+        }
+
+        if let Some(caps) = fn_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let qualified = scope.qualify(&name);
+            let kind = if scope.current().is_some() { SymbolKind::Method } else { SymbolKind::Function };
+            let raw = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            let doc = take_doc(&mut doc_buf);
+            signatures.push(Signature::new(raw, kind, line_idx, &path, qualified, doc));
+            scope.update(line, None);
+            continue;
+        }
+
+        if let Some(caps) = prop_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if scope.current().is_some() {
+                let qualified = scope.qualify(&name);
+                let doc = take_doc(&mut doc_buf);
+                let raw = trimmed.split('=').next().unwrap_or(trimmed).trim().to_string();
+                signatures.push(Signature::new(raw, SymbolKind::Field, line_idx, &path, qualified, doc));
+            } else {
+                doc_buf.clear();
+            }
+            scope.update(line, None);
+            continue;
+        }
+
+        doc_buf.clear();
+        scope.update(line, None);
+    }
+
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// Lua
+// ---------------------------------------------------------------------------
+
+fn extract_lua(path: String, content: &str) -> MappedFile {
+    let require_re = Regex::new(r#"^(?:local\s+\w+\s*=\s*)?require\s*\(?['"]([^'"]+)['"]\)?"#).unwrap();
+    let fn_decl_re = Regex::new(r"^(?:local\s+)?function\s+([\w.:]+)\s*\(").unwrap();
+    let fn_assign_re = Regex::new(r"^(?:local\s+)?([\w.:]+)\s*=\s*function\s*\(").unwrap();
+
+    let mut imports = Vec::new();
+    let mut signatures = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            doc_buf.clear();
+            continue;
+        }
+
+        if trimmed.starts_with("--") {
+            doc_buf.push(strip_doc_marker(trimmed));
+            continue;
+        }
+
+        if let Some(caps) = require_re.captures(trimmed) {
+            let module = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            imports.push(format!("require '{}'", module));
+            doc_buf.clear();
+            continue;
+        }
+
+        if let Some(caps) = fn_decl_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            let raw = trimmed.split(')').next().map(|s| format!("{})", s)).unwrap_or_else(|| trimmed.to_string());
+            signatures.push(Signature::new(raw, SymbolKind::Function, line_idx, &path, name, doc));
+            continue;
+        }
+
+        if let Some(caps) = fn_assign_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if !name.is_empty() && !name.starts_with('_') {
+                let doc = take_doc(&mut doc_buf);
+                let raw = format!("function {}(...)", name);
+                signatures.push(Signature::new(raw, SymbolKind::Function, line_idx, &path, name, doc));
+            } else {
+                doc_buf.clear();
+            }
+            continue;
+        }
+
+        doc_buf.clear();
+    }
+
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// Shell (sh / bash / zsh / fish)
+// ---------------------------------------------------------------------------
+
+fn extract_shell(path: String, content: &str) -> MappedFile {
+    let fn_paren_re = Regex::new(r"^(\w[\w-]*)\s*\(\)\s*(?:\{|$)").unwrap();
+    let fn_keyword_re = Regex::new(r"^function\s+(\w[\w-]*)").unwrap();
+
+    let mut signatures = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            doc_buf.clear();
+            continue;
+        }
+
+        if trimmed.starts_with('#') {
+            doc_buf.push(strip_doc_marker(trimmed));
+            continue;
+        }
+
+        if let Some(caps) = fn_keyword_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            signatures.push(Signature::new(format!("function {}()", name), SymbolKind::Function, line_idx, &path, name, doc));
+            continue;
+        }
+
+        if let Some(caps) = fn_paren_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            signatures.push(Signature::new(format!("{}()", name), SymbolKind::Function, line_idx, &path, name, doc));
+            continue;
+        }
+
+        doc_buf.clear();
+    }
+
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// SQL
+// ---------------------------------------------------------------------------
+
+fn extract_sql(path: String, content: &str) -> MappedFile {
+    let ddl_re = Regex::new(
+        r"(?i)^CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|FUNCTION|PROCEDURE|INDEX|TRIGGER)\s+(?:\w+\.)?(\w+)",
+    )
+    .unwrap();
+    let alter_re = Regex::new(r"(?i)^ALTER\s+TABLE\s+(?:\w+\.)?(\w+)").unwrap();
+
+    let mut signatures = Vec::new();
+    let mut doc_buf: Vec<String> = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            doc_buf.clear();
+            continue;
+        }
+
+        if trimmed.starts_with("--") {
+            doc_buf.push(strip_doc_marker(trimmed));
+            continue;
+        }
+
+        if let Some(caps) = ddl_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let upper = trimmed.to_uppercase();
+            let kind = if upper.contains("TABLE") { SymbolKind::Struct }
+                else if upper.contains("VIEW") { SymbolKind::Class }
+                else if upper.contains("FUNCTION") || upper.contains("PROCEDURE") { SymbolKind::Function }
+                else { SymbolKind::Unknown };
+            let doc = take_doc(&mut doc_buf);
+            let raw = trimmed.split('(').next().unwrap_or(trimmed).trim_end_matches(';').trim().to_string();
+            signatures.push(Signature::new(raw, kind, line_idx, &path, name, doc));
+            continue;
+        }
+
+        if let Some(caps) = alter_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let doc = take_doc(&mut doc_buf);
+            signatures.push(Signature::new(trimmed.trim_end_matches(';').to_string(), SymbolKind::Struct, line_idx, &path, name, doc));
+            continue;
+        }
+
+        doc_buf.clear();
+    }
+
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// Markdown
+// ---------------------------------------------------------------------------
+
+fn extract_markdown(path: String, content: &str) -> MappedFile {
+    let heading_re = Regex::new(r"^(#{1,6})\s+(.+)").unwrap();
+
+    let mut signatures = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(caps) = heading_re.captures(trimmed) {
+            let level = caps.get(1).map(|m| m.as_str().len()).unwrap_or(1);
+            let title = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("").to_string();
+            if title.is_empty() { continue; }
+            let kind = if level == 1 { SymbolKind::Namespace } else { SymbolKind::Field };
+            // Use slug as qualified name for URI stability
+            let slug = title.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-");
+            let raw = format!("{} {}", "#".repeat(level), title);
+            signatures.push(Signature::new(raw, kind, line_idx, &path, slug, None));
+        }
+    }
+
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// YAML
+// ---------------------------------------------------------------------------
+
+fn extract_yaml(path: String, content: &str) -> MappedFile {
+    // Capture top-level keys only (no leading whitespace, not a comment or list item)
+    let key_re = Regex::new(r"^([\w_-]+)\s*:").unwrap();
+
+    let mut signatures = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        // Top-level keys have no leading whitespace
+        if line.starts_with(' ') || line.starts_with('\t') || line.starts_with('#') || line.starts_with('-') {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        if let Some(caps) = key_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            signatures.push(Signature::new(trimmed.to_string(), SymbolKind::Field, line_idx, &path, name, None));
+        }
+    }
+
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+}
+
+// ---------------------------------------------------------------------------
+// TOML
+// ---------------------------------------------------------------------------
+
+fn extract_toml(path: String, content: &str) -> MappedFile {
+    let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
+
+    let mut signatures = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        if let Some(caps) = section_re.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("").to_string();
+            if name.is_empty() { continue; }
+            signatures.push(Signature::new(trimmed.to_string(), SymbolKind::Namespace, line_idx, &path, name, None));
+        }
+    }
+
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
 }
 
 // ---------------------------------------------------------------------------

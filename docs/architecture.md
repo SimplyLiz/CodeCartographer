@@ -188,7 +188,7 @@ Memory contract: all output strings are heap-allocated by Rust and **must** be f
 
 ## MCP server (`mcp.rs`)
 
-Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 29 tools covering the full FFI surface.
+Exposed via `cartographer serve` — JSON-RPC 2.0 over stdio. 30 tools covering the full FFI surface.
 
 ### Graph & architecture
 

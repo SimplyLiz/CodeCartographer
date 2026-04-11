@@ -5,6 +5,24 @@ use crate::api::{ApiState, ModuleContextRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// watch_graph event types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEventKind {
+    FileReindexed,
+    GraphUpdated,
+}
+
+#[derive(Serialize)]
+pub struct GraphEvent {
+    pub kind:         GraphEventKind,
+    pub path:         String,
+    pub timestamp_ms: u64,
+}
+
 macro_rules! mcprop {
     ($type:literal, $desc:literal) => {
         McpProperty {
@@ -659,6 +677,28 @@ impl McpServer {
                         props
                     },
                     required: vec!["content".to_string()],
+                },
+            },
+            // -----------------------------------------------------------------
+            // Incremental graph push events
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "watch_graph".to_string(),
+                description: "Watch a directory for source file changes and emit incremental \
+                              graph events as newline-delimited JSON to stdout. Each event \
+                              includes the kind (file_reindexed or graph_updated), the file \
+                              path, and a millisecond timestamp. Runs until timeout_secs \
+                              elapses (default 30, max 300)."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("root".to_string(), mcprop!("string", "Root directory path to watch recursively"));
+                        props.insert("timeout_secs".to_string(), mcprop!("number", "How long to watch in seconds (default 30, max 300)"));
+                        props
+                    },
+                    required: vec!["root".to_string()],
                 },
             },
         ]
@@ -1669,10 +1709,117 @@ impl McpServer {
                         .unwrap_or_default(),
                 };
 
-                let report = crate::token_metrics::analyze(&content, &opts);
+                let mut report = crate::token_metrics::analyze(&content, &opts);
+
+                // Populate NYX.md [commands] preset names
+                let nyx = crate::token_metrics::parse_nyx_commands(&self.api_state.root_path);
+                if !nyx.is_empty() {
+                    let preset_names: Vec<String> = nyx.into_keys().collect();
+                    report.nyx_commands = Some(preset_names);
+                }
+
+                // Warn if any preset command references a file in a detected cycle
+                if let Some(ref preset_names_ref) = report.nyx_commands.clone() {
+                    if let Ok(graph) = self.api_state.rebuild_graph() {
+                        let cycle_files: std::collections::HashSet<String> = graph.cycles.iter()
+                            .flat_map(|c| c.nodes.iter().cloned())
+                            .collect();
+                        let nyx_map = crate::token_metrics::parse_nyx_commands(&self.api_state.root_path);
+                        for preset_name in preset_names_ref {
+                            if let Some(cmd) = nyx_map.get(preset_name) {
+                                let references_cycle = cycle_files.iter().any(|f| cmd.contains(f.as_str()));
+                                if references_cycle {
+                                    report.warnings.push(format!(
+                                        "preset '{}' references a file in a dependency cycle",
+                                        preset_name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&report).unwrap_or_default(),
+                        serde_json::to_string(&report).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            "watch_graph" => {
+                use notify::{RecursiveMode, Watcher};
+                use std::sync::mpsc;
+                use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+                let args = &call.arguments;
+                let root_str = args
+                    .get("root")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing root")?
+                    .to_string();
+                let timeout_secs = args
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30)
+                    .min(300);
+
+                let watch_path = std::path::PathBuf::from(&root_str);
+                let (tx, rx) = mpsc::channel();
+
+                let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(event) = res {
+                        let _ = tx.send(event);
+                    }
+                }).map_err(|e| format!("Failed to create watcher: {}", e))?;
+
+                watcher.watch(&watch_path, RecursiveMode::Recursive)
+                    .map_err(|e| format!("Failed to watch {}: {}", root_str, e))?;
+
+                let source_extensions: std::collections::HashSet<&str> =
+                    ["rs", "go", "py", "ts", "js", "dart"].iter().copied().collect();
+
+                let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+                let mut event_count = 0u64;
+
+                while Instant::now() < deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() { break; }
+                    let timeout = remaining.min(Duration::from_millis(100));
+                    match rx.recv_timeout(timeout) {
+                        Ok(event) => {
+                            for path in &event.paths {
+                                let ext = path.extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("");
+                                if !source_extensions.contains(ext) {
+                                    continue;
+                                }
+                                let timestamp_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let graph_event = GraphEvent {
+                                    kind: GraphEventKind::FileReindexed,
+                                    path: path.to_string_lossy().to_string(),
+                                    timestamp_ms,
+                                };
+                                println!("{}", serde_json::to_string(&graph_event).unwrap_or_default());
+                                event_count += 1;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string(&serde_json::json!({
+                            "events_emitted": event_count,
+                            "timeout_secs":   timeout_secs,
+                            "root":           root_str,
+                        })).unwrap_or_default(),
                     )],
                     is_error: None,
                 })

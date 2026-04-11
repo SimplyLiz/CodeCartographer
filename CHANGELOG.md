@@ -2,6 +2,46 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.4.2] - 2026-04-11
+
+### Added — `watch_graph` MCP tool + NYX.md preset awareness
+
+**`src/mcp.rs`** — `watch_graph` tool (#30):
+- Watches a directory recursively for source file changes (`.rs`, `.go`, `.py`, `.ts`, `.js`, `.dart`) using the `notify` crate
+- Streams incremental graph events as newline-delimited JSON: `{ kind, path, timestamp_ms }`
+- `kind` values: `file_reindexed` | `graph_updated`
+- `timeout_secs` argument (default 30, max 300); returns event count summary on completion
+
+**`src/mcp.rs` + `src/token_metrics.rs`** — NYX.md `[commands]` preset integration:
+- `context_health` now reads the `[commands]` section from `NYX.md` at the project root
+- Preset names are included in the health report as `nyx_commands: [...]`
+- Warns if any preset command string references a file that participates in a detected dependency cycle
+
+**`src/token_metrics.rs`**:
+- `ContextHealthReport.nyx_commands: Option<Vec<String>>` field
+- `parse_nyx_commands(root) -> HashMap<String, String>` — parses `[commands]` key=value pairs from `NYX.md`
+
+---
+
+## [2.4.1] - 2026-04-10
+
+### Added — Tier-1 regex extraction for C#, Swift, Lua, Shell, SQL, Markdown, YAML, TOML
+
+**`src/mapper.rs`** — 8 new language extractors:
+
+- **C#** (`.cs`): `using` imports, class/interface/enum/struct/record type declarations (with access modifiers), method/function signatures with scope qualification via `ScopeTracker`
+- **Swift** (`.swift`): `import` statements, class/struct/enum/protocol/actor types, `func` (method-qualified), `extension` (as Namespace), `typealias`, `var`/`let` properties inside types
+- **Lua** (`.lua`): `require` imports, `function foo()` declarations, `foo = function()` assignments
+- **Shell** (`.sh`/`.bash`/`.zsh`/`.fish`): `function foo()` and `foo()` style function declarations
+- **SQL** (`.sql`): `CREATE TABLE/VIEW/FUNCTION/PROCEDURE/INDEX/TRIGGER` (SymbolKind matched to object type), `ALTER TABLE`
+- **Markdown** (`.md`): headings `#`–`######` → Namespace (H1) / Field (H2–H6); slug used as LIP URI key for stability
+- **YAML** (`.yaml`/`.yml`): top-level key extraction (no-indent lines ending in `:`)
+- **TOML** (`.toml`): section headers `[name]` and `[[name]]`
+
+All extractors carry `confidence = 30` (Tier 1 regex). Previously all these file types returned `MappedFile::empty()` or fell through to the generic extractor.
+
+---
+
 ## [2.4.0] - 2026-04-10
 
 ### Added — Co-change dispersion / shotgun surgery detection
