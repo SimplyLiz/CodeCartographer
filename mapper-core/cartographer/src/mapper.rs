@@ -63,6 +63,15 @@ pub struct Signature {
     /// 0-indexed line number of this signature.
     #[serde(default)]
     pub line_start: usize,
+    /// Column byte offset (UTF-8) of this signature on its start line. 0-indexed.
+    #[serde(default)]
+    pub col_start: usize,
+    /// 0-indexed end line (inclusive).
+    #[serde(default)]
+    pub line_end: usize,
+    /// Column byte offset (UTF-8) of the end of this signature. 0-indexed, exclusive.
+    #[serde(default)]
+    pub col_end: usize,
     /// Confidence score (1–100). 30 = Tier 1 regex heuristic.
     #[serde(default = "default_confidence")]
     pub confidence: u8,
@@ -89,6 +98,9 @@ impl Signature {
             qualified_name: Some(qualified_name),
             kind,
             line_start,
+            col_start: 0,
+            line_end: 0,
+            col_end: 0,
             confidence: 30,
             doc_comment,
         }

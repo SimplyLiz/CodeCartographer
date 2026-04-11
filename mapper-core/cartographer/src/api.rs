@@ -120,11 +120,21 @@ pub struct GraphNode {
     pub cochange_entropy: Option<f64>,
 }
 
+/// A source position range using LIP semantics: line is 0-based, char is UTF-8 byte offset from line start.
+#[derive(Debug, Clone, Serialize)]
+pub struct Range {
+    pub start_line: usize,
+    pub start_char: usize,
+    pub end_line:   usize,
+    pub end_char:   usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
     pub edge_type: String,
+    pub at_range: Option<Range>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +466,7 @@ impl ApiState {
                         source: module_id.clone(),
                         target,
                         edge_type: "import".to_string(),
+                        at_range: None,
                     });
                 }
             }
