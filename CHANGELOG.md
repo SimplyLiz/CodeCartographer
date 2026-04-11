@@ -2,6 +2,45 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [2.5.0] - 2026-04-11
+
+### Added — `search_in_symbol`, `list_key_handlers`, `map_state_machine` MCP tools
+
+Three new diagnostic tools for navigating large source files, motivated by TUI codebases
+where a single file can exceed 6000 lines with complex state-machine dispatch.
+
+**`src/mcp.rs`** — `search_in_symbol`:
+- Scopes a content search to the body of a named function or method
+- Locates the symbol in the skeleton index to get its `line_start`; estimates `line_end`
+  from the next symbol's `line_start` (fallback +500 lines)
+- Filters `search_content` results to that estimated range — eliminates false positives
+  when the same pattern appears in multiple functions across a large file
+- Parameters: `file`, `symbol`, `pattern` (required); `context_lines` (optional, default 2)
+
+**`src/mcp.rs`** — `list_key_handlers`:
+- Extracts a structured key-binding map from a TUI source file
+- Searches for `case "` and `== "` patterns (covers Go/Bubble Tea, Rust/crossterm, and
+  any framework using quoted key strings)
+- Groups results by key string using a BTreeMap (sorted output); each entry includes
+  line number, matched text, and surrounding context
+- Parameters: `file` (required); `context_lines` (optional, default 4)
+
+**`src/mcp.rs`** — `map_state_machine`:
+- Produces a state × handlers matrix: which keys are handled in which state
+- Step 1: finds all state enum variants containing `state_prefix` in the file
+- Step 2: finds all state guard locations (`state_var == `) and parses which state each checks
+- Step 3: collects all key handler matches; attributes handlers within 60 lines of each guard
+  to that state
+- Useful for Bubble Tea chatviews, Redux reducers, finite automata, and any switch-on-state code
+- Parameters: `file` (required); `state_var` (default `m.state`), `state_prefix` (default `State`),
+  `context_lines` (optional, default 3)
+
+**`src/mcp.rs`** — shared helper:
+- `extract_quoted_key(line) -> Option<String>`: extracts first double-quoted token ≤ 30 chars
+  from a line; used by both `list_key_handlers` and `map_state_machine`
+
+---
+
 ## [2.4.2] - 2026-04-11
 
 ### Added — `watch_graph` MCP tool + NYX.md preset awareness

@@ -680,6 +680,75 @@ impl McpServer {
                 },
             },
             // -----------------------------------------------------------------
+            // Symbol-scoped search
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "search_in_symbol".to_string(),
+                description: "Search for a pattern scoped to the body of a named function or \
+                              method. Returns only matches within that symbol's approximate line \
+                              range, filtering out occurrences elsewhere in the file. Useful for \
+                              \"find X only inside handleKeyMsg()\" without wading through \
+                              whole-file grep results."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("file".to_string(),    mcprop!("string", "Relative path or filename fragment (e.g. chatview.go)"));
+                    props.insert("symbol".to_string(),  mcprop!("string", "Function or method name to scope the search to"));
+                    props.insert("pattern".to_string(), mcprop!("string", "Regex or literal search pattern"));
+                    props.insert("context_lines".to_string(), mcprop!("number", "Lines of context around each match (default 2)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["file".to_string(), "symbol".to_string(), "pattern".to_string()],
+                    }
+                },
+            },
+            // -----------------------------------------------------------------
+            // TUI key-binding map
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "list_key_handlers".to_string(),
+                description: "Extract a structured key-binding map from a TUI source file. \
+                              Groups all `case \"key\":` and `== \"key\"` patterns by key string \
+                              with surrounding context. Works for Go/Bubble Tea, Rust/crossterm, \
+                              and any framework using quoted key strings."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("file".to_string(), mcprop!("string", "Relative path or filename fragment"));
+                    props.insert("context_lines".to_string(), mcprop!("number", "Lines of context around each binding (default 4)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["file".to_string()],
+                    }
+                },
+            },
+            // -----------------------------------------------------------------
+            // State-machine mapper
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "map_state_machine".to_string(),
+                description: "Correlate state guards with nearby key handlers to produce a \
+                              state × handlers matrix. Given a state variable name and enum \
+                              prefix, returns which keys are handled in each state with guard \
+                              line numbers. Ideal for large TUI files with switch-on-state \
+                              dispatch (e.g. Bubble Tea chatview)."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("file".to_string(),         mcprop!("string", "Relative path or filename fragment"));
+                    props.insert("state_var".to_string(),    mcprop!("string", "State variable expression to look for in guards (default: m.state)"));
+                    props.insert("state_prefix".to_string(), mcprop!("string", "Enum variant prefix used to identify state constants (default: State)"));
+                    props.insert("context_lines".to_string(), mcprop!("number", "Context lines around each guard (default 3)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["file".to_string()],
+                    }
+                },
+            },
+            // -----------------------------------------------------------------
             // Incremental graph push events
             // -----------------------------------------------------------------
             McpTool {
@@ -1825,6 +1894,261 @@ impl McpServer {
                 })
             }
 
+            // -----------------------------------------------------------------
+            // search_in_symbol — scope a search to one function's body
+            // -----------------------------------------------------------------
+            "search_in_symbol" => {
+                let args = &call.arguments;
+                let file    = args.get("file").and_then(|v| v.as_str()).ok_or("Missing file")?;
+                let symbol  = args.get("symbol").and_then(|v| v.as_str()).ok_or("Missing symbol")?;
+                let pattern = args.get("pattern").and_then(|v| v.as_str()).ok_or("Missing pattern")?;
+                let ctx     = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+
+                // 1. Locate the file in the skeleton index
+                let files = self.api_state.mapped_files.lock().map(|g| g.clone()).unwrap_or_default();
+                let mf = files.values()
+                    .find(|f| f.path == file || f.path.contains(file))
+                    .ok_or_else(|| format!("File not found: {}", file))?;
+
+                // 2. Find the symbol (symbol_name, qualified_name, or raw text)
+                let sig = mf.signatures.iter()
+                    .find(|s| {
+                        s.symbol_name.as_deref() == Some(symbol)
+                            || s.qualified_name.as_deref() == Some(symbol)
+                            || s.raw.contains(symbol)
+                    })
+                    .ok_or_else(|| format!("Symbol '{}' not found in {}", symbol, file))?;
+
+                let sym_start = sig.line_start; // 0-indexed
+
+                // 3. Estimate end: next symbol's line_start, fallback +500
+                let sym_end = mf.signatures.iter()
+                    .filter(|s| s.line_start > sym_start)
+                    .map(|s| s.line_start)
+                    .min()
+                    .unwrap_or(sym_start + 500);
+
+                // 4. Content search scoped to this file by glob
+                let fname = std::path::Path::new(&mf.path)
+                    .file_name().and_then(|n| n.to_str()).unwrap_or(file);
+                let opts = crate::search::SearchOptions {
+                    case_sensitive: true,
+                    context_lines: ctx,
+                    max_results: 500,
+                    file_glob: Some(format!("**/{}", fname)),
+                    ..Default::default()
+                };
+                let sr = crate::search::search_content(&self.api_state.root_path, pattern, &opts)
+                    .map_err(|e| e)?;
+
+                // 5. Filter to the symbol's estimated line range (convert 0-indexed → 1-indexed)
+                let in_range: Vec<_> = sr.matches.into_iter()
+                    .filter(|m| m.line_number > sym_start && m.line_number <= sym_end + 1)
+                    .collect();
+                let match_count = in_range.len();
+
+                let result = serde_json::json!({
+                    "file": mf.path,
+                    "symbol": symbol,
+                    "symbol_kind": format!("{:?}", sig.kind),
+                    "symbol_line": sym_start + 1,
+                    "estimated_end_line": sym_end + 1,
+                    "pattern": pattern,
+                    "match_count": match_count,
+                    "matches": in_range,
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // list_key_handlers — TUI key-binding map
+            // -----------------------------------------------------------------
+            "list_key_handlers" => {
+                let args = &call.arguments;
+                let file = args.get("file").and_then(|v| v.as_str()).ok_or("Missing file")?;
+                let ctx  = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
+
+                let files = self.api_state.mapped_files.lock().map(|g| g.clone()).unwrap_or_default();
+                let mf = files.values()
+                    .find(|f| f.path == file || f.path.contains(file))
+                    .ok_or_else(|| format!("File not found: {}", file))?;
+                let fname = std::path::Path::new(&mf.path)
+                    .file_name().and_then(|n| n.to_str()).unwrap_or(file);
+                let glob = format!("**/{}", fname);
+
+                // Search for both dominant key-handler syntaxes
+                let mut all_matches = Vec::new();
+                for pattern in &[r#"case ""#, r#"== ""#] {
+                    let opts = crate::search::SearchOptions {
+                        case_sensitive: true,
+                        context_lines: ctx,
+                        max_results: 300,
+                        file_glob: Some(glob.clone()),
+                        ..Default::default()
+                    };
+                    if let Ok(sr) = crate::search::search_content(&self.api_state.root_path, pattern, &opts) {
+                        all_matches.extend(sr.matches);
+                    }
+                }
+
+                // Group by extracted key string (BTreeMap keeps keys sorted)
+                let mut key_map: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+                    std::collections::BTreeMap::new();
+                for m in &all_matches {
+                    if let Some(key) = extract_quoted_key(&m.line) {
+                        key_map.entry(key).or_default().push(serde_json::json!({
+                            "line":           m.line_number,
+                            "text":           m.line.trim(),
+                            "before_context": m.before_context,
+                            "after_context":  m.after_context,
+                        }));
+                    }
+                }
+
+                let handlers: Vec<_> = key_map.iter().map(|(k, v)| serde_json::json!({
+                    "key":         k,
+                    "occurrences": v,
+                })).collect();
+
+                let result = serde_json::json!({
+                    "file":          mf.path,
+                    "handler_count": handlers.len(),
+                    "handlers":      handlers,
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // map_state_machine — state × key-handlers matrix
+            // -----------------------------------------------------------------
+            "map_state_machine" => {
+                let args = &call.arguments;
+                let file         = args.get("file").and_then(|v| v.as_str()).ok_or("Missing file")?;
+                let state_var    = args.get("state_var").and_then(|v| v.as_str()).unwrap_or("m.state").to_string();
+                let state_prefix = args.get("state_prefix").and_then(|v| v.as_str()).unwrap_or("State").to_string();
+
+                let files = self.api_state.mapped_files.lock().map(|g| g.clone()).unwrap_or_default();
+                let mf = files.values()
+                    .find(|f| f.path == file || f.path.contains(file))
+                    .ok_or_else(|| format!("File not found: {}", file))?;
+                let fname = std::path::Path::new(&mf.path)
+                    .file_name().and_then(|n| n.to_str()).unwrap_or(file);
+                let glob = format!("**/{}", fname);
+
+                // Helper: build SearchOptions for this file
+                let make_opts = |max: usize| crate::search::SearchOptions {
+                    case_sensitive: true,
+                    max_results: max,
+                    file_glob: Some(glob.clone()),
+                    ..Default::default()
+                };
+
+                // 1. Find all state enum variants by searching for the prefix
+                let mut known_states: Vec<String> = Vec::new();
+                if let Ok(sr) = crate::search::search_content(
+                    &self.api_state.root_path, &state_prefix, &make_opts(300))
+                {
+                    for m in &sr.matches {
+                        let mut pos = 0usize;
+                        while pos < m.line.len() {
+                            if let Some(idx) = m.line[pos..].find(&state_prefix as &str) {
+                                let abs = pos + idx;
+                                let rest = &m.line[abs..];
+                                let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')
+                                    .unwrap_or(rest.len());
+                                let name = &rest[..end];
+                                if name.len() > state_prefix.len() {
+                                    let name = name.to_string();
+                                    if !known_states.contains(&name) {
+                                        known_states.push(name);
+                                    }
+                                }
+                                pos = abs + 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 2. Find all state guard locations: `state_var == `
+                let guard_pattern = format!("{} == ", state_var);
+                let mut guard_map: HashMap<String, Vec<usize>> = HashMap::new();
+                if let Ok(sr) = crate::search::search_content(
+                    &self.api_state.root_path, &guard_pattern, &make_opts(500))
+                {
+                    for m in &sr.matches {
+                        for state in &known_states {
+                            if m.line.contains(state.as_str()) {
+                                guard_map.entry(state.clone()).or_default().push(m.line_number);
+                            }
+                        }
+                    }
+                }
+
+                // 3. Collect all key handler matches
+                let mut all_key_matches = Vec::new();
+                for pattern in &[r#"case ""#, r#"== ""#] {
+                    if let Ok(sr) = crate::search::search_content(
+                        &self.api_state.root_path, pattern, &make_opts(500))
+                    {
+                        all_key_matches.extend(sr.matches);
+                    }
+                }
+
+                // 4. For each state, attribute key handlers within WINDOW lines of a guard
+                const WINDOW: usize = 60;
+                let mut state_handlers: serde_json::Map<String, serde_json::Value> =
+                    serde_json::Map::new();
+
+                for state in &known_states {
+                    let guard_lines = guard_map.get(state).cloned().unwrap_or_default();
+                    let mut keys: Vec<String> = Vec::new();
+                    let mut handler_details: Vec<serde_json::Value> = Vec::new();
+
+                    for &guard_ln in &guard_lines {
+                        for km in &all_key_matches {
+                            if km.line_number > guard_ln && km.line_number < guard_ln + WINDOW {
+                                if let Some(key) = extract_quoted_key(&km.line) {
+                                    if !keys.contains(&key) {
+                                        keys.push(key.clone());
+                                        handler_details.push(serde_json::json!({
+                                            "key":  key,
+                                            "line": km.line_number,
+                                            "text": km.line.trim(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    state_handlers.insert(state.clone(), serde_json::json!({
+                        "guard_lines": guard_lines,
+                        "keys":        keys,
+                        "handlers":    handler_details,
+                    }));
+                }
+
+                let result = serde_json::json!({
+                    "file":           mf.path,
+                    "state_var":      state_var,
+                    "state_prefix":   state_prefix,
+                    "states":         known_states,
+                    "state_handlers": state_handlers,
+                });
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
             _ => Err(format!("Unknown tool: {}", call.name)),
         }
     }
@@ -2081,6 +2405,21 @@ impl McpServer {
                 &format!("Method not found: {}", method),
             ),
         }
+    }
+}
+
+/// Extract the first double-quoted token from a line of code.
+/// e.g. `case "ctrl+c":` → Some("ctrl+c"), `key == "up"` → Some("up").
+/// Returns None if no quoted token ≤ 30 chars is found.
+fn extract_quoted_key(line: &str) -> Option<String> {
+    let start = line.find('"')? + 1;
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    let key = &rest[..end];
+    if !key.is_empty() && key.len() <= 30 {
+        Some(key.to_string())
+    } else {
+        None
     }
 }
 
