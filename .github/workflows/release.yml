@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: cartographer-aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: cartographer-x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: cartographer-x86_64-unknown-linux-gnu
+
+    defaults:
+      run:
+        working-directory: mapper-core/cartographer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mapper-core/cartographer/target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('mapper-core/cartographer/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y build-essential
+
+      - name: Build static library
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Regenerate header
+        run: cargo install cbindgen --locked 2>/dev/null || true && cbindgen --config cbindgen.toml --output include/cartographer.h
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ARTIFACT="${{ matrix.artifact }}"
+          STAGING="staging/${ARTIFACT}"
+          mkdir -p "${STAGING}/lib" "${STAGING}/include"
+          cp "target/${{ matrix.target }}/release/libcartographer.a" "${STAGING}/lib/"
+          cp "include/cartographer.h" "${STAGING}/include/"
+          tar -czf "${ARTIFACT}.tar.gz" -C staging "${ARTIFACT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: mapper-core/cartographer/${{ matrix.artifact }}.tar.gz
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract changelog entry
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Pull the block for this version out of CHANGELOG.md
+          NOTES=$(awk "/^## \[?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${GITHUB_REF_NAME}"
+          fi
+          # Write to file to avoid quoting issues
+          echo "$NOTES" > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Cartographer ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: artifacts/*.tar.gz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
