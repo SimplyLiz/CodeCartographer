@@ -906,6 +906,13 @@ fn parse_import_parts(import: &str) -> (String, Option<String>) {
     // Fallback: last token
     let last = raw.split_whitespace().last().unwrap_or(raw);
     let last = last.trim_matches('"').trim_matches('\'').trim_end_matches(';');
+    // Bare PascalCase identifier (e.g. from doc backtick refs) → set as symbol hint
+    // so resolve_import_target can match it against symbol definitions.
+    if !last.contains('/') && !last.contains('.') && last.len() >= 4
+        && last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    {
+        return (last.to_string(), Some(last.to_string()));
+    }
     (last.to_string(), None)
 }
 
@@ -1443,7 +1450,6 @@ impl ApiState {
 
     pub fn get_evolution(&self, days: Option<u32>) -> Result<ArchitectureEvolution, String> {
         let current_graph = self.rebuild_graph()?;
-
         let current_health = current_graph.metadata.health_score.unwrap_or(100.0);
 
         let days = days.unwrap_or(30);
@@ -1452,7 +1458,7 @@ impl ApiState {
             .unwrap_or_default()
             .as_secs();
 
-        let mut snapshots = vec![ArchitectureSnapshot {
+        let current_snapshot = ArchitectureSnapshot {
             timestamp: now,
             health_score: current_health,
             total_files: current_graph.metadata.total_files,
@@ -1467,16 +1473,49 @@ impl ApiState {
                 .iter()
                 .max_by_key(|(_, v)| *v)
                 .map(|(k, _)| k.clone()),
-        }];
+        };
 
-        // Trend requires multiple snapshots; this reflects current state only.
-        // Historical tracking is not yet implemented, so `days` has no effect.
-        let health_trend = if current_health >= 80.0 {
-            "Healthy".to_string()
-        } else if current_health >= 60.0 {
-            "Moderate".to_string()
+        // ── Persist snapshot to history file ──────────────────────────────────
+        let history_path = self.root_path.join(".cartographer_history.json");
+        let mut all_snapshots: Vec<ArchitectureSnapshot> =
+            std::fs::read_to_string(&history_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+        all_snapshots.push(current_snapshot);
+        // Cap history to last 365 snapshots to prevent unbounded growth
+        if all_snapshots.len() > 365 {
+            let drain_count = all_snapshots.len() - 365;
+            all_snapshots.drain(0..drain_count);
+        }
+        if let Ok(json) = serde_json::to_string(&all_snapshots) {
+            let _ = std::fs::write(&history_path, json);
+        }
+
+        // ── Filter to requested window ────────────────────────────────────────
+        let since_epoch = now.saturating_sub(days as u64 * 86_400);
+        let snapshots: Vec<ArchitectureSnapshot> = all_snapshots
+            .into_iter()
+            .filter(|s| s.timestamp >= since_epoch)
+            .collect();
+
+        // ── Compute trend from first vs last snapshot ─────────────────────────
+        let health_trend = if snapshots.len() >= 2 {
+            let first = snapshots.first().unwrap().health_score;
+            let last = snapshots.last().unwrap().health_score;
+            let delta = last - first;
+            if delta > 5.0 {
+                "Improving".to_string()
+            } else if delta < -5.0 {
+                "Degrading".to_string()
+            } else {
+                "Stable".to_string()
+            }
         } else {
-            "At Risk".to_string()
+            // Single snapshot — classify by absolute score
+            if current_health >= 80.0 { "Healthy".to_string() }
+            else if current_health >= 60.0 { "Moderate".to_string() }
+            else { "At Risk".to_string() }
         };
 
         let mut debt_indicators = Vec::new();
@@ -1504,12 +1543,10 @@ impl ApiState {
             recommendations.push("Priority: Break circular dependencies".to_string());
         }
         if current_graph.metadata.god_module_count.unwrap_or(0) > 2 {
-            recommendations
-                .push("Consider splitting large modules to improve cohesion".to_string());
+            recommendations.push("Consider splitting large modules to improve cohesion".to_string());
         }
         if recommendations.is_empty() {
-            recommendations
-                .push("Architecture is healthy - maintain current practices".to_string());
+            recommendations.push("Architecture is healthy - maintain current practices".to_string());
         }
 
         Ok(ArchitectureEvolution {
