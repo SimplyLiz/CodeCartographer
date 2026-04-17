@@ -3157,32 +3157,76 @@ fn semidiff_mode(root: &Path, commit1: &str, commit2: &str) -> Result<()> {
 }
 
 // =============================================================================
+// SHARED HELPER: parallel file scan + persistent cache
+// =============================================================================
+
+/// Scan and extract skeleton for every project file, with a parallel rayon scan
+/// and a git-HEAD-keyed persistent cache (.cartographer_cache.json).
+fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, MappedFile>> {
+    use rayon::prelude::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct MapCache {
+        head: String,
+        files: HashMap<String, MappedFile>,
+    }
+
+    // Compute git HEAD (empty string if not a git repo)
+    let head: String = std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
+        .unwrap_or_default();
+
+    let cache_path = root.join(".cartographer_cache.json");
+
+    // Try cache hit
+    if !head.is_empty() {
+        if let Ok(raw) = std::fs::read_to_string(&cache_path) {
+            if let Ok(cached) = serde_json::from_str::<MapCache>(&raw) {
+                if cached.head == head {
+                    return Ok(cached.files);
+                }
+            }
+        }
+    }
+
+    // Parallel scan
+    let scan = scan_files_with_noise_tracking(root).context("file scan failed")?;
+    let result: HashMap<String, MappedFile> = scan.files
+        .par_iter()
+        .filter(|p| !is_ignored_path(p))
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            let mapped = extract_skeleton(p, &content);
+            let rel = p.strip_prefix(root).unwrap_or(p)
+                .to_string_lossy().replace('\\', "/");
+            Some((rel, mapped))
+        })
+        .collect();
+
+    // Write cache
+    if !head.is_empty() {
+        if let Ok(json) = serde_json::to_string(&MapCache { head, files: result.clone() }) {
+            let _ = std::fs::write(&cache_path, json);
+        }
+    }
+
+    Ok(result)
+}
+
+// =============================================================================
 // MCP SERVE MODE - Start MCP server with stdio JSON-RPC transport
 // =============================================================================
 
 fn mcp_serve_mode(root: &Path) -> Result<()> {
     use crate::api::ApiState;
-    use crate::mapper::extract_skeleton;
     use crate::mcp::McpServer;
-    use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
     use std::sync::Arc;
 
-    let result = scan_files_with_noise_tracking(root)?;
-    let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
-        .files
-        .iter()
-        .filter(|p| !is_ignored_path(p))
-        .filter_map(|p| {
-            let content = std::fs::read_to_string(p).ok()?;
-            let mapped = extract_skeleton(p, &content);
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .replace('\\', "/");
-            Some((rel, mapped))
-        })
-        .collect();
+    let mapped_files = build_mapped_files_cached(root)?;
 
     let state = Arc::new(ApiState::new(root.to_path_buf()));
     {

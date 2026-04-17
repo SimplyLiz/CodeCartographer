@@ -979,6 +979,67 @@ fn is_test_path(path: &str) -> bool {
         || lower.ends_with("_test.go")
 }
 
+// ---------------------------------------------------------------------------
+// Document helpers
+// ---------------------------------------------------------------------------
+
+/// File extensions treated as "documents" (non-code) for doc-oriented tools.
+pub const DOC_EXTENSIONS: &[&str] = &["md", "markdown", "yaml", "yml", "toml", "json"];
+
+pub fn is_doc_path(path: &str) -> bool {
+    path.rsplit('.')
+        .next()
+        .map(|ext| DOC_EXTENSIONS.contains(&ext))
+        .unwrap_or(false)
+}
+
+/// Summary of a document node in the project graph.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocNode {
+    pub path: String,
+    pub module_id: String,
+    pub signatures: Vec<String>,
+    pub imports: Vec<String>,
+    pub edge_count: usize,
+}
+
+impl ApiState {
+    /// Return all document-type nodes from the project graph.
+    pub fn doc_nodes(&self) -> Result<Vec<DocNode>, String> {
+        let graph = self.rebuild_graph()?;
+        let files = self.mapped_files.lock().map_err(|e| e.to_string())?;
+
+        let mut docs = Vec::new();
+        for node in &graph.nodes {
+            if !is_doc_path(&node.path) {
+                continue;
+            }
+            let edge_count = graph.edges.iter()
+                .filter(|e| e.source == node.module_id || e.target == node.module_id)
+                .count();
+
+            let (sigs, imports) = files.get(&node.module_id)
+                .map(|mf| (
+                    mf.signatures.iter().map(|s| s.raw.clone()).collect(),
+                    mf.imports.clone(),
+                ))
+                .unwrap_or_default();
+
+            docs.push(DocNode {
+                path: node.path.clone(),
+                module_id: node.module_id.clone(),
+                signatures: sigs,
+                imports,
+                edge_count,
+            });
+        }
+
+        // Sort: most connected docs first
+        docs.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+        Ok(docs)
+    }
+}
+
 struct BridgeAnalysis {
     is_bridge: bool,
     bridge_score: f64,
