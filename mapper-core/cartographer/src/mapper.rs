@@ -2136,6 +2136,10 @@ fn extract_markdown(path: String, content: &str) -> MappedFile {
     let heading_re = Regex::new(r"^(#{1,6})\s+(.+)").unwrap();
     let link_re = Regex::new(r"\[.*?\]\(([^)]+)\)").unwrap();
     let backtick_sym_re = Regex::new(r"`([A-Z]\w{3,})`").unwrap();
+    // Captures backtick file refs like `scanner.rs`, `search.md`, `config.yaml`
+    let backtick_file_re = Regex::new(
+        r"`([\w_-]+\.(?:rs|go|py|ts|tsx|js|jsx|mjs|cjs|java|kt|rb|php|cs|swift|lua|sh|sql|c|h|cpp|cc|cxx|hpp|md|yaml|yml|toml|json))`"
+    ).unwrap();
     let bare_path_re = Regex::new(r"(?:^|\s)((?:\./|src/|lib/|pkg/|cmd/|internal/)[\w/.@-]+)").unwrap();
     let frontmatter_key_re = Regex::new(r"^([\w_-]+)\s*:").unwrap();
 
@@ -2199,6 +2203,14 @@ fn extract_markdown(path: String, content: &str) -> MappedFile {
             let sym = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             if seen_imports.insert(sym.to_string()) {
                 imports.push(sym.to_string());
+            }
+        }
+
+        // Backtick file refs: `scanner.rs`, `search.md`, `config.yaml`
+        for caps in backtick_file_re.captures_iter(trimmed) {
+            let file_ref = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if seen_imports.insert(file_ref.to_string()) {
+                imports.push(file_ref.to_string());
             }
         }
 
@@ -2797,6 +2809,16 @@ mod doc_tests {
         let content = "# Guide\n\nEdit src/mapper.rs to change extraction.";
         let mf = extract_skeleton(Path::new("CONTRIBUTING.md"), content);
         assert!(mf.imports.iter().any(|i| i == "src/mapper.rs"), "should detect bare file paths");
+    }
+
+    #[test]
+    fn markdown_backtick_file_refs() {
+        let content = "| `scanner.rs` | File discovery |\n| `mapper.rs` | Extraction |\n| `api.rs` | Graph |\n\nSee `config.yaml` too.";
+        let mf = extract_skeleton(Path::new("docs/architecture.md"), content);
+        assert!(mf.imports.iter().any(|i| i == "scanner.rs"), "should import scanner.rs");
+        assert!(mf.imports.iter().any(|i| i == "mapper.rs"), "should import mapper.rs");
+        assert!(mf.imports.iter().any(|i| i == "api.rs"), "should import api.rs");
+        assert!(mf.imports.iter().any(|i| i == "config.yaml"), "should import config.yaml");
     }
 
     // ── YAML ─────────────────────────────────────────────────────────────

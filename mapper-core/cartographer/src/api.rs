@@ -933,15 +933,18 @@ fn extract_js_import_symbol(lhs: &str) -> Option<String> {
 
 /// Return the last meaningful path component to use as a file-stem candidate.
 fn derive_module_stem(module_path: &str) -> String {
-    module_path
+    let last = module_path
         .split('/')
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .last()
         .unwrap_or(module_path)
-        .trim_start_matches('@')   // strip npm scope prefix
-        .split('-')                // treat kebab-case first word as stem
-        .next()
-        .unwrap_or("")
+        .trim_start_matches('@');  // strip npm scope prefix
+    let kebab_first = last.split('-').next().unwrap_or(last); // treat kebab-case first word as stem
+    // Strip file extension so doc-style imports ("scanner.rs", "api/search.md") resolve correctly
+    Path::new(kebab_first)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(kebab_first)
         .to_string()
 }
 
@@ -1222,6 +1225,15 @@ impl ApiState {
                 || file_stem == norm_path
             {
                 return Some(module_id.clone());
+            }
+
+            // 1b. Path-suffix match for relative doc links ("api/search.md" → "docs/api/search.md").
+            // Checked before the loose segment match to return an unambiguous result.
+            if norm_path.contains('/') || norm_path.contains('.') {
+                let suffix = format!("/{}", norm_path.trim_start_matches('/'));
+                if file.path.ends_with(&suffix) {
+                    return Some(module_id.clone());
+                }
             }
 
             // 2. Path segment: file path contains the module stem as a component
@@ -1643,5 +1655,16 @@ mod tests {
     fn test_compression_level_default() {
         let level = CompressionLevel::default();
         assert_eq!(level, CompressionLevel::Standard);
+    }
+
+    #[test]
+    fn derive_module_stem_strips_extension() {
+        assert_eq!(derive_module_stem("scanner.rs"), "scanner");
+        assert_eq!(derive_module_stem("api/search.md"), "search");
+        assert_eq!(derive_module_stem("config.yaml"), "config");
+        // Normal code imports (no extension) unchanged
+        assert_eq!(derive_module_stem("scanner"), "scanner");
+        assert_eq!(derive_module_stem("react-dom"), "react");
+        assert_eq!(derive_module_stem("src/api/handler"), "handler");
     }
 }
