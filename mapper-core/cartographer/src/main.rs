@@ -1,4 +1,5 @@
 mod api;
+mod diagram;
 mod extractor;
 mod formatter;
 mod token_metrics;
@@ -2667,7 +2668,6 @@ fn diagram_mode(root: &Path, format: &str, output: Option<&Path>, max_nodes: usi
     use crate::api::ApiState;
     use crate::mapper::extract_skeleton;
     use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
-    use std::collections::HashMap;
 
     let result = scan_files_with_noise_tracking(root)?;
     let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
@@ -2694,115 +2694,26 @@ fn diagram_mode(root: &Path, format: &str, output: Option<&Path>, max_nodes: usi
 
     let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Compute degree per node from edges
-    let mut degree: HashMap<&str, usize> = HashMap::new();
-    for edge in &graph.edges {
-        *degree.entry(edge.source.as_str()).or_insert(0) += 1;
-        *degree.entry(edge.target.as_str()).or_insert(0) += 1;
-    }
-
-    // Pick top max_nodes by degree; exclude zero-edge nodes
-    let mut ranked: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter(|n| degree.get(n.module_id.as_str()).copied().unwrap_or(0) > 0)
-        .collect();
-    ranked.sort_by(|a, b| {
-        let da = degree.get(a.module_id.as_str()).copied().unwrap_or(0);
-        let db = degree.get(b.module_id.as_str()).copied().unwrap_or(0);
-        db.cmp(&da)
-    });
-    ranked.truncate(max_nodes);
-
-    let included: std::collections::HashSet<&str> =
-        ranked.iter().map(|n| n.module_id.as_str()).collect();
-
-    let content = match format.to_lowercase().as_str() {
-        "dot" => {
-            let mut out = String::from("digraph cartographer {\n    rankdir=LR;\n");
-            for node in &ranked {
-                let label = node
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&node.path);
-                let color = match node.role.as_deref() {
-                    Some("core") => "#9cf",
-                    Some("bridge") => "#f96",
-                    Some("dead") => "#ccc",
-                    Some("entry") => "#9f9",
-                    _ => "#fff",
-                };
-                out.push_str(&format!(
-                    "    \"{}\" [label=\"{}\\n{} fn\" shape=box style=filled fillcolor=\"{}\"];\n",
-                    node.module_id, label, node.signature_count, color
-                ));
-            }
-            for edge in &graph.edges {
-                if included.contains(edge.source.as_str()) && included.contains(edge.target.as_str()) {
-                    out.push_str(&format!(
-                        "    \"{}\" -> \"{}\";\n",
-                        edge.source, edge.target
-                    ));
-                }
-            }
-            out.push('}');
-            out
-        }
-        _ => {
-            // mermaid (default)
-            let mut out = String::from("graph TD\n");
-            out.push_str("    classDef bridge fill:#f96,stroke:#333\n");
-            out.push_str("    classDef core fill:#9cf,stroke:#333\n");
-            out.push_str("    classDef dead fill:#ccc,stroke:#333\n");
-            out.push_str("    classDef entry fill:#9f9,stroke:#333\n");
-
-            // Build stable numeric IDs
-            let id_map: HashMap<&str, usize> = ranked
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.module_id.as_str(), i))
-                .collect();
-
-            for node in &ranked {
-                let i = id_map[node.module_id.as_str()];
-                let label = node
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&node.path);
-                let class_suffix = match node.role.as_deref() {
-                    Some("core") => ":::core",
-                    Some("bridge") => ":::bridge",
-                    Some("dead") => ":::dead",
-                    Some("entry") => ":::entry",
-                    _ => "",
-                };
-                out.push_str(&format!(
-                    "    N{}[\"{}\\n{} fn\"]{}\n",
-                    i, label, node.signature_count, class_suffix
-                ));
-            }
-
-            for edge in &graph.edges {
-                if included.contains(edge.source.as_str()) && included.contains(edge.target.as_str()) {
-                    if let (Some(&si), Some(&ti)) = (
-                        id_map.get(edge.source.as_str()),
-                        id_map.get(edge.target.as_str()),
-                    ) {
-                        out.push_str(&format!("    N{} --> N{}\n", si, ti));
-                    }
-                }
-            }
-            out
-        }
+    let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+    let opts = diagram::RenderOptions {
+        format: fmt,
+        focus: None,
+        depth: 2,
+        max_nodes,
     };
+    let rendered = diagram::render(&graph, &opts).map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(out_path) = output {
-        fs::write(out_path, &content)?;
+        fs::write(out_path, &rendered.diagram)?;
         println!("Diagram written to: {}", out_path.display());
+        if rendered.truncated {
+            println!("(truncated to {} nodes — raise --max-nodes for more)", max_nodes);
+        }
     } else {
-        println!("{}", content);
+        println!("{}", rendered.diagram);
+        if rendered.truncated {
+            eprintln!("(truncated to {} nodes — raise --max-nodes for more)", max_nodes);
+        }
     }
 
     Ok(())

@@ -2,6 +2,54 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [Unreleased]
+
+### Added — `renderArchitecture` MCP tool + `cartographer_render_architecture` FFI
+
+The CLI's `diagram` command has been factored into a shared renderer and
+exposed via FFI so MCP clients can return Mermaid/DOT directly. IDEs that
+render Mermaid inline (Cursor, Claude Desktop, VS Code markdown preview,
+GitHub) now get paste-able diagrams without any extra UI.
+
+**`src/diagram.rs`** (new) — shared renderer, pure over `ProjectGraphResponse`:
+- `render(graph, RenderOptions) -> RenderedDiagram { diagram, truncated, node_count }`
+- No focus → top-N nodes by degree, isolated nodes skipped ("shape of the codebase")
+- With focus → undirected BFS over import edges to `depth` ("shape of the neighborhood I'm editing"); undirected because the area being edited usually includes both what it imports and what imports it
+- `focus` accepts module_id, exact path, or path suffix (e.g. `"server.rs"` matches `"src/server.rs"`)
+- `truncated: true` in the response signals the node cap kicked in so the caller/model can tighten focus or lower depth
+- 12 unit tests cover top-N, BFS direction, path-suffix match, cycle safety, truncation, format parsing, and output structure
+
+**`src/lib.rs`** — `cartographer_render_architecture(path, format, focus, depth, max_nodes)`:
+- Defaults: `format` null → `"mermaid"`, `depth` 0 → 2, `max_nodes` 0 → 40
+- Returns JSON `{ diagram, truncated, format, nodeCount }`
+- cbindgen regenerates `include/cartographer.h` automatically
+
+**`src/main.rs`** — CLI `diagram_mode` now delegates to `diagram::render()`, so CLI and FFI outputs stay identical.
+
+### Added — tree-sitter symbol localization for `libcartographer.a`
+
+`libcartographer.a` now ships with its tree-sitter runtime and grammar
+symbols hidden from the global symbol resolver, so consumers that also
+link tree-sitter (e.g. Go projects using `go-tree-sitter`) no longer
+trip duplicate-symbol errors at link time. This matters beyond the
+ergonomic complaint: if both copies were left global, the linker would
+bind Cartographer's Rust code to whichever archive came first on the
+command line — and if the two tree-sitter versions drifted in struct
+layout, the loser's callers would walk the wrong struct and produce
+silent memory corruption.
+
+**`scripts/localize-tree-sitter-symbols.sh`** (new):
+- Partial-links all `.o` members of `libcartographer.a` into one combined relocatable object via `cc -nostdlib -Wl,-r`, so Cartographer's internal `ts_*`/`tree_sitter_*` references resolve within the archive
+- `rust-objcopy --wildcard --localize-symbol='ts_*' --localize-symbol='tree_sitter_*'` then marks those symbols local on the combined object; `cartographer_*` FFI entry points stay global
+- Resolves `rust-objcopy` via `rustc --print target-libdir`; falls back to `llvm-objcopy`/`objcopy` if `llvm-tools-preview` isn't installed
+- `scripts/tests/test-localize-symbols.sh` — synthetic fixture smoke test
+- **Background:** tree-sitter's own build.rs already passes `-fvisibility=hidden`, but `tree_sitter/api.h` wraps the API in `#pragma GCC visibility push(default)`, which wins over the command-line flag whenever a C source includes the header. Compile-time visibility is therefore insufficient; the archive must be post-processed.
+- **Bonus:** partial-link dead-strips unused sections, shrinking the arm64 release archive from ~57 MB → ~19 MB.
+
+**`.github/workflows/release.yml`** — runs the localization script after `cargo build --release` on all targets; added `components: llvm-tools-preview` to the rustup install.
+
+---
+
 ## [2.5.0] - 2026-04-11
 
 ### Added — `search_in_symbol`, `list_key_handlers`, `map_state_machine` MCP tools
