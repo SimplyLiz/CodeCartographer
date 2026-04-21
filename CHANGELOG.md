@@ -4,6 +4,156 @@ All notable changes to Cartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Added — function-level call graphs for Rust and Python
+
+`cartographer diagram --call-graph PATH` now extracts a file-local call graph
+and renders it through the existing Mermaid/DOT/ASCII pipeline. Nodes are
+functions/methods, edges are caller→callee relations resolved within the same
+file; calls into the stdlib or other files are dropped and reported as an
+`unresolved` count so the reader knows the graph is local-only.
+
+**`src/call_graph.rs`** (new) — tree-sitter walkers for Rust and Python:
+- Two-pass traversal: enumerate function defs (with `impl` / `class` scope →
+  `Type::method` / `Class.method` qualified names), then walk each body for
+  `call_expression` / `call` nodes.
+- `Resolver` disambiguates bare callee names (e.g. `self.bar()` → `S::bar`)
+  by exact-qualified match first, then unique-simple-name match. Ambiguous
+  simple names go to `unresolved` rather than guessing.
+- Self-recursion edges are dropped (uninteresting in a diagram).
+- Feature-gated behind `lang-rust` / `lang-python` to match the rest of the
+  tree-sitter surface.
+- `to_project_graph()` wraps output in a `ProjectGraphResponse` so
+  `diagram::render()` can consume it without any call-graph-specific rendering
+  code.
+
+**`src/main.rs`** — `--call-graph FILE` flag on `cartographer diagram`. When set,
+import-graph-only options (`--cochange-threshold`, `--docs-only`,
+`--group-by-folder`, `--color-by-owner`) are bypassed rather than erroring,
+since the common case is combining `--call-graph` with `--focus`, `--depth`,
+and `--format`.
+
+**Tests** — 8 new tests in `call_graph`:
+- Rust free-function edges, method resolution via simple name, unresolved
+  counting, self-recursion dropped.
+- Python free-function edges, method resolution via `attribute` callees.
+- Unknown extension returns `None` cleanly.
+- `to_project_graph` shape check (one node per function, `edge_type: "call"`).
+
+### Added — ASCII tree diagram format
+
+New `--format ascii` (aliases: `tree`, `text`) produces a terminal-friendly
+indented tree using `├── ` / `└── ` / `│   ` box-drawing, rooted at the most
+useful node available:
+- Explicit `--focus` wins.
+- Else the blast-radius epicenter (when `--blast-radius` is set).
+- Else the included node with the highest **out-degree** — this deviates
+  from top-by-degree's total-degree ranking on purpose, because a leaf node
+  at the root renders as an empty tree.
+
+**`src/diagram.rs`** — `DiagramFormat::Ascii` variant, `render_ascii()` DFS with
+cycle-safe re-entry marker (`↑ seen`), depth cap honoured, and per-node label
+showing signature count plus overlay tags (`★ epicenter`, `◉ cycle`, `✦ pivot`,
+`♨ hot`, role). Nodes in `included` that aren't reachable from the root are
+printed under a `(disconnected)` tail so the caller still sees them.
+
+**`src/diagram_export.rs`** — rejects `.svg`/`.png` output for ASCII diagrams
+with a clear "pick mermaid/dot for images" error; passthrough writes still
+work for any text extension.
+
+**Tests** — 4 new tests: format parse aliases, tree-glyphs present, root
+lands on focus, cycle → `↑ seen` marker, depth cap excludes deeper nodes.
+
+### Added — interactive HTML diagram export
+
+Writing diagram output to a `.html` path now produces a self-contained
+single-file explorer instead of raw diagram source. Vanilla JS, no CDN,
+no build step — open directly in a browser.
+
+**`src/html_export.rs`** (new) — `render_html(graph, &included) -> String`:
+- Embeds node/edge metadata as inline JSON (same selection rules as
+  Mermaid/DOT/ASCII — reuses `RenderedDiagram.included`).
+- Sidebar filter, click-to-select, neighbor lists annotated with violation
+  badges so the reader sees structural signals without re-rendering.
+- 4 tests for structural invariants, metadata presence, edge filtering on
+  the included set, and JSON-escaping of path strings.
+
+`RenderedDiagram` now exposes `included: Vec<String>` so any downstream
+exporter can reuse the selection. `diagram::select_for_render()` is a public
+helper that returns the selection alone for callers that need it without a
+rendered payload.
+
+### Added — SVG / PNG export via external converters
+
+Output path extension drives the exporter: `.svg`/`.png` shells out to the
+right tool based on source format — Mermaid → `mmdc` (npm
+`@mermaid-js/mermaid-cli`), DOT → `dot` (Graphviz). Missing binaries produce
+an actionable install message. Any other extension still writes the raw
+diagram source.
+
+**`src/diagram_export.rs`** (new) — `export_diagram(content, source_format,
+target) -> Result<ExportKind, String>`. Returns an enum so the CLI can print a
+matching status line (`"SVG exported to …"` vs `"Diagram written to …"`).
+
+### Added — ownership coloring (`--color-by-owner`)
+
+New `--color-by-owner` flag replaces role-based node fills with a stable
+palette keyed on the dominant git author. Useful for seeing team-ownership
+boundaries overlaid on the import graph.
+
+**`src/git_analysis.rs`** — new `git_ownership(root, limit) -> HashMap<path,
+author>`. Reuses the existing bot/formatter filters; picks the author with the
+most commits per file (alphabetical tiebreak for stability). Enrichment only
+runs when `--color-by-owner` or `--cochange-threshold` is set so default
+diagram builds don't pay for git calls.
+
+**`src/diagram.rs`** — `RenderOptions.color_by_owner: bool`; `owner_color()`
+hashes author → 10-color palette via FNV-1a 32-bit. Overlay borders (cycle,
+pivot, hot, epicenter) still take precedence. Mermaid path emits per-node
+`style` lines instead of the role class so the owner fill wins cleanly.
+
+### Added — folder-collapsed view (`--group-by-folder DEPTH`)
+
+New flag collapses the graph to folder granularity before rendering:
+`--group-by-folder 1` groups by top-level dir, `2` groups by second level,
+etc. Edges are aggregated (self-loops dropped; inter-folder edges summed);
+focus/blast-radius/docs-only all work on the collapsed graph.
+
+**`src/diagram.rs`** — `collapse_by_folder(graph, depth)` rebuilds a synthetic
+`ProjectGraphResponse` where each folder becomes a single `GraphNode` with
+`language: "folder"` and aggregated `signature_count`/`fan_in`. Renderers
+detect `language == "folder"` and emit `shape=folder` in DOT / the blue
+`:::folder` class in Mermaid.
+
+### Added — doc-map diagram (`--docs-only`)
+
+`--docs-only` filters the selection to the documentation subgraph: every
+Markdown/YAML/TOML/JSON node plus the code files they directly reference.
+Surfaces dead docs (doc nodes with no referenced code) and orphan code
+(code with no documentation). Doc nodes render distinctly regardless of the
+flag: Mermaid stadium shape `([...])` with yellow fill, DOT `shape=note`.
+
+### Added — co-change edges + blast-radius view
+
+- **`--cochange-threshold THRESHOLD`** overlays dotted purple edges for every
+  co-change pair whose `coupling_score ≥ THRESHOLD` and whose both endpoints
+  are in the included set. Requires git history (enriched via
+  `enrich_with_git`).
+- **`--blast-radius MODULE`** overrides selection: included = `{target} ∪
+  direct deps ∪ direct dependents`. Target renders as an epicenter (bold red
+  fill in both Mermaid and DOT).
+
+### Fixed — `rebuild_graph` deadlock when any import resolves
+
+`ApiState::rebuild_graph` held the `mapped_files` Mutex across its whole
+loop and then called `resolve_import_target`, which re-acquired the
+**same** non-reentrant `std::sync::Mutex` — any project with at least one
+resolvable import would deadlock. `diagram`, `health`, and every command
+that rebuilds the graph would hang indefinitely. Split the lookup into a
+public `resolve_import_target` (locks, for external callers) and a
+private `resolve_import_target_in(&HashMap<_, _>, …)` that takes the
+already-held map; `rebuild_graph` now calls the latter. Added regression
+test `rebuild_graph_does_not_deadlock_on_imports`.
+
 ### Fixed — `localize-tree-sitter-symbols.sh` silently dropped grammar C parsers
 
 The post-build script extracted archive members via `ar x` before partial-
