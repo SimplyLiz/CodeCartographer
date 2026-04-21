@@ -2,6 +2,252 @@
 
 All notable changes to Cartographer will be documented in this file.
 
+## [Unreleased]
+
+### Added — function-level call graphs for Rust and Python
+
+`cartographer diagram --call-graph PATH` now extracts a file-local call graph
+and renders it through the existing Mermaid/DOT/ASCII pipeline. Nodes are
+functions/methods, edges are caller→callee relations resolved within the same
+file; calls into the stdlib or other files are dropped and reported as an
+`unresolved` count so the reader knows the graph is local-only.
+
+**`src/call_graph.rs`** (new) — tree-sitter walkers for Rust and Python:
+- Two-pass traversal: enumerate function defs (with `impl` / `class` scope →
+  `Type::method` / `Class.method` qualified names), then walk each body for
+  `call_expression` / `call` nodes.
+- `Resolver` disambiguates bare callee names (e.g. `self.bar()` → `S::bar`)
+  by exact-qualified match first, then unique-simple-name match. Ambiguous
+  simple names go to `unresolved` rather than guessing.
+- Self-recursion edges are dropped (uninteresting in a diagram).
+- Feature-gated behind `lang-rust` / `lang-python` to match the rest of the
+  tree-sitter surface.
+- `to_project_graph()` wraps output in a `ProjectGraphResponse` so
+  `diagram::render()` can consume it without any call-graph-specific rendering
+  code.
+
+**`src/main.rs`** — `--call-graph FILE` flag on `cartographer diagram`. When set,
+import-graph-only options (`--cochange-threshold`, `--docs-only`,
+`--group-by-folder`, `--color-by-owner`) are bypassed rather than erroring,
+since the common case is combining `--call-graph` with `--focus`, `--depth`,
+and `--format`.
+
+**Tests** — 8 new tests in `call_graph`:
+- Rust free-function edges, method resolution via simple name, unresolved
+  counting, self-recursion dropped.
+- Python free-function edges, method resolution via `attribute` callees.
+- Unknown extension returns `None` cleanly.
+- `to_project_graph` shape check (one node per function, `edge_type: "call"`).
+
+### Added — ASCII tree diagram format
+
+New `--format ascii` (aliases: `tree`, `text`) produces a terminal-friendly
+indented tree using `├── ` / `└── ` / `│   ` box-drawing, rooted at the most
+useful node available:
+- Explicit `--focus` wins.
+- Else the blast-radius epicenter (when `--blast-radius` is set).
+- Else the included node with the highest **out-degree** — this deviates
+  from top-by-degree's total-degree ranking on purpose, because a leaf node
+  at the root renders as an empty tree.
+
+**`src/diagram.rs`** — `DiagramFormat::Ascii` variant, `render_ascii()` DFS with
+cycle-safe re-entry marker (`↑ seen`), depth cap honoured, and per-node label
+showing signature count plus overlay tags (`★ epicenter`, `◉ cycle`, `✦ pivot`,
+`♨ hot`, role). Nodes in `included` that aren't reachable from the root are
+printed under a `(disconnected)` tail so the caller still sees them.
+
+**`src/diagram_export.rs`** — rejects `.svg`/`.png` output for ASCII diagrams
+with a clear "pick mermaid/dot for images" error; passthrough writes still
+work for any text extension.
+
+**Tests** — 4 new tests: format parse aliases, tree-glyphs present, root
+lands on focus, cycle → `↑ seen` marker, depth cap excludes deeper nodes.
+
+### Added — interactive HTML diagram export
+
+Writing diagram output to a `.html` path now produces a self-contained
+single-file explorer instead of raw diagram source. Vanilla JS, no CDN,
+no build step — open directly in a browser.
+
+**`src/html_export.rs`** (new) — `render_html(graph, &included) -> String`:
+- Embeds node/edge metadata as inline JSON (same selection rules as
+  Mermaid/DOT/ASCII — reuses `RenderedDiagram.included`).
+- Sidebar filter, click-to-select, neighbor lists annotated with violation
+  badges so the reader sees structural signals without re-rendering.
+- 4 tests for structural invariants, metadata presence, edge filtering on
+  the included set, and JSON-escaping of path strings.
+
+`RenderedDiagram` now exposes `included: Vec<String>` so any downstream
+exporter can reuse the selection. `diagram::select_for_render()` is a public
+helper that returns the selection alone for callers that need it without a
+rendered payload.
+
+### Added — SVG / PNG export via external converters
+
+Output path extension drives the exporter: `.svg`/`.png` shells out to the
+right tool based on source format — Mermaid → `mmdc` (npm
+`@mermaid-js/mermaid-cli`), DOT → `dot` (Graphviz). Missing binaries produce
+an actionable install message. Any other extension still writes the raw
+diagram source.
+
+**`src/diagram_export.rs`** (new) — `export_diagram(content, source_format,
+target) -> Result<ExportKind, String>`. Returns an enum so the CLI can print a
+matching status line (`"SVG exported to …"` vs `"Diagram written to …"`).
+
+### Added — ownership coloring (`--color-by-owner`)
+
+New `--color-by-owner` flag replaces role-based node fills with a stable
+palette keyed on the dominant git author. Useful for seeing team-ownership
+boundaries overlaid on the import graph.
+
+**`src/git_analysis.rs`** — new `git_ownership(root, limit) -> HashMap<path,
+author>`. Reuses the existing bot/formatter filters; picks the author with the
+most commits per file (alphabetical tiebreak for stability). Enrichment only
+runs when `--color-by-owner` or `--cochange-threshold` is set so default
+diagram builds don't pay for git calls.
+
+**`src/diagram.rs`** — `RenderOptions.color_by_owner: bool`; `owner_color()`
+hashes author → 10-color palette via FNV-1a 32-bit. Overlay borders (cycle,
+pivot, hot, epicenter) still take precedence. Mermaid path emits per-node
+`style` lines instead of the role class so the owner fill wins cleanly.
+
+### Added — folder-collapsed view (`--group-by-folder DEPTH`)
+
+New flag collapses the graph to folder granularity before rendering:
+`--group-by-folder 1` groups by top-level dir, `2` groups by second level,
+etc. Edges are aggregated (self-loops dropped; inter-folder edges summed);
+focus/blast-radius/docs-only all work on the collapsed graph.
+
+**`src/diagram.rs`** — `collapse_by_folder(graph, depth)` rebuilds a synthetic
+`ProjectGraphResponse` where each folder becomes a single `GraphNode` with
+`language: "folder"` and aggregated `signature_count`/`fan_in`. Renderers
+detect `language == "folder"` and emit `shape=folder` in DOT / the blue
+`:::folder` class in Mermaid.
+
+### Added — doc-map diagram (`--docs-only`)
+
+`--docs-only` filters the selection to the documentation subgraph: every
+Markdown/YAML/TOML/JSON node plus the code files they directly reference.
+Surfaces dead docs (doc nodes with no referenced code) and orphan code
+(code with no documentation). Doc nodes render distinctly regardless of the
+flag: Mermaid stadium shape `([...])` with yellow fill, DOT `shape=note`.
+
+### Added — co-change edges + blast-radius view
+
+- **`--cochange-threshold THRESHOLD`** overlays dotted purple edges for every
+  co-change pair whose `coupling_score ≥ THRESHOLD` and whose both endpoints
+  are in the included set. Requires git history (enriched via
+  `enrich_with_git`).
+- **`--blast-radius MODULE`** overrides selection: included = `{target} ∪
+  direct deps ∪ direct dependents`. Target renders as an epicenter (bold red
+  fill in both Mermaid and DOT).
+
+### Fixed — `rebuild_graph` deadlock when any import resolves
+
+`ApiState::rebuild_graph` held the `mapped_files` Mutex across its whole
+loop and then called `resolve_import_target`, which re-acquired the
+**same** non-reentrant `std::sync::Mutex` — any project with at least one
+resolvable import would deadlock. `diagram`, `health`, and every command
+that rebuilds the graph would hang indefinitely. Split the lookup into a
+public `resolve_import_target` (locks, for external callers) and a
+private `resolve_import_target_in(&HashMap<_, _>, …)` that takes the
+already-held map; `rebuild_graph` now calls the latter. Added regression
+test `rebuild_graph_does_not_deadlock_on_imports`.
+
+### Fixed — `localize-tree-sitter-symbols.sh` silently dropped grammar C parsers
+
+The post-build script extracted archive members via `ar x` before partial-
+linking them into `combined.o`. Cargo emits one `parser.o` and one
+`scanner.o` per grammar crate (`tree-sitter-c`, `-cpp`, `-rust`, `-go`,
+…) and they all share filenames — `ar x` writes each extraction on top
+of the previous, so only the **last** grammar's C parser survived on
+disk. The resulting localized archive then had `_tree_sitter_c` and
+`_tree_sitter_cpp` as undefined externals, referenced by the Rust
+`tree_sitter_c::language()` / `tree_sitter_cpp::language()` wrappers
+but never provided, so Go consumers linking `libcartographer.a` got
+undefined-symbol errors at `cartographer`-tagged builds.
+
+The script now feeds the archive directly to `ld -r` via
+`-Wl,-force_load,input.a` (Mach-O) or
+`-Wl,--whole-archive input.a -Wl,--no-whole-archive` (ELF), which pulls
+every member in without ever writing them to the filesystem. No more
+name collisions; all grammar parsers end up inside `combined.o` and
+localize correctly.
+
+### Added — architectural overlays on Mermaid / DOT diagrams
+
+The diagram renderer now surfaces cycles, layer violations, and hotspots
+directly in the output instead of leaving them buried in the JSON graph.
+Nothing is opt-in: if the data is in `ProjectGraphResponse`, it shows up.
+
+**`src/diagram.rs`** — new `Overlays` precomputation step, applied by both
+Mermaid and DOT renderers so CLI and MCP stay lock-step:
+- **Cycles** — nodes that appear in any `graph.cycles` member get a thick red border (DOT `color=#cc0000 penwidth=3`; Mermaid `:::cycle` via `class` statement). Cycle-internal edges get a heavy red arrow (`==>` in Mermaid, solid red in DOT). An edge participates iff both endpoints share a cycle's `nodes` set.
+- **Pivot nodes** — `CycleInfo.pivot_node` gets a dashed red border (`:::pivot`) so it stands out inside the cycle. Pivot takes precedence over plain cycle marking on the same node.
+- **Layer violations** — edges matching `graph.layer_violations` pick up violation-type styling: `BackCall`/`CircularCrossLayer` → dashed red; `SkipCall` → dotted orange; `DirectForeignImport` → dotted yellow. Mermaid uses `-.->` arrows + per-edge `linkStyle` directives; DOT uses `style=dashed|dotted` + colour.
+- **Hotspots** — nodes with `hotspot_score ≥ 70` get an orange border. In DOT they also scale: `width`, `height`, and `fontsize` all interpolate linearly from the score. In Mermaid they pick up `:::hot` (Mermaid can't size nodes, so border-only).
+- **Precedence** — a node that's both hot and in a cycle wears the cycle red, not the hot orange (architectural signal wins over performance signal).
+
+**Tests** — 8 new unit tests in `src/diagram.rs`:
+- Mermaid cycle/pivot class assignments
+- DOT cycle edges render red
+- Mermaid + DOT layer-violation styling (both BackCall and SkipCall)
+- DOT hotspot sizing + orange border; cold nodes stay at default width
+- Mermaid hot-class assignment
+- Cycle border precedence over hot border
+- Truncation safety: `linkStyle` indices never exceed the count of emitted edges when `max_nodes` cuts the graph
+
+Backwards-compatible: the existing role-based fill colours (`core`, `bridge`,
+`dead`, `entry`) remain untouched; overlays live on the border/edge so they
+compose rather than collide. Existing tests asserting `:::core`/`:::bridge`
+still pass.
+
+### Added — `renderArchitecture` MCP tool + `cartographer_render_architecture` FFI
+
+The CLI's `diagram` command has been factored into a shared renderer and
+exposed via FFI so MCP clients can return Mermaid/DOT directly. IDEs that
+render Mermaid inline (Cursor, Claude Desktop, VS Code markdown preview,
+GitHub) now get paste-able diagrams without any extra UI.
+
+**`src/diagram.rs`** (new) — shared renderer, pure over `ProjectGraphResponse`:
+- `render(graph, RenderOptions) -> RenderedDiagram { diagram, truncated, node_count }`
+- No focus → top-N nodes by degree, isolated nodes skipped ("shape of the codebase")
+- With focus → undirected BFS over import edges to `depth` ("shape of the neighborhood I'm editing"); undirected because the area being edited usually includes both what it imports and what imports it
+- `focus` accepts module_id, exact path, or path suffix (e.g. `"server.rs"` matches `"src/server.rs"`)
+- `truncated: true` in the response signals the node cap kicked in so the caller/model can tighten focus or lower depth
+- 12 unit tests cover top-N, BFS direction, path-suffix match, cycle safety, truncation, format parsing, and output structure
+
+**`src/lib.rs`** — `cartographer_render_architecture(path, format, focus, depth, max_nodes)`:
+- Defaults: `format` null → `"mermaid"`, `depth` 0 → 2, `max_nodes` 0 → 40
+- Returns JSON `{ diagram, truncated, format, nodeCount }`
+- cbindgen regenerates `include/cartographer.h` automatically
+
+**`src/main.rs`** — CLI `diagram_mode` now delegates to `diagram::render()`, so CLI and FFI outputs stay identical.
+
+### Added — tree-sitter symbol localization for `libcartographer.a`
+
+`libcartographer.a` now ships with its tree-sitter runtime and grammar
+symbols hidden from the global symbol resolver, so consumers that also
+link tree-sitter (e.g. Go projects using `go-tree-sitter`) no longer
+trip duplicate-symbol errors at link time. This matters beyond the
+ergonomic complaint: if both copies were left global, the linker would
+bind Cartographer's Rust code to whichever archive came first on the
+command line — and if the two tree-sitter versions drifted in struct
+layout, the loser's callers would walk the wrong struct and produce
+silent memory corruption.
+
+**`scripts/localize-tree-sitter-symbols.sh`** (new):
+- Partial-links all `.o` members of `libcartographer.a` into one combined relocatable object via `cc -nostdlib -Wl,-r`, so Cartographer's internal `ts_*`/`tree_sitter_*` references resolve within the archive
+- `rust-objcopy --wildcard --localize-symbol='ts_*' --localize-symbol='tree_sitter_*'` then marks those symbols local on the combined object; `cartographer_*` FFI entry points stay global
+- Resolves `rust-objcopy` via `rustc --print target-libdir`; falls back to `llvm-objcopy`/`objcopy` if `llvm-tools-preview` isn't installed
+- `scripts/tests/test-localize-symbols.sh` — synthetic fixture smoke test
+- **Background:** tree-sitter's own build.rs already passes `-fvisibility=hidden`, but `tree_sitter/api.h` wraps the API in `#pragma GCC visibility push(default)`, which wins over the command-line flag whenever a C source includes the header. Compile-time visibility is therefore insufficient; the archive must be post-processed.
+- **Bonus:** partial-link dead-strips unused sections, shrinking the arm64 release archive from ~57 MB → ~19 MB.
+
+**`.github/workflows/release.yml`** — runs the localization script after `cargo build --release` on all targets; added `components: llvm-tools-preview` to the rustup install.
+
+---
+
 ## [2.5.0] - 2026-04-11
 
 ### Added — `search_in_symbol`, `list_key_handlers`, `map_state_machine` MCP tools

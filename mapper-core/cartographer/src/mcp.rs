@@ -770,6 +770,65 @@ impl McpServer {
                     required: vec!["root".to_string()],
                 },
             },
+            // -----------------------------------------------------------------
+            // Document-oriented tools
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "doc_index".to_string(),
+                description: "Return all document-type files (Markdown, YAML, TOML, JSON) \
+                              in the project with their extracted headings, config keys, \
+                              cross-reference edges, and edge counts. Useful as a table \
+                              of contents for the project's documentation."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: HashMap::new(),
+                    required: vec![],
+                },
+            },
+            McpTool {
+                name: "doc_context".to_string(),
+                description: "Get a single document's extracted structure plus the skeleton \
+                              of all code files it cross-references. Follows import edges \
+                              from the doc into code, ranked by relevance. Returns the doc \
+                              first, then supporting code — ideal for understanding what a \
+                              doc describes."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("doc_path".to_string(), mcprop!("string",
+                        "Path to the document file (relative to project root, or a path fragment)"));
+                    props.insert("budget".to_string(), mcprop!("number",
+                        "Max tokens for referenced code context (default 4000)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["doc_path".to_string()],
+                    }
+                },
+            },
+            McpTool {
+                name: "query_docs".to_string(),
+                description: "Doc-biased context retrieval: searches documents first, then \
+                              follows cross-reference edges into the code they describe. \
+                              Returns a bundle with docs and supporting code separated. \
+                              Like query_context but prioritises documentation."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("query".to_string(), mcprop!("string",
+                        "Natural language query or keyword to search for"));
+                    props.insert("budget".to_string(), mcprop!("number",
+                        "Max total tokens (default 8000)"));
+                    props.insert("model".to_string(), mcprop!("string",
+                        "Target model for health scoring: claude, gpt4, llama (default claude)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["query".to_string()],
+                    }
+                },
+            },
         ]
     }
 
@@ -2145,6 +2204,216 @@ impl McpServer {
                 });
                 Ok(McpToolResult {
                     content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // doc_index — list all document nodes with structure + edges
+            // -----------------------------------------------------------------
+            "doc_index" => {
+                let docs = self.api_state.doc_nodes()?;
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&docs).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // doc_context — single doc + referenced code skeletons
+            // -----------------------------------------------------------------
+            "doc_context" => {
+                let args = &call.arguments;
+                let doc_path = args.get("doc_path").and_then(|v| v.as_str())
+                    .ok_or("Missing doc_path")?;
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(4000) as usize;
+
+                // Rebuild graph so edges exist
+                if let Err(e) = self.api_state.rebuild_graph() {
+                    return Err(e);
+                }
+
+                // Find the doc in mapped_files (exact match or substring)
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let (module_id, mf) = files.iter()
+                    .find(|(_, f)| f.path == doc_path || f.path.contains(doc_path))
+                    .ok_or_else(|| format!("Document not found: {}", doc_path))?;
+
+                let doc_sigs: Vec<String> = mf.signatures.iter().map(|s| s.raw.clone()).collect();
+                let doc_imports = mf.imports.clone();
+                let doc_path_owned = mf.path.clone();
+                let module_id_owned = module_id.clone();
+
+                // Drop the lock before calling ranked_skeleton
+                drop(files);
+
+                // Use the doc's imports as focus files for ranked skeleton
+                let focus: Vec<String> = doc_imports.clone();
+                let ranked = if focus.is_empty() {
+                    vec![]
+                } else {
+                    self.api_state.ranked_skeleton(&focus, budget).unwrap_or_default()
+                };
+
+                let total_tokens: usize = ranked.iter().map(|f| f.estimated_tokens).sum();
+
+                let referenced: Vec<serde_json::Value> = ranked.iter().map(|f| {
+                    serde_json::json!({
+                        "path": f.path,
+                        "rank": f.rank,
+                        "signatureCount": f.signature_count,
+                        "estimatedTokens": f.estimated_tokens,
+                        "signatures": f.signatures,
+                    })
+                }).collect();
+
+                let result = serde_json::json!({
+                    "doc": {
+                        "path": doc_path_owned,
+                        "moduleId": module_id_owned,
+                        "signatures": doc_sigs,
+                        "imports": doc_imports,
+                    },
+                    "referencedFiles": referenced,
+                    "totalTokens": total_tokens,
+                });
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // query_docs — doc-biased context retrieval
+            // -----------------------------------------------------------------
+            "query_docs" => {
+                let args = &call.arguments;
+                let query = args.get("query").and_then(|v| v.as_str())
+                    .ok_or("Missing query")?.to_string();
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+                let model_str = args.get("model").and_then(|v| v.as_str())
+                    .unwrap_or("claude").to_string();
+
+                // Rebuild graph
+                if let Err(e) = self.api_state.rebuild_graph() {
+                    return Err(e);
+                }
+
+                // Step 1: BM25 search across all files
+                let bm25_opts = crate::search::BM25Options {
+                    max_results: 30,
+                    ..Default::default()
+                };
+                let bm25_result = crate::search::bm25_search(
+                    &self.api_state.root_path, &query, &bm25_opts,
+                ).unwrap_or_default();
+
+                // Step 2: Separate into doc files and code files
+                let mut doc_files: Vec<String> = Vec::new();
+                let mut code_files: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+
+                for m in &bm25_result.matches {
+                    if !seen.insert(m.path.clone()) { continue; }
+                    if crate::api::is_doc_path(&m.path) {
+                        doc_files.push(m.path.clone());
+                    } else {
+                        code_files.push(m.path.clone());
+                    }
+                }
+
+                // Step 3: Follow doc cross-refs into code
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let mut ref_code: Vec<String> = Vec::new();
+                for doc_path in &doc_files {
+                    if let Some(mf) = files.get(doc_path.as_str()) {
+                        for imp in &mf.imports {
+                            if !seen.contains(imp) && !crate::api::is_doc_path(imp) {
+                                seen.insert(imp.clone());
+                                ref_code.push(imp.clone());
+                            }
+                        }
+                    }
+                }
+                drop(files);
+
+                // Merge: doc imports come after direct code hits
+                code_files.extend(ref_code);
+
+                // Step 4: Build ranked skeleton — docs as primary focus, code as secondary
+                let mut all_focus = doc_files.clone();
+                all_focus.extend(code_files.iter().cloned());
+                all_focus.truncate(30);
+
+                let ranked = self.api_state.ranked_skeleton(&all_focus, budget)
+                    .unwrap_or_default();
+
+                // Step 5: Build context text — docs first, then code
+                let mut doc_entries = Vec::new();
+                let mut code_entries = Vec::new();
+                let mut context_text = format!("## Doc Context for: {}\n\n", query);
+                let mut total_tokens = 0usize;
+
+                for f in &ranked {
+                    let entry = serde_json::json!({
+                        "path": f.path,
+                        "rank": f.rank,
+                        "signatureCount": f.signature_count,
+                        "estimatedTokens": f.estimated_tokens,
+                        "signatures": f.signatures,
+                    });
+                    total_tokens += f.estimated_tokens;
+
+                    if crate::api::is_doc_path(&f.path) {
+                        context_text.push_str(&format!(
+                            "// [DOC] {} (rank: {:.4}, {} tokens)\n", f.path, f.rank, f.estimated_tokens
+                        ));
+                        doc_entries.push(entry);
+                    } else {
+                        context_text.push_str(&format!(
+                            "// {} (rank: {:.4}, {} tokens)\n", f.path, f.rank, f.estimated_tokens
+                        ));
+                        code_entries.push(entry);
+                    }
+                    for sig in &f.signatures {
+                        context_text.push_str(&format!("  {}\n", sig));
+                    }
+                    context_text.push('\n');
+                }
+
+                // Step 6: Health score
+                let sig_count: usize = ranked.iter().map(|f| f.signatures.len()).sum();
+                let model = model_str.parse::<crate::token_metrics::ModelFamily>().unwrap_or_default();
+                let health_opts = crate::token_metrics::HealthOpts {
+                    model,
+                    window_size: 0,
+                    key_positions: crate::token_metrics::key_positions_from_order(
+                        &ranked.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+                        &doc_files,
+                    ),
+                    signature_count: sig_count,
+                    signature_tokens: (total_tokens as f64 * 0.85) as usize,
+                };
+                let health = crate::token_metrics::analyze(&context_text, &health_opts);
+
+                let result = serde_json::json!({
+                    "context": context_text,
+                    "docFiles": doc_entries,
+                    "codeFiles": code_entries,
+                    "focusDocs": doc_files,
+                    "totalTokens": total_tokens,
+                    "health": health,
+                });
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )],
                     is_error: None,
                 })
             }

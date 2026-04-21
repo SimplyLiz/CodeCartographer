@@ -34,6 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: llvm-tools-preview
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -51,6 +52,13 @@ jobs:
 
       - name: Build static library
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Localize tree-sitter symbols
+        # Hides ts_* / tree_sitter_* symbols inside libcartographer.a so
+        # consumers that also link tree-sitter (e.g. Go projects using
+        # go-tree-sitter) don't collide at link time. See script header
+        # for rationale and mechanism.
+        run: scripts/localize-tree-sitter-symbols.sh target/${{ matrix.target }}/release/libcartographer.a
 
       - name: Regenerate header
         run: cargo install cbindgen --locked 2>/dev/null || true && cbindgen --config cbindgen.toml --output include/cartographer.h
