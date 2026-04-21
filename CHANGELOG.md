@@ -4,6 +4,26 @@ All notable changes to Cartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `localize-tree-sitter-symbols.sh` silently dropped grammar C parsers
+
+The post-build script extracted archive members via `ar x` before partial-
+linking them into `combined.o`. Cargo emits one `parser.o` and one
+`scanner.o` per grammar crate (`tree-sitter-c`, `-cpp`, `-rust`, `-go`,
+…) and they all share filenames — `ar x` writes each extraction on top
+of the previous, so only the **last** grammar's C parser survived on
+disk. The resulting localized archive then had `_tree_sitter_c` and
+`_tree_sitter_cpp` as undefined externals, referenced by the Rust
+`tree_sitter_c::language()` / `tree_sitter_cpp::language()` wrappers
+but never provided, so Go consumers linking `libcartographer.a` got
+undefined-symbol errors at `cartographer`-tagged builds.
+
+The script now feeds the archive directly to `ld -r` via
+`-Wl,-force_load,input.a` (Mach-O) or
+`-Wl,--whole-archive input.a -Wl,--no-whole-archive` (ELF), which pulls
+every member in without ever writing them to the filesystem. No more
+name collisions; all grammar parsers end up inside `combined.o` and
+localize correctly.
+
 ### Added — architectural overlays on Mermaid / DOT diagrams
 
 The diagram renderer now surfaces cycles, layer violations, and hotspots
