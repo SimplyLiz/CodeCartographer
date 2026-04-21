@@ -4,6 +4,34 @@ All notable changes to Cartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Added — architectural overlays on Mermaid / DOT diagrams
+
+The diagram renderer now surfaces cycles, layer violations, and hotspots
+directly in the output instead of leaving them buried in the JSON graph.
+Nothing is opt-in: if the data is in `ProjectGraphResponse`, it shows up.
+
+**`src/diagram.rs`** — new `Overlays` precomputation step, applied by both
+Mermaid and DOT renderers so CLI and MCP stay lock-step:
+- **Cycles** — nodes that appear in any `graph.cycles` member get a thick red border (DOT `color=#cc0000 penwidth=3`; Mermaid `:::cycle` via `class` statement). Cycle-internal edges get a heavy red arrow (`==>` in Mermaid, solid red in DOT). An edge participates iff both endpoints share a cycle's `nodes` set.
+- **Pivot nodes** — `CycleInfo.pivot_node` gets a dashed red border (`:::pivot`) so it stands out inside the cycle. Pivot takes precedence over plain cycle marking on the same node.
+- **Layer violations** — edges matching `graph.layer_violations` pick up violation-type styling: `BackCall`/`CircularCrossLayer` → dashed red; `SkipCall` → dotted orange; `DirectForeignImport` → dotted yellow. Mermaid uses `-.->` arrows + per-edge `linkStyle` directives; DOT uses `style=dashed|dotted` + colour.
+- **Hotspots** — nodes with `hotspot_score ≥ 70` get an orange border. In DOT they also scale: `width`, `height`, and `fontsize` all interpolate linearly from the score. In Mermaid they pick up `:::hot` (Mermaid can't size nodes, so border-only).
+- **Precedence** — a node that's both hot and in a cycle wears the cycle red, not the hot orange (architectural signal wins over performance signal).
+
+**Tests** — 8 new unit tests in `src/diagram.rs`:
+- Mermaid cycle/pivot class assignments
+- DOT cycle edges render red
+- Mermaid + DOT layer-violation styling (both BackCall and SkipCall)
+- DOT hotspot sizing + orange border; cold nodes stay at default width
+- Mermaid hot-class assignment
+- Cycle border precedence over hot border
+- Truncation safety: `linkStyle` indices never exceed the count of emitted edges when `max_nodes` cuts the graph
+
+Backwards-compatible: the existing role-based fill colours (`core`, `bridge`,
+`dead`, `entry`) remain untouched; overlays live on the border/edge so they
+compose rather than collide. Existing tests asserting `:::core`/`:::bridge`
+still pass.
+
 ### Added — `renderArchitecture` MCP tool + `cartographer_render_architecture` FFI
 
 The CLI's `diagram` command has been factored into a shared renderer and
