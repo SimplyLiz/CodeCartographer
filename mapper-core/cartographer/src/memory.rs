@@ -1,80 +1,77 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 const MEMORY_FILE: &str = ".cartographer_memory.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileEntry {
-    pub path: String,
-    pub content: String,
-    pub modified: u64,
-    pub hash: u64,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct Memory {
-    pub version: u32,
-    pub files: HashMap<String, FileEntry>,
-    pub last_sync: u64,
-}
-
 impl Memory {
+    pub fn save(&self, root: &Path) -> Result<()> {
+        let path = root.join(MEMORY_FILE);
+        let temp_path = path.with_extension("json.tmp");
+
+        // Serialize to JSON
+        let data = serde_json::to_string_pretty(self)?;
+
+        // Write to temporary file first (atomic write pattern)
+        {
+            let mut temp_file = fs::File::create(&temp_path)
+                .map_err(|e| anyhow::anyhow!("Failed to create temp file: {}", e))?;
+
+            temp_file.write_all(data.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to write temp file: {}", e))?;
+
+            temp_file.flush()
+                .map_err(|e| anyhow::anyhow!("Failed to flush temp file: {}", e))?;
+
+            // Sync to disk to ensure durability
+            temp_file.sync_all()
+                .map_err(|e| anyhow::anyhow!("Failed to sync temp file: {}", e))?;
+        }
+
+        // Atomic rename (fails if destination exists on Windows, but overwrites on Unix)
+        fs::rename(&temp_path, &path)
+            .map_err(|e| anyhow::anyhow!("Failed to rename temp file to {}: {}", path.display(), e))?;
+
+        // Restrict file permissions to owner only (Unix/Linux/macOS)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o600); // rw-------
+            fs::set_permissions(&path, perms)
+                .map_err(|e| anyhow::anyhow!("Failed to set permissions: {}", e))?;
+        }
+
+        // Windows: no equivalent to chmod; file is created with default permissions
+        // (usually readable by owner and system only)
+
+        Ok(())
+    }
+
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join(MEMORY_FILE);
         if path.exists() {
+            // Verify file permissions before loading (Unix only)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = fs::metadata(&path)?;
+                let mode = meta.permissions().mode();
+                // Warn if world-readable (other bits set)
+                if (mode & 0o077) != 0 {
+                    eprintln!(
+                        "[CARTOGRAPHER] WARNING: {} is world-readable (mode={:o}). \
+                         Consider running: chmod 600 {}",
+                        path.display(),
+                        mode,
+                        path.display()
+                    );
+                }
+            }
+
             let data = fs::read_to_string(&path)?;
             Ok(serde_json::from_str(&data)?)
         } else {
             Ok(Self::default())
         }
     }
-
-    pub fn save(&self, root: &Path) -> Result<()> {
-        let path = root.join(MEMORY_FILE);
-        let data = serde_json::to_string_pretty(self)?;
-        fs::write(path, data)?;
-        Ok(())
-    }
-
-    pub fn get_dirty_files(&self, current_files: &[(PathBuf, u64)]) -> Vec<PathBuf> {
-        let mut dirty = Vec::new();
-
-        for (path, modified) in current_files {
-            let rel_path = path.to_string_lossy().replace('\\', "/");
-            match self.files.get(&rel_path) {
-                Some(entry) if entry.modified >= *modified => continue,
-                _ => dirty.push(path.clone()),
-            }
-        }
-        dirty
-    }
-
-    pub fn patch(&mut self, updates: Vec<FileEntry>) {
-        for entry in updates {
-            self.files.insert(entry.path.clone(), entry);
-        }
-        self.last_sync = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-    }
-
-    pub fn remove_deleted(&mut self, existing_paths: &[String]) {
-        let existing: std::collections::HashSet<_> = existing_paths.iter().collect();
-        self.files.retain(|k, _| existing.contains(k));
-    }
-}
-
-pub fn hash_content(content: &str) -> u64 {
-    // FNV-1a: stable across processes and Rust versions (DefaultHasher is not)
-    let mut hash: u64 = 14695981039346656037;
-    for byte in content.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    hash
 }
