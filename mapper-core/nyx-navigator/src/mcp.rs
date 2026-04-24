@@ -480,6 +480,44 @@ impl McpServer {
                 },
             },
 
+            McpTool {
+                name: "focused_skeleton".to_string(),
+                description: "Return the enriched skeleton for a file and all files within N \
+                              import-hops of it (both importers and importees). Use this instead \
+                              of skeleton_map when you are already working in a specific area \
+                              and want neighbourhood context without the full project."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("focus".to_string(), mcprop!("string", "File path or module ID to centre on, e.g. \"src/api.rs\""));
+                        props.insert("depth".to_string(), mcprop!("number", "Import-hop radius (default 1). 0 = focus file only, 2 = two hops out."));
+                        props.insert("detail".to_string(), mcprop!("string", "Detail level: minimal, standard, or extended (default standard)"));
+                        props
+                    },
+                    required: vec!["focus".to_string()],
+                },
+            },
+            McpTool {
+                name: "diff_skeleton".to_string(),
+                description: "Return the enriched skeleton for files changed between two commits \
+                              plus their immediate importers — the minimal context needed to \
+                              understand a diff's blast radius. Defaults to HEAD~1..HEAD."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("from".to_string(), mcprop!("string", "Base commit (default HEAD~1)"));
+                        props.insert("to".to_string(), mcprop!("string", "Target commit (default HEAD)"));
+                        props.insert("include_importers".to_string(), mcprop!("boolean", "Also include files that import the changed files (default true)"));
+                        props
+                    },
+                    required: vec![],
+                },
+            },
+
             // -----------------------------------------------------------------
             // Git intelligence
             // -----------------------------------------------------------------
@@ -1588,6 +1626,147 @@ impl McpServer {
                 let result = self.api_state.ranked_skeleton(&focus, budget)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Feature 4: focused_skeleton
+            // -----------------------------------------------------------------
+
+            "focused_skeleton" => {
+                let args = &call.arguments;
+                let focus = args.get("focus").and_then(|v| v.as_str())
+                    .ok_or("Missing required parameter: focus")?;
+                let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                let detail = args.get("detail").and_then(|v| v.as_str()).unwrap_or("standard");
+
+                let _ = self.api_state.rebuild_graph()?;
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let graph = self.api_state.project_graph.lock().map_err(|e| e.to_string())?;
+                let graph = graph.as_ref().ok_or("Graph not initialized")?;
+
+                // Fuzzy-match the focus string to a module_id.
+                let seed = files.keys()
+                    .find(|k| *k == focus || k.ends_with(focus) || k.contains(focus))
+                    .map(|k| k.clone())
+                    .ok_or_else(|| format!("No file matching '{}'", focus))?;
+
+                let neighborhood = bfs_neighborhood(&seed, depth, &graph.edges);
+                let churn_map = crate::git_analysis::git_churn(&self.api_state.root_path, 300);
+                let churn_labels = compute_churn_labels(&churn_map, files.values().map(|f| f.path.as_str()));
+                let tested_names = collect_tested_names(files.values());
+
+                let max_sigs = match detail { "minimal" => 5, "extended" => usize::MAX, _ => 20 };
+                let result_files: Vec<serde_json::Value> = neighborhood.iter()
+                    .filter_map(|(module_id, role)| {
+                        files.get(module_id).map(|mf| render_mf(mf, role, max_sigs, &churn_labels, &tested_names))
+                    })
+                    .collect();
+
+                let est_tokens: usize = result_files.iter()
+                    .map(|f| serde_json::to_string(f).unwrap_or_default().len() / 4)
+                    .sum();
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                        "focus": seed,
+                        "depth": depth,
+                        "files": result_files,
+                        "totalFiles": result_files.len(),
+                        "estimatedTokens": est_tokens,
+                    })).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // Feature 5: diff_skeleton
+            // -----------------------------------------------------------------
+
+            "diff_skeleton" => {
+                let args = &call.arguments;
+                let from = args.get("from").and_then(|v| v.as_str()).unwrap_or("HEAD~1");
+                let to   = args.get("to").and_then(|v| v.as_str()).unwrap_or("HEAD");
+                let include_importers = args.get("include_importers")
+                    .and_then(|v| v.as_bool()).unwrap_or(true);
+
+                let changed = crate::git_analysis::git_diff_files(&self.api_state.root_path, from, to);
+                if changed.is_empty() {
+                    return Ok(McpToolResult {
+                        content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                            "from": from, "to": to,
+                            "changedFiles": [],
+                            "files": [],
+                            "totalFiles": 0,
+                            "estimatedTokens": 0,
+                        })).unwrap_or_default())],
+                        is_error: None,
+                    });
+                }
+
+                let _ = self.api_state.rebuild_graph()?;
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let graph = self.api_state.project_graph.lock().map_err(|e| e.to_string())?;
+                let graph = graph.as_ref().ok_or("Graph not initialized")?;
+
+                let churn_map = crate::git_analysis::git_churn(&self.api_state.root_path, 300);
+                let churn_labels = compute_churn_labels(&churn_map, files.values().map(|f| f.path.as_str()));
+                let tested_names = collect_tested_names(files.values());
+
+                // Seed: changed files that exist in the skeleton.
+                let changed_paths: std::collections::HashSet<String> = changed.iter()
+                    .map(|(p, _)| p.clone())
+                    .collect();
+
+                let mut neighborhood: Vec<(String, &'static str)> = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                for module_id in files.keys() {
+                    if changed_paths.contains(module_id.as_str())
+                        || changed_paths.iter().any(|p| module_id.ends_with(p.as_str()))
+                    {
+                        if seen.insert(module_id.clone()) {
+                            neighborhood.push((module_id.clone(), "changed"));
+                        }
+                    }
+                }
+
+                // Optionally add 1-hop importers of changed files.
+                if include_importers {
+                    let seeds: Vec<String> = neighborhood.iter().map(|(id, _)| id.clone()).collect();
+                    for seed in &seeds {
+                        for edge in &graph.edges {
+                            if &edge.target == seed && seen.insert(edge.source.clone()) {
+                                neighborhood.push((edge.source.clone(), "importer"));
+                            }
+                        }
+                    }
+                }
+
+                let result_files: Vec<serde_json::Value> = neighborhood.iter()
+                    .filter_map(|(module_id, role)| {
+                        files.get(module_id).map(|mf| render_mf(mf, role, 20, &churn_labels, &tested_names))
+                    })
+                    .collect();
+
+                let est_tokens: usize = result_files.iter()
+                    .map(|f| serde_json::to_string(f).unwrap_or_default().len() / 4)
+                    .sum();
+
+                let changed_list: Vec<serde_json::Value> = changed.iter()
+                    .map(|(p, s)| serde_json::json!({"path": p, "status": s.to_string()}))
+                    .collect();
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                        "from": from,
+                        "to": to,
+                        "changedFiles": changed_list,
+                        "files": result_files,
+                        "totalFiles": result_files.len(),
+                        "estimatedTokens": est_tokens,
+                    })).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2741,6 +2920,141 @@ impl McpServer {
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers shared by focused_skeleton and diff_skeleton
+// ---------------------------------------------------------------------------
+
+/// BFS over graph edges; returns every reachable module within `depth` hops
+/// with a role tag: "focus" (seed), "dependency" (seed imports it), or
+/// "importer" (it imports the seed).
+fn bfs_neighborhood(
+    seed: &str,
+    depth: usize,
+    edges: &[crate::api::GraphEdge],
+) -> Vec<(String, &'static str)> {
+    use std::collections::{HashMap, VecDeque};
+
+    let mut result: HashMap<String, &'static str> = HashMap::new();
+    result.insert(seed.to_string(), "focus");
+
+    if depth == 0 {
+        return result.into_iter().collect();
+    }
+
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+    queue.push_back((seed.to_string(), 0));
+
+    while let Some((module_id, hops)) = queue.pop_front() {
+        if hops >= depth {
+            continue;
+        }
+        for edge in edges {
+            if edge.source == module_id {
+                if !result.contains_key(&edge.target) {
+                    result.insert(edge.target.clone(), "dependency");
+                    queue.push_back((edge.target.clone(), hops + 1));
+                }
+            }
+            if edge.target == module_id {
+                if !result.contains_key(&edge.source) {
+                    result.insert(edge.source.clone(), "importer");
+                    queue.push_back((edge.source.clone(), hops + 1));
+                }
+            }
+        }
+    }
+
+    result.into_iter().collect()
+}
+
+/// Build a path → "hot"/"stable"/empty label map from raw churn counts.
+fn compute_churn_labels<'a>(
+    churn_map: &std::collections::HashMap<String, usize>,
+    paths: impl Iterator<Item = &'a str>,
+) -> std::collections::HashMap<String, &'static str> {
+    let mut counts: Vec<usize> = paths.map(|p| *churn_map.get(p).unwrap_or(&0)).collect();
+    counts.sort_unstable();
+    let n = counts.len().max(1);
+    let hot_t = counts[n * 3 / 4];
+    let stable_t = counts[n / 4];
+    let max_c = *counts.last().unwrap_or(&0);
+
+    let mut labels = std::collections::HashMap::new();
+    if max_c > 0 && hot_t != stable_t {
+        for (path, &c) in churn_map {
+            if c > hot_t {
+                labels.insert(path.clone(), "hot");
+            } else if stable_t > 0 && c < stable_t {
+                labels.insert(path.clone(), "stable");
+            }
+        }
+    }
+    labels
+}
+
+/// Collect all function/method names that have `#[test]` coverage (same
+/// stripping logic as `annotate_tested` in main.rs).
+fn collect_tested_names<'a>(
+    files: impl Iterator<Item = &'a crate::mapper::MappedFile>,
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let strip = |n: &str| -> String {
+        let base = n.strip_prefix("test_").or_else(|| n.strip_prefix("tests_")).unwrap_or(n);
+        base.trim_end_matches("_works")
+            .trim_end_matches("_fails")
+            .trim_end_matches("_success")
+            .trim_end_matches("_error")
+            .trim_end_matches("_ok")
+            .trim_end_matches("_err")
+            .trim_end_matches("_test")
+            .to_string()
+    };
+    for file in files {
+        for n in &file.inline_test_fns {
+            let b = strip(n);
+            if !b.is_empty() { names.insert(b); }
+        }
+        if crate::api::is_test_path(&file.path) {
+            for sig in &file.signatures {
+                if let Some(n) = &sig.symbol_name {
+                    let b = strip(n);
+                    if !b.is_empty() { names.insert(b); }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Render a single `MappedFile` as a JSON value for the focused/diff skeleton
+/// output, applying body, tested-marker, and churn-label enrichments.
+fn render_mf(
+    mf: &crate::mapper::MappedFile,
+    role: &str,
+    max_sigs: usize,
+    churn_labels: &std::collections::HashMap<String, &'static str>,
+    tested_names: &std::collections::HashSet<String>,
+) -> serde_json::Value {
+    let is_test = crate::api::is_test_path(&mf.path);
+    let sigs: Vec<String> = mf.signatures.iter().take(max_sigs).map(|s| {
+        if let Some(body) = &s.body {
+            let decl = s.raw.trim_end_matches('{').trim_end();
+            format!("{} {{ {} }}", decl, body)
+        } else if !is_test && s.symbol_name.as_deref().map(|n| tested_names.contains(n)).unwrap_or(false) {
+            format!("{} // tested", s.raw)
+        } else {
+            format!("{} // ...", s.raw)
+        }
+    }).collect();
+    serde_json::json!({
+        "path":       mf.path,
+        "role":       role,
+        "heat":       churn_labels.get(&mf.path).copied().unwrap_or(""),
+        "imports":    mf.imports,
+        "signatures": sigs,
+    })
 }
 
 /// Extract the first double-quoted token from a line of code.
