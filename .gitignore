@@ -21,6 +21,7 @@ Thumbs.db
 # Nyx.Navigator generated
 state_key.md
 .ckb/
+navigator_map.xml
 
 # Local Nyx.Navigator config (contains machine-specific paths)
 .navigator/
