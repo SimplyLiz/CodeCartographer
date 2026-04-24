@@ -223,6 +223,8 @@ fn make_sig(
         col_end: ep.column,
         confidence: CONFIDENCE_TS,
         doc_comment: doc,
+        body: None,
+        tested: false,
     }
 }
 
