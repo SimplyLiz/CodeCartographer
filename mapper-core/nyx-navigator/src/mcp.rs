@@ -1483,18 +1483,81 @@ impl McpServer {
                 // Rebuild graph ensures mapped_files is populated
                 let _ = self.api_state.rebuild_graph()?;
                 let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                // Compute churn labels for this render (not stored — files lock is immutable).
+                let churn_map = crate::git_analysis::git_churn(&self.api_state.root_path, 300);
+                let churn_labels: std::collections::HashMap<String, &'static str> = {
+                    let mut counts: Vec<usize> = files.values()
+                        .map(|f| *churn_map.get(&f.path).unwrap_or(&0))
+                        .collect();
+                    counts.sort_unstable();
+                    let n = counts.len().max(1);
+                    let hot_t = counts[n * 3 / 4];
+                    let stable_t = counts[n / 4];
+                    let max_c = *counts.last().unwrap_or(&0);
+                    let mut labels = std::collections::HashMap::new();
+                    if max_c > 0 && hot_t != stable_t {
+                        for f in files.values() {
+                            let c = *churn_map.get(&f.path).unwrap_or(&0);
+                            if c > hot_t {
+                                labels.insert(f.path.clone(), "hot");
+                            } else if stable_t > 0 && c < stable_t {
+                                labels.insert(f.path.clone(), "stable");
+                            }
+                        }
+                    }
+                    labels
+                };
                 let max_sigs = match detail {
                     "minimal"  => 5usize,
                     "extended" => usize::MAX,
                     _          => 20,
                 };
+                let tested_names = {
+                    let mut names = std::collections::HashSet::new();
+                    for mf in files.values() {
+                        if crate::api::is_test_path(&mf.path) {
+                            for s in &mf.signatures {
+                                if let Some(n) = &s.symbol_name {
+                                    let base = n.strip_prefix("test_")
+                                        .or_else(|| n.strip_prefix("tests_"))
+                                        .unwrap_or(n.as_str());
+                                    let base = base
+                                        .trim_end_matches("_works")
+                                        .trim_end_matches("_fails")
+                                        .trim_end_matches("_success")
+                                        .trim_end_matches("_error")
+                                        .trim_end_matches("_ok")
+                                        .trim_end_matches("_err")
+                                        .trim_end_matches("_test");
+                                    if !base.is_empty() { names.insert(base.to_string()); }
+                                }
+                            }
+                        }
+                    }
+                    names
+                };
                 let skeleton: Vec<serde_json::Value> = files.values().map(|mf| {
-                    let sigs: Vec<&str> = mf.signatures.iter()
+                    let is_test = crate::api::is_test_path(&mf.path);
+                    let sigs: Vec<String> = mf.signatures.iter()
                         .take(max_sigs)
-                        .map(|s| s.raw.as_str())
+                        .map(|s| {
+                            if let Some(body) = &s.body {
+                                let decl = s.raw.trim_end_matches('{').trim_end();
+                                format!("{} {{ {} }}", decl, body)
+                            } else if !is_test && s.symbol_name.as_deref()
+                                .map(|n| tested_names.contains(n))
+                                .unwrap_or(false)
+                            {
+                                format!("{} // tested", s.raw)
+                            } else {
+                                format!("{} // ...", s.raw)
+                            }
+                        })
                         .collect();
+                    let heat = churn_labels.get(&mf.path).copied().unwrap_or("");
                     serde_json::json!({
                         "path":       mf.path,
+                        "heat":       heat,
                         "imports":    mf.imports,
                         "signatures": sigs,
                     })

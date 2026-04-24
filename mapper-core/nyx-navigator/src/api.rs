@@ -1038,7 +1038,7 @@ pub fn is_entry_point_path(path: &str) -> bool {
     )
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.contains("_test.")
         || lower.contains(".test.")

@@ -945,7 +945,9 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
     let mut extract_cache: HashMap<String, (u64, MappedFile)> = HashMap::new();
 
     // Initial skeleton map generation
-    let (mapped_files, ignored) = generate_skeleton_map_incremental(root, &mut extract_cache)?;
+    let (mut mapped_files, ignored) = generate_skeleton_map_incremental(root, &mut extract_cache)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
@@ -980,7 +982,9 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                 if relevant {
                     // Regenerate skeleton map (incremental — skips unchanged files)
                     match generate_skeleton_map_incremental(root, &mut extract_cache) {
-                        Ok((files, _)) => {
+                        Ok((mut files, _)) => {
+                            annotate_tested(&mut files);
+                            annotate_churn(&mut files, root);
                             let output = format_map_output(&files, target);
                             let tokens = estimate_tokens(&output);
                             if fs::write(&map_path, &output).is_ok() {
@@ -1026,6 +1030,112 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Feature 2: test-coverage markers
+// ---------------------------------------------------------------------------
+
+/// Marks each non-test-function signature as `tested = true` when a test function
+/// whose name (after stripping a `test_` prefix) matches the symbol name exists.
+///
+/// Sources for test function names:
+/// 1. Separate test files (path matches `is_test_path`).
+/// 2. Inline `#[test]` functions detected during Rust extraction (sig.tested == true
+///    on the test function itself, used here as a two-pass sentinel then cleared).
+fn annotate_tested(files: &mut Vec<MappedFile>) {
+    use std::collections::HashSet;
+
+    // Collect candidate names from test files and inline #[test] functions.
+    let mut tested_names: HashSet<String> = HashSet::new();
+
+    let strip = |n: &str| -> String {
+        let base = n
+            .strip_prefix("test_")
+            .or_else(|| n.strip_prefix("tests_"))
+            .unwrap_or(n);
+        base.trim_end_matches("_works")
+            .trim_end_matches("_fails")
+            .trim_end_matches("_success")
+            .trim_end_matches("_error")
+            .trim_end_matches("_ok")
+            .trim_end_matches("_err")
+            .trim_end_matches("_test")
+            .to_string()
+    };
+
+    for file in files.iter() {
+        // Inline #[test] / #[cfg(test)] names preserved through tree-sitter override.
+        for name in &file.inline_test_fns {
+            let base = strip(name);
+            if !base.is_empty() {
+                tested_names.insert(base);
+            }
+        }
+        // Separate test-file signatures.
+        if crate::api::is_test_path(&file.path) {
+            for sig in &file.signatures {
+                if let Some(name) = &sig.symbol_name {
+                    let base = strip(name);
+                    if !base.is_empty() {
+                        tested_names.insert(base);
+                    }
+                }
+            }
+        }
+    }
+
+    // Mark matching non-test signatures.
+    for file in files.iter_mut() {
+        if crate::api::is_test_path(&file.path) {
+            continue;
+        }
+        for sig in &mut file.signatures {
+            sig.tested = sig
+                .symbol_name
+                .as_deref()
+                .map(|n| tested_names.contains(n))
+                .unwrap_or(false);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 3: churn annotations
+// ---------------------------------------------------------------------------
+
+/// Labels each MappedFile with "hot" (top-quartile commit count) or "stable"
+/// (bottom-quartile) based on git churn over the last 300 commits.
+fn annotate_churn(files: &mut Vec<MappedFile>, root: &Path) {
+    let churn = crate::git_analysis::git_churn(root, 300);
+    if churn.is_empty() {
+        return;
+    }
+
+    let mut counts: Vec<usize> = files
+        .iter()
+        .map(|f| *churn.get(&f.path).unwrap_or(&0))
+        .collect();
+    counts.sort_unstable();
+
+    let n = counts.len();
+    let hot_threshold = counts[n * 3 / 4]; // 75th percentile
+    let stable_threshold = counts[n / 4];   // 25th percentile
+    let max_count = *counts.last().unwrap_or(&0);
+
+    // Only label when there is real spread; flat distributions carry no signal.
+    if max_count == 0 || hot_threshold == stable_threshold {
+        return;
+    }
+
+    for file in files.iter_mut() {
+        let c = *churn.get(&file.path).unwrap_or(&0);
+        if c > hot_threshold {
+            file.churn_label = Some("hot".to_string());
+        } else if stable_threshold > 0 && c < stable_threshold {
+            file.churn_label = Some("stable".to_string());
+        }
+    }
 }
 
 fn generate_skeleton_map(root: &Path) -> Result<(Vec<MappedFile>, Vec<IgnoredFile>)> {
@@ -1153,7 +1263,9 @@ fn overview_mode(
     let project_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
 
     // Map estimate: skeleton extraction
-    let (mapped_files, _) = generate_skeleton_map(root)?;
+    let (mut mapped_files, _) = generate_skeleton_map(root)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let map_output = format_map_output(&mapped_files, target);
     let map_tokens = estimate_tokens(&map_output);
 
@@ -1234,7 +1346,9 @@ fn map_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) ->
     let project = root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
     println!("  Scanning {}...\n", project);
 
-    let (mapped_files, ignored) = generate_skeleton_map(root)?;
+    let (mut mapped_files, ignored) = generate_skeleton_map(root)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
@@ -1323,7 +1437,11 @@ fn format_map_output(files: &[MappedFile], target: OutputTarget) -> String {
 fn format_map_xml(files: &[MappedFile]) -> String {
     let mut out = String::from("<context type=\"skeleton_map\">\n<project_map>\n");
     for file in files {
-        out.push_str(&format!("<file path=\"{}\">\n", escape_xml(&file.path)));
+        let heat_attr = match file.churn_label.as_deref() {
+            Some(label) => format!(" heat=\"{}\"", label),
+            None => String::new(),
+        };
+        out.push_str(&format!("<file path=\"{}\"{}>\n", escape_xml(&file.path), heat_attr));
         out.push_str(&escape_xml(&file.format()));
         out.push_str("</file>\n");
     }
@@ -1335,9 +1453,11 @@ fn format_map_markdown(files: &[MappedFile]) -> String {
     let mut out = String::from("# Project Skeleton Map\n\n");
     for file in files {
         let ext = file.path.rsplit('.').next().unwrap_or("txt");
+        let heat = file.churn_label.as_deref().map(|l| format!("  <!-- {} -->", l)).unwrap_or_default();
         out.push_str(&format!(
-            "## {}\n\n`{}\n{}\n`\n\n",
+            "## {}{}\n\n`{}\n{}\n`\n\n",
             file.path,
+            heat,
             ext,
             file.format()
         ));
