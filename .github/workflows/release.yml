@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: navigator-aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: navigator-x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: navigator-x86_64-unknown-linux-gnu
+
+    defaults:
+      run:
+        working-directory: mapper-core/nyx-navigator
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: llvm-tools-preview
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mapper-core/nyx-navigator/target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('mapper-core/nyx-navigator/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y build-essential
+
+      - name: Build static library
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Localize tree-sitter symbols
+        # Hides ts_* / tree_sitter_* symbols inside libnavigator.a so
+        # consumers that also link tree-sitter (e.g. Go projects using
+        # go-tree-sitter) don't collide at link time. See script header
+        # for rationale and mechanism.
+        run: scripts/localize-tree-sitter-symbols.sh target/${{ matrix.target }}/release/libnavigator.a
+
+      - name: Regenerate header
+        run: cargo install cbindgen --locked 2>/dev/null || true && cbindgen --config cbindgen.toml --output include/navigator.h
+
+      - name: Package library artifact
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ARTIFACT="${{ matrix.artifact }}"
+          STAGING="staging/${ARTIFACT}"
+          mkdir -p "${STAGING}/lib" "${STAGING}/include"
+          cp "target/${{ matrix.target }}/release/libnavigator.a" "${STAGING}/lib/"
+          cp "include/navigator.h" "${STAGING}/include/"
+          tar -czf "${ARTIFACT}.tar.gz" -C staging "${ARTIFACT}"
+
+      - name: Package binary artifact
+        shell: bash
+        run: |
+          BINARY_ARTIFACT="navigator-binary-${{ matrix.artifact }}"
+          mkdir -p "staging-bin/${BINARY_ARTIFACT}"
+          cp "target/${{ matrix.target }}/release/navigator" "staging-bin/${BINARY_ARTIFACT}/"
+          tar -czf "${BINARY_ARTIFACT}.tar.gz" -C staging-bin "${BINARY_ARTIFACT}"
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: mapper-core/nyx-navigator/${{ matrix.artifact }}.tar.gz
+          retention-days: 1
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: navigator-binary-${{ matrix.artifact }}
+          path: mapper-core/nyx-navigator/navigator-binary-${{ matrix.artifact }}.tar.gz
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract changelog entry
+        id: changelog
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Pull the block for this version out of CHANGELOG.md
+          NOTES=$(awk "/^## \[?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${GITHUB_REF_NAME}"
+          fi
+          # Write to file to avoid quoting issues
+          echo "$NOTES" > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nyx.Navigator ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: |
+            artifacts/*.tar.gz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

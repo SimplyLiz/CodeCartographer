@@ -1,0 +1,31 @@
+name: Architecture Health
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write   # required for posting PR comments
+
+jobs:
+  navigator:
+    name: Nyx.Navigator
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history required — health --compare reads the base commit
+          # via git show, so the base SHA must be present locally.
+          fetch-depth: 0
+
+      - uses: anthropics/navigator@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+          # Optional: tighten gates as the codebase matures.
+          # fail-on-cycle: true
+          # fail-on-layer-violation: true
+          # fail-on-regression: true
+          # regression-threshold: 5

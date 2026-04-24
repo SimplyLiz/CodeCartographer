@@ -1,0 +1,103 @@
+name: Nyx.Navigator Architecture Health
+description: >
+  Runs Nyx.Navigator analysis on a pull request: posts a health-delta comment,
+  gates on cycles / layer violations, and uploads a snapshot artifact.
+
+inputs:
+  github-token:
+    description: GitHub token for posting PR comments
+    required: true
+
+  working-directory:
+    description: Repository subdirectory to analyse (default: repo root)
+    required: false
+    default: '.'
+
+  navigator-version:
+    description: >
+      Nyx.Navigator release tag to install (e.g. "v3.0.0"). Use "latest" to
+      always pull the newest release.
+    required: false
+    default: latest
+
+  commits:
+    description: Number of commits to include in hotspot / churn analysis
+    required: false
+    default: '500'
+
+  fail-on-cycle:
+    description: Fail the check if any dependency cycle is detected
+    required: false
+    default: 'false'
+
+  fail-on-layer-violation:
+    description: Fail the check if any layers.toml violation is detected
+    required: false
+    default: 'false'
+
+  fail-on-regression:
+    description: Fail the check when health score regresses beyond the threshold
+    required: false
+    default: 'false'
+
+  regression-threshold:
+    description: >
+      Minimum health-score drop (points) that triggers a failure when
+      fail-on-regression is true
+    required: false
+    default: '5'
+
+  post-comment:
+    description: Post / update a PR comment with the health report
+    required: false
+    default: 'true'
+
+outputs:
+  health-score:
+    description: Current health score (0–100)
+    value: ${{ steps.analysis.outputs.health_score }}
+  health-delta:
+    description: Change in health score vs base branch (negative = regression)
+    value: ${{ steps.analysis.outputs.health_delta }}
+  cycle-count:
+    description: Number of dependency cycles detected
+    value: ${{ steps.analysis.outputs.cycle_count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nyx.Navigator binary
+      shell: bash
+      env:
+        NAVIGATOR_VERSION: ${{ inputs.navigator-version }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "${{ github.action_path }}/scripts/install.sh"
+
+    - name: Run analysis
+      id: analysis
+      shell: bash
+      env:
+        WORKING_DIR: ${{ inputs.working-directory }}
+        COMMITS: ${{ inputs.commits }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.sha }}
+        FAIL_ON_CYCLE: ${{ inputs.fail-on-cycle }}
+        FAIL_ON_LAYER_VIOLATION: ${{ inputs.fail-on-layer-violation }}
+        FAIL_ON_REGRESSION: ${{ inputs.fail-on-regression }}
+        REGRESSION_THRESHOLD: ${{ inputs.regression-threshold }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        POST_COMMENT: ${{ inputs.post-comment }}
+        EVENT_NAME: ${{ github.event_name }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/scripts/run.sh"
+
+    - name: Upload snapshot artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: navigator-snapshot-${{ github.sha }}
+        path: ${{ inputs.working-directory }}/.navigator/snapshots/
+        if-no-files-found: ignore
+        retention-days: 90
