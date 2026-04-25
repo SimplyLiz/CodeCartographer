@@ -137,7 +137,17 @@ navigator query "how does authentication work?"
 navigator serve   # stdio JSON-RPC 2.0 — connects to Claude Code, Cursor, etc.
 ```
 
-Exposes 30+ tools over Model Context Protocol including `get_blast_radius`, `renderArchitecture`, `search_content`, `hotspots`, `cochange`, `semidiff`, `doc_index`, and `query_context`.
+Exposes 40 tools over Model Context Protocol. Skeleton tools:
+
+| Tool | Description |
+|------|-------------|
+| `skeleton_map` | Full project skeleton (all files) |
+| `ranked_skeleton` | Token-budget skeleton ranked by PageRank, optionally personalised to focus files |
+| `focused_skeleton` | Seed file + N import-hops (importers + importees), enriched with churn and test markers |
+| `diff_skeleton` | Files changed between two commits + their immediate importers |
+| `search_skeleton` | Skeleton sections for files matching a keyword — path-first, then symbol names |
+
+Other highlights: `get_blast_radius`, `renderArchitecture`, `search_content`, `semidiff`, `doc_index`, `query_context`, `shotgun_surgery`, `context_health`.
 
 `renderArchitecture` returns Mermaid or DOT directly — IDEs that render Mermaid inline get paste-able diagrams without extra tooling.
 

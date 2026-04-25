@@ -4,7 +4,23 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
-### Added — MCP tool schema: title, annotations, and enum hints
+### Added — `search_skeleton` MCP tool (PR #6)
+
+New `search_skeleton` tool fills the gap between `focused_skeleton` (requires
+a known module ID) and `skeleton_map` (returns everything). Takes a
+case-insensitive `pattern` string, matches it against file paths first then
+symbol names, and returns enriched skeleton sections for hits — same shape as
+`focused_skeleton` with `heat`, `imports`, `signatures`, and churn labels.
+
+Parameters: `pattern` (required), `detail` (minimal/standard/extended, default
+standard), `budget` (token cap, 0 = unlimited). Path matches sort before symbol
+matches within results.
+
+Also fixes a latent panic in `compute_churn_labels` when called on a project
+with zero indexed files: the previous `.max(1)` guard prevented division-by-zero
+but still allowed an out-of-bounds index on the empty counts vec.
+
+### Added — MCP tool schema: title, annotations, and enum hints (PR #5)
 
 `McpTool` now carries two new optional fields that MCP clients and LLM planners
 can consume without calling the tool:
@@ -31,6 +47,32 @@ can consume without calling the tool:
   to `HEAD~1` / `HEAD`.
 - `query_docs`: `model` enum was missing `"gpt35"` vs the other two scoring
   tools.
+
+### Added — `focused_skeleton` and `diff_skeleton` MCP tools (PR #4)
+
+`focused_skeleton` — returns the enriched skeleton for a seed file and every
+file within N import-hops of it (importers + importees). BFS over the
+dependency graph, depth-controlled by the `depth` parameter (default 1).
+Cheaper than `skeleton_map`, more targeted than `ranked_skeleton`.
+
+`diff_skeleton` — returns the enriched skeleton for files changed between two
+commits plus their immediate importers. Defaults to `HEAD~1..HEAD`. Minimal
+context for understanding a diff's blast radius without reading the whole graph.
+
+Both tools enrich each file entry with `heat` (hot/stable from git churn),
+`imports`, and per-symbol `tested` markers derived from `#[test]` coverage.
+
+### Added — skeleton enrichment: type bodies, tested markers, churn labels (PR #3)
+
+Skeleton output now includes:
+- **Type bodies** — enum variants and struct fields are inlined into the
+  skeleton rather than collapsed to `// ...`, making type shapes readable
+  without jumping to source.
+- **Tested markers** — public functions that have a corresponding `#[test]`
+  (matched by stripped name) are annotated `// tested` in skeleton output.
+- **Churn labels** — files in the top quartile of git commit frequency are
+  marked `heat: "hot"`; bottom quartile marked `"stable"`. Derived from the
+  last 300 commits via `git_churn`.
 
 ### Added — function-level call graphs for Rust and Python
 
