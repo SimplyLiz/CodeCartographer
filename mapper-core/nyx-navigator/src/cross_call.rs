@@ -100,28 +100,28 @@ pub fn trace_from_entry(
     }
 
     // Build import adjacency: module_id → [directly imported module_ids].
-    // We derive this from MappedFile.imports: each import string is a path
-    // suffix that we try to match against known module_ids.
+    // We derive this from MappedFile.imports. Rust imports are stored as the
+    // full `use` path (e.g. "crate::mapper::extract_skeleton" or
+    // "crate::scanner::{foo, bar}"). We extract the module name — the first
+    // path component after "crate::" — and match it against file stems.
     let mut import_adj: HashMap<String, Vec<String>> = HashMap::new();
     let module_ids: Vec<&str> = mapped_files.keys().map(|s| s.as_str()).collect();
     for (module_id, mf) in mapped_files {
         let mut direct: Vec<String> = Vec::new();
         for imp in &mf.imports {
-            // imp is typically a module path like "crate::call_graph" or
-            // "call_graph". Find any module_id that ends with the last
-            // component of the import.
-            let tail = imp.split("::").last().unwrap_or(imp.as_str());
-            for &mid in &module_ids {
-                // Match by stem: "call_graph" matches "src/call_graph.rs"
-                let stem = Path::new(mid)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if stem == tail && mid != module_id.as_str() {
-                    direct.push(mid.to_string());
+            if let Some(mod_name) = crate_module_name(imp) {
+                for &mid in &module_ids {
+                    let stem = Path::new(mid)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if stem == mod_name && mid != module_id.as_str() {
+                        direct.push(mid.to_string());
+                    }
                 }
             }
         }
+        direct.sort();
         direct.dedup();
         import_adj.insert(module_id.clone(), direct);
     }
@@ -221,4 +221,35 @@ pub fn trace_from_entry(
         steps,
         unmatched,
     })
+}
+
+/// Extract the module name from a Rust `use` import string.
+///
+/// Rust imports are stored after stripping `use ` and `;`, so they look like:
+///   "crate::call_graph"                          → "call_graph"
+///   "crate::mapper::extract_skeleton"            → "mapper"
+///   "crate::scanner::{is_ignored, is_source}"    → "scanner"
+///   "super::utils"                               → "utils"
+///
+/// Non-crate imports (std::, external crates) return `None` — they can't
+/// resolve to a project module_id.
+fn crate_module_name(imp: &str) -> Option<&str> {
+    let rest = imp
+        .trim()
+        .strip_prefix("crate::")
+        .or_else(|| imp.trim().strip_prefix("super::"))
+        .or_else(|| {
+            // Plain single-component name with no `::` could be a local mod.
+            if !imp.contains("::") && !imp.contains(' ') {
+                Some(imp.trim())
+            } else {
+                None
+            }
+        })?;
+    // Take the first identifier — stop at `::`, `{`, `<`, or whitespace.
+    let end = rest
+        .find(|c: char| c == ':' || c == '{' || c == '<' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    let name = rest[..end].trim();
+    if name.is_empty() { None } else { Some(name) }
 }
