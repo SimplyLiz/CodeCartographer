@@ -30,6 +30,10 @@ pub struct FileCallGraph {
     /// Number of call sites where the callee could not be matched to a
     /// function defined in this file (external, stdlib, or unresolved).
     pub unresolved_count: usize,
+    /// Raw callee names that were not resolved within this file — retained for
+    /// cross-file resolution in `cross_call.rs`. Parallel to `unresolved_count`.
+    /// Each entry is `(caller_qualified, raw_callee_name)`.
+    pub unresolved_calls: Vec<(String, String)>,
     /// Language tag ("rust" / "python") for the project graph we emit.
     pub language: &'static str,
 }
@@ -167,7 +171,7 @@ fn extract_rust(source: &str) -> Result<FileCallGraph, String> {
     // Pass 2 — for each function, walk its body and resolve call sites.
     let resolver = Resolver::new(&functions);
     let mut calls: Vec<(String, String)> = Vec::new();
-    let mut unresolved_count: usize = 0;
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
     collect_rust_calls(
         &tree.root_node(),
@@ -175,13 +179,15 @@ fn extract_rust(source: &str) -> Result<FileCallGraph, String> {
         &mut scope,
         &resolver,
         &mut calls,
-        &mut unresolved_count,
+        &mut unresolved_calls,
     );
 
+    let unresolved_count = unresolved_calls.len();
     Ok(FileCallGraph {
         functions,
         calls,
         unresolved_count,
+        unresolved_calls,
         language: "rust",
     })
 }
@@ -243,7 +249,7 @@ fn collect_rust_calls(
     scope: &mut Vec<String>,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     match node.kind() {
         "impl_item" => {
@@ -290,7 +296,7 @@ fn walk_rust_body(
     caller: &str,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     if node.kind() == "call_expression" {
         let callee_raw = node
@@ -304,7 +310,7 @@ fn walk_rust_body(
                         out.push((caller.to_string(), target));
                     }
                 }
-                None => *unresolved += 1,
+                None => unresolved.push((caller.to_string(), callee_raw)),
             }
         }
     }
@@ -366,7 +372,7 @@ fn extract_python(source: &str) -> Result<FileCallGraph, String> {
 
     let resolver = Resolver::new(&functions);
     let mut calls: Vec<(String, String)> = Vec::new();
-    let mut unresolved_count: usize = 0;
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
     collect_python_calls(
         &tree.root_node(),
@@ -374,13 +380,15 @@ fn extract_python(source: &str) -> Result<FileCallGraph, String> {
         &mut scope,
         &resolver,
         &mut calls,
-        &mut unresolved_count,
+        &mut unresolved_calls,
     );
 
+    let unresolved_count = unresolved_calls.len();
     Ok(FileCallGraph {
         functions,
         calls,
         unresolved_count,
+        unresolved_calls,
         language: "python",
     })
 }
@@ -448,7 +456,7 @@ fn collect_python_calls(
     scope: &mut Vec<String>,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     match node.kind() {
         "class_definition" => {
@@ -501,7 +509,7 @@ fn walk_python_body(
     caller: &str,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     if node.kind() == "call" {
         let callee_raw = node
@@ -515,7 +523,7 @@ fn walk_python_body(
                         out.push((caller.to_string(), target));
                     }
                 }
-                None => *unresolved += 1,
+                None => unresolved.push((caller.to_string(), callee_raw)),
             }
         }
     }
