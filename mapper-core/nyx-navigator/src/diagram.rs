@@ -35,6 +35,12 @@ pub enum DiagramFormat {
     /// Mermaid `classDiagram` — only valid when rendering a `ClassGraph`
     /// via `render_class()`. Not supported by the import-graph `render()`.
     Class,
+    /// Mermaid `quadrantChart` — churn × complexity scatter over the project graph.
+    /// Requires git enrichment; nodes missing either metric are omitted.
+    Quadrant,
+    /// Mermaid `erDiagram` — entity-relationship view over struct/class fields.
+    /// Only valid with `render_er()` on a `ClassGraph`; not for `render()`.
+    Er,
 }
 
 impl DiagramFormat {
@@ -45,6 +51,8 @@ impl DiagramFormat {
             "ascii" | "tree" | "text" => Ok(DiagramFormat::Ascii),
             "sequence" | "seq" => Ok(DiagramFormat::Sequence),
             "class" | "uml" => Ok(DiagramFormat::Class),
+            "quadrant" => Ok(DiagramFormat::Quadrant),
+            "er" | "entity" | "erd" => Ok(DiagramFormat::Er),
             other => Err(format!("unknown diagram format: {other}")),
         }
     }
@@ -496,8 +504,9 @@ pub fn render(graph: &ProjectGraphResponse, opts: &RenderOptions) -> Result<Rend
             &included, &included_set, &node_by_id, graph, &overlays,
             opts.focus, opts.blast_radius, opts.depth,
         ),
-        DiagramFormat::Sequence | DiagramFormat::Class => {
-            return Err("use render_sequence() / render_class() for sequence and class diagrams — render() only handles import graphs".to_string());
+        DiagramFormat::Quadrant => render_quadrant(&included, &node_by_id),
+        DiagramFormat::Sequence | DiagramFormat::Class | DiagramFormat::Er => {
+            return Err("use render_sequence() / render_class() / render_er() for sequence, class, and ER diagrams — render() only handles import graphs".to_string());
         }
     };
 
@@ -1172,7 +1181,82 @@ fn ascii_label(
     format!("{}  ({} {}){}", name, node.signature_count, unit, tag_suffix)
 }
 
-// render_sequence / render_class are only called from the binary (main.rs);
+/// Render a `ProjectGraphResponse` selection as a Mermaid `quadrantChart`.
+///
+/// Each node in `included` that has `churn` data becomes a point. The Y axis uses
+/// `complexity` when populated, falling back to `signature_count` until tree-sitter
+/// cyclomatic complexity extraction is implemented. Coordinates are min-max
+/// normalised to `[0.01, 0.99]`; nodes without churn (no git history) are omitted.
+fn render_quadrant(
+    included: &[String],
+    node_by_id: &HashMap<&str, &crate::api::GraphNode>,
+) -> String {
+    // Collect nodes that have churn data. Complexity falls back to
+    // signature_count when tree-sitter cyclomatic complexity isn't populated —
+    // that field is planned but not yet extracted.
+    let qualifying: Vec<(&crate::api::GraphNode, usize, u32)> = included
+        .iter()
+        .filter_map(|id| {
+            let node = *node_by_id.get(id.as_str())?;
+            let churn = node.churn?;
+            let complexity = node.complexity
+                .unwrap_or(node.signature_count as u32);
+            Some((node, churn, complexity))
+        })
+        .collect();
+
+    let omitted = included.len().saturating_sub(qualifying.len());
+
+    let mut out = String::from("quadrantChart\n");
+    out.push_str("    title Churn vs Complexity\n");
+    out.push_str("    x-axis Low Churn --> High Churn\n");
+    out.push_str("    y-axis Low Complexity --> High Complexity\n");
+    out.push_str("    quadrant-1 Danger zone\n");
+    out.push_str("    quadrant-2 Risky debt\n");
+    out.push_str("    quadrant-3 Stable\n");
+    out.push_str("    quadrant-4 Hotspots\n");
+
+    if qualifying.is_empty() {
+        if omitted > 0 {
+            out.push_str(&format!("%% {} nodes omitted (no churn data — run in a git repo)\n", omitted));
+        }
+        return out;
+    }
+
+    let min_churn = qualifying.iter().map(|(_, c, _)| *c).min().unwrap_or(0) as f64;
+    let max_churn = qualifying.iter().map(|(_, c, _)| *c).max().unwrap_or(1) as f64;
+    let min_cplx = qualifying.iter().map(|(_, _, k)| *k).min().unwrap_or(0) as f64;
+    let max_cplx = qualifying.iter().map(|(_, _, k)| *k).max().unwrap_or(1) as f64;
+
+    let norm = |v: f64, lo: f64, hi: f64| -> f64 {
+        if (hi - lo).abs() < f64::EPSILON {
+            0.5
+        } else {
+            0.01 + (v - lo) / (hi - lo) * 0.98
+        }
+    };
+
+    for (node, churn, complexity) in &qualifying {
+        let x = norm(*churn as f64, min_churn, max_churn);
+        let y = norm(*complexity as f64, min_cplx, max_cplx);
+        // Use the last path component as the label; strip chars that break the
+        // quadrantChart parser (colon is the key-value separator).
+        let label = node.module_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node.module_id)
+            .replace(':', "_");
+        out.push_str(&format!("    {}: [{:.2}, {:.2}]\n", label, x, y));
+    }
+
+    if omitted > 0 {
+        out.push_str(&format!("%% {} nodes omitted (no churn data — run in a git repo)\n", omitted));
+    }
+
+    out
+}
+
+// render_sequence / render_class / render_er are only called from the binary (main.rs);
 // the lib-only analysis treats them as unused. Same situation as diagram_export.rs.
 #[allow(dead_code)]
 /// Render a `FileCallGraph` as a Mermaid `sequenceDiagram`.
@@ -1310,6 +1394,99 @@ pub fn render_class(graph: &crate::class_graph::ClassGraph) -> RenderedDiagram {
         diagram: out,
         truncated: false,
         node_count,
+        included: graph.classes.iter().map(|c| c.name.clone()).collect(),
+    }
+}
+
+#[allow(dead_code)]
+/// Render a `ClassGraph` as a Mermaid `erDiagram`.
+///
+/// Each `ClassNode` becomes an entity. Fields whose stripped type matches another
+/// known class name produce a relationship edge. Cardinality is inferred from the
+/// wrapper: `Vec<T>` → one-to-many, `Option<T>` → zero-or-one, bare `T` →
+/// exactly-one. `Box<T>`, `Arc<T>`, `Rc<T>`, and `&T` are treated as exactly-one.
+pub fn render_er(graph: &crate::class_graph::ClassGraph) -> RenderedDiagram {
+    let class_names: std::collections::HashSet<&str> =
+        graph.classes.iter().map(|c| c.name.as_str()).collect();
+
+    // Strip common single-type wrappers and return (inner_type, mermaid_cardinality).
+    fn strip_wrapper(ty: &str) -> (&str, &'static str) {
+        let ty = ty.trim();
+        for prefix in &["Vec<", "HashSet<", "BTreeSet<", "VecDeque<"] {
+            if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+                return (inner.trim(), "||--o{");
+            }
+        }
+        if let Some(inner) = ty.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+            return (inner.trim(), "||--o|");
+        }
+        for prefix in &["Box<", "Arc<", "Rc<", "Cell<", "RefCell<", "Mutex<"] {
+            if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+                return (inner.trim(), "||--||");
+            }
+        }
+        if let Some(inner) = ty.strip_prefix('&') {
+            return (inner.trim().trim_start_matches("mut "), "||--||");
+        }
+        (ty, "||--||")
+    }
+
+    // Sanitise a name for the erDiagram parser: no spaces, brackets, or colons.
+    let er_id = |s: &str| -> String {
+        s.split('<').next().unwrap_or(s)
+            .replace("::", "_")
+            .replace(['.', '-', ' '], "_")
+    };
+
+    // Sanitise a type annotation for display inside an entity block.
+    // Keep only the outermost type name (strip generics).
+    let er_type = |s: &str| -> String {
+        er_id(s.split('<').next().unwrap_or(s))
+    };
+
+    let mut out = String::from("erDiagram\n");
+
+    // Entity blocks.
+    for cls in &graph.classes {
+        out.push_str(&format!("    {} {{\n", er_id(&cls.name)));
+        for field in &cls.fields {
+            let display_type = er_type(&field.type_annotation);
+            out.push_str(&format!("        {} {}\n", display_type, field.name));
+        }
+        out.push_str("    }\n");
+    }
+
+    // Relationship edges — deduplicated via a HashSet.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rel_count = 0usize;
+    for cls in &graph.classes {
+        for field in &cls.fields {
+            let (bare, cardinality) = strip_wrapper(&field.type_annotation);
+            // One more strip for nested wrappers (e.g. Option<Vec<T>>).
+            let (bare, cardinality) = if cardinality == "||--o|" {
+                let (b2, c2) = strip_wrapper(bare);
+                if c2 == "||--o{" { (b2, c2) } else { (bare, cardinality) }
+            } else {
+                (bare, cardinality)
+            };
+            let bare_id = er_id(bare);
+            if class_names.contains(bare) && bare_id != er_id(&cls.name) {
+                let key = format!("{} {} {}", er_id(&cls.name), cardinality, bare_id);
+                if seen.insert(key) {
+                    out.push_str(&format!(
+                        "    {} {} {} : \"has\"\n",
+                        er_id(&cls.name), cardinality, bare_id
+                    ));
+                    rel_count += 1;
+                }
+            }
+        }
+    }
+
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count: rel_count,
         included: graph.classes.iter().map(|c| c.name.clone()).collect(),
     }
 }

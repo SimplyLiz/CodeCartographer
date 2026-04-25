@@ -2374,6 +2374,8 @@ pub extern "C" fn navigator_render_architecture(
         diagram::DiagramFormat::Ascii => "ascii",
         diagram::DiagramFormat::Sequence => "sequence",
         diagram::DiagramFormat::Class => "class",
+        diagram::DiagramFormat::Quadrant => "quadrant",
+        diagram::DiagramFormat::Er => "er",
     };
 
     let data = serde_json::json!({

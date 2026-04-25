@@ -265,7 +265,7 @@ enum Commands {
     Diagram {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
-        /// Output format: mermaid, dot, or ascii (aliases: tree, text)
+        /// Output format: mermaid, dot, ascii, sequence, class, quadrant, er
         #[arg(long, default_value = "mermaid")]
         format: String,
         /// Write output to file instead of stdout
@@ -2584,11 +2584,15 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
         return;
     }
 
+    // git_churn / git_cochange / git_ownership all return repo-relative paths
+    // (output of `git log --name-only`). node.module_id is also repo-relative
+    // (stripped from root), while node.path is the absolute filesystem path.
+    // Always key on module_id for git lookups.
     let max_raw = graph
         .nodes
         .iter()
         .map(|n| {
-            let c = *churn.get(&n.path).unwrap_or(&0);
+            let c = *churn.get(&n.module_id).unwrap_or(&0);
             c * n.signature_count
         })
         .max()
@@ -2597,7 +2601,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
 
     let mut hotspot_count = 0usize;
     for node in &mut graph.nodes {
-        let c = *churn.get(&node.path).unwrap_or(&0);
+        let c = *churn.get(&node.module_id).unwrap_or(&0);
         node.churn = Some(c);
         let score = ((c * node.signature_count) as f64 / max_raw * 100.0).round();
         node.hotspot_score = Some(score);
@@ -2608,7 +2612,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
     graph.metadata.hotspot_count = Some(hotspot_count);
 
     let known: std::collections::HashSet<&str> =
-        graph.nodes.iter().map(|n| n.path.as_str()).collect();
+        graph.nodes.iter().map(|n| n.module_id.as_str()).collect();
     graph.cochange_pairs = crate::git_analysis::git_cochange(root, 500)
         .into_iter()
         .filter(|p| known.contains(p.file_a.as_str()) && known.contains(p.file_b.as_str()))
@@ -2626,7 +2630,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
         let disp_map: std::collections::HashMap<&str, &crate::git_analysis::CoChangeDispersion> =
             dispersion.iter().map(|d| (d.file.as_str(), d)).collect();
         for node in &mut graph.nodes {
-            if let Some(d) = disp_map.get(node.path.as_str()) {
+            if let Some(d) = disp_map.get(node.module_id.as_str()) {
                 node.cochange_partners = Some(d.partner_count);
                 node.cochange_entropy = Some((d.entropy * 100.0).round() / 100.0);
             }
@@ -2638,7 +2642,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
     let ownership = crate::git_analysis::git_ownership(root, 500);
     if !ownership.is_empty() {
         for node in &mut graph.nodes {
-            if let Some(owner) = ownership.get(&node.path) {
+            if let Some(owner) = ownership.get(&node.module_id) {
                 node.owner = Some(owner.clone());
             }
         }
@@ -3301,6 +3305,35 @@ fn diagram_mode(
             return Ok(());
         }
 
+        // ER diagrams use the same class extractor as class diagrams.
+        if fmt == diagram::DiagramFormat::Er {
+            let cg = class_graph::build_class_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "er diagram not supported for this file type (supported: .rs .py .ts .tsx .go): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_er(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "ER diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "ER diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "ER diagram PNG exported to",
+                    _ => "ER diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "ER diagram: {} entities, {} relationships",
+                cg.classes.len(), rendered.node_count
+            );
+            return Ok(());
+        }
+
         let cg = call_graph::build_file_call_graph(&abs, &source)
             .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(
@@ -3380,15 +3413,15 @@ fn diagram_mode(
 
     let mut graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Git-backed overlays (co-change, owner coloring, hotspot sizing) need
+    let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Git-backed overlays (co-change, owner coloring, hotspot sizing, churn) need
     // the enrichment pass. Skip it when nothing downstream consumes it — the
     // git calls run in ~100ms on a warm repo, but there's no reason to pay
     // the cost for a plain top-N diagram.
-    if cochange_threshold.is_some() || color_by_owner {
+    if cochange_threshold.is_some() || color_by_owner || fmt == diagram::DiagramFormat::Quadrant {
         enrich_with_git(&mut graph, root);
     }
-
-    let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
     let opts = diagram::RenderOptions {
         format: fmt,
         focus,

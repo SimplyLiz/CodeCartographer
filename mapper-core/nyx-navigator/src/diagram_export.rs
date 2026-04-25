@@ -71,8 +71,10 @@ fn convert(
         DiagramFormat::Ascii => Err(
             "ASCII diagrams can't be rendered to .svg/.png — use `--format mermaid` or `--format dot` for image output, or write to a text extension.".to_string(),
         ),
-        // Sequence and class diagrams both emit Mermaid syntax — same converter.
-        DiagramFormat::Sequence | DiagramFormat::Class => export_mermaid(content, target, ext),
+        // Sequence, class, quadrant, and ER diagrams all emit Mermaid syntax — same converter.
+        DiagramFormat::Sequence | DiagramFormat::Class | DiagramFormat::Quadrant | DiagramFormat::Er => {
+            export_mermaid(content, target, ext)
+        }
     }
 }
 

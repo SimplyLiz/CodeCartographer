@@ -165,7 +165,7 @@ pub struct McpServerInfo {
 impl Default for McpServerInfo {
     fn default() -> Self {
         Self {
-            name: "nyx-navigator".to_string(),
+            name: "Project Nyx.Navigator MCP Server".to_string(),
             title: Some("Nyx Navigator".to_string()),
             description: Some(
                 "Code intelligence and architectural analysis server. Provides dependency \
@@ -691,6 +691,7 @@ impl McpServer {
 
             McpTool {
                 name: "search_skeleton".to_string(),
+                title: Some("Search Skeleton".to_string()),
                 description: "Return skeleton sections for files whose path or symbol names \
                               contain the given pattern (case-insensitive substring). Use this \
                               when you know a keyword but not the exact module — cheaper than \
@@ -707,6 +708,7 @@ impl McpServer {
                     },
                     required: vec!["pattern".to_string()],
                 },
+                annotations: read_only!(),
             },
 
             // -----------------------------------------------------------------
