@@ -18,6 +18,7 @@ use rayon::prelude::*;
 mod api;
 mod call_graph;
 mod class_graph;
+mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;

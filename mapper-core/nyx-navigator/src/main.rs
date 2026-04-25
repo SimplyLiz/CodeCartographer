@@ -1,6 +1,7 @@
 mod api;
 mod call_graph;
 mod class_graph;
+mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;
@@ -310,6 +311,12 @@ enum Commands {
         /// defined in the same file. External / stdlib calls are dropped.
         #[arg(long, value_name = "FILE")]
         call_graph: Option<PathBuf>,
+        /// Cross-file sequence trace entry point: FILE::FUNCTION
+        /// (e.g. `src/main.rs::diagram_mode`). Requires `--format sequence`.
+        /// Spike feature — resolution is heuristic; edges marked `(~)` are
+        /// lower-confidence matches.
+        #[arg(long, value_name = "FILE::FUNCTION")]
+        entry: Option<String>,
     },
     /// Generate llms.txt index for this project
     Llmstxt {
@@ -798,6 +805,7 @@ fn main() -> Result<()> {
             group_by_folder,
             color_by_owner,
             call_graph,
+            entry,
         }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
             diagram_mode(
@@ -813,6 +821,7 @@ fn main() -> Result<()> {
                 group_by_folder,
                 color_by_owner,
                 call_graph.as_deref(),
+                entry.as_deref(),
             )
         }
         Some(Commands::Llmstxt { path, output }) => {
@@ -3229,10 +3238,77 @@ fn diagram_mode(
     group_by_folder_depth: Option<usize>,
     color_by_owner: bool,
     call_graph_target: Option<&Path>,
+    entry: Option<&str>,
 ) -> Result<()> {
     use crate::api::ApiState;
     use crate::mapper::extract_skeleton;
     use crate::scanner::{is_ignored_path, is_source_file, scan_files_with_noise_tracking};
+
+    // ── Cross-file sequence trace (spike) ────────────────────────────────────
+    // `--entry FILE::FUNCTION --format sequence` traces call edges across files
+    // using simple-name + import-graph resolution. Requires a full project scan.
+    if let Some(entry_spec) = entry {
+        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+        if fmt != diagram::DiagramFormat::Sequence {
+            anyhow::bail!("--entry requires --format sequence");
+        }
+        let (entry_file, entry_fn) = entry_spec.split_once("::").ok_or_else(|| {
+            anyhow::anyhow!("--entry must be FILE::FUNCTION (e.g. src/main.rs::diagram_mode)")
+        })?;
+        let abs_entry = if Path::new(entry_file).is_absolute() {
+            Path::new(entry_file).to_path_buf()
+        } else {
+            root.join(entry_file)
+        };
+
+        // Build full mapped-file index for symbol resolution.
+        let result = scan_files_with_noise_tracking(root)?;
+        let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+            .files
+            .iter()
+            .filter(|p| !is_ignored_path(p) && is_source_file(p))
+            .filter_map(|p| {
+                let content = std::fs::read_to_string(p).ok()?;
+                let mapped = extract_skeleton(p, &content);
+                let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+                Some((rel, mapped))
+            })
+            .collect();
+
+        let trace = crate::cross_call::trace_from_entry(
+            &abs_entry,
+            entry_fn,
+            &mapped_files,
+            root,
+            depth,
+        ).map_err(|e| anyhow::anyhow!(e))?;
+
+        let rendered = diagram::render_cross_sequence(&trace);
+
+        if let Some(out_path) = output {
+            let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let verb = match kind {
+                diagram_export::ExportKind::Source => "Cross-file sequence written to",
+                diagram_export::ExportKind::MermaidSvg => "Cross-file sequence SVG exported to",
+                diagram_export::ExportKind::MermaidPng => "Cross-file sequence PNG exported to",
+                _ => "Cross-file sequence exported to",
+            };
+            println!("{}: {}", verb, out_path.display());
+        } else {
+            println!("{}", rendered.diagram);
+        }
+        eprintln!(
+            "Cross-file trace: {} modules, {} resolved edges, {} unmatched calls",
+            rendered.node_count,
+            trace.steps.len(),
+            trace.unmatched.len(),
+        );
+        if !trace.unmatched.is_empty() {
+            eprintln!("Unmatched (first 5): {:?}", &trace.unmatched[..trace.unmatched.len().min(5)]);
+        }
+        return Ok(());
+    }
 
     // Call-graph mode is a completely separate code path: we parse a single
     // file, build the function-level graph, and hand it to the same renderer

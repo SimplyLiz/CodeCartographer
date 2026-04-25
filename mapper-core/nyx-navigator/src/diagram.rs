@@ -1310,6 +1310,74 @@ pub fn render_sequence(cg: &crate::call_graph::FileCallGraph) -> RenderedDiagram
 }
 
 #[allow(dead_code)]
+/// Render a `CrossCallTrace` as a Mermaid `sequenceDiagram`.
+///
+/// One participant per unique module. Messages show the callee function name.
+/// Heuristic-matched edges are annotated with `(~)` so reviewers can spot
+/// lower-confidence steps.
+pub fn render_cross_sequence(trace: &crate::cross_call::CrossCallTrace) -> RenderedDiagram {
+    use crate::cross_call::ResolutionKind;
+    use std::collections::LinkedList;
+
+    // Collect participants in first-seen order.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut participants: LinkedList<String> = LinkedList::new();
+    let add = |mid: &str, seen: &mut std::collections::HashSet<String>, p: &mut LinkedList<String>| {
+        if seen.insert(mid.to_string()) { p.push_back(mid.to_string()); }
+    };
+    add(&trace.entry_module, &mut seen, &mut participants);
+    for step in &trace.steps {
+        add(&step.from.0, &mut seen, &mut participants);
+        add(&step.to.0, &mut seen, &mut participants);
+    }
+
+    let mut out = String::from("sequenceDiagram\n");
+
+    // Participant aliases: use the file stem as the display label.
+    for mid in &participants {
+        let label = std::path::Path::new(mid)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(mid);
+        let id = label.replace(['-', '.'], "_");
+        out.push_str(&format!("    participant {} as {}\n", id, label));
+    }
+
+    for step in &trace.steps {
+        let from_label = std::path::Path::new(&step.from.0)
+            .file_stem().and_then(|s| s.to_str()).unwrap_or(&step.from.0);
+        let to_label = std::path::Path::new(&step.to.0)
+            .file_stem().and_then(|s| s.to_str()).unwrap_or(&step.to.0);
+        let from_id = from_label.replace(['-', '.'], "_");
+        let to_id = to_label.replace(['-', '.'], "_");
+        let callee_simple = step.to.1.split("::").last().unwrap_or(&step.to.1);
+        let suffix = if step.confidence == ResolutionKind::Heuristic { " (~)" } else { "" };
+        out.push_str(&format!("    {}->>{}:{}{}\n", from_id, to_id, callee_simple, suffix));
+    }
+
+    if !trace.unmatched.is_empty() {
+        if let Some(first) = participants.front() {
+            let first_label = std::path::Path::new(first)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(first);
+            let first_id = first_label.replace(['-', '.'], "_");
+            out.push_str(&format!(
+                "    Note right of {}: {} calls unresolved (stdlib / external)\n",
+                first_id,
+                trace.unmatched.len()
+            ));
+        }
+    }
+
+    let module_count = seen.len();
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count: module_count,
+        included: seen.into_iter().collect(),
+    }
+}
+
+#[allow(dead_code)]
 /// Render a `ClassGraph` as a Mermaid `classDiagram`.
 ///
 /// Each `ClassNode` becomes a Mermaid class block. Fields and methods carry
@@ -2746,6 +2814,7 @@ mod tests {
             ],
             calls: vec![("Foo::main".into(), "Foo::helper".into())],
             unresolved_count: 2,
+            unresolved_calls: vec![],
             language: "rust",
         };
         let r = render_sequence(&cg);

@@ -261,13 +261,29 @@ fn extract_rust(source: &str, path: &Path) -> TsOutput {
 
     let mut cur = root.walk();
     for child in root.children(&mut cur) {
-        if child.kind() == "use_declaration" {
-            // Strip "use " prefix and trailing ";"
-            let text = node_text(&child, src);
-            let imp = text.trim_start_matches("use ").trim_end_matches(';').trim();
-            if !imp.is_empty() {
-                imports.push(imp.to_string());
+        match child.kind() {
+            "use_declaration" => {
+                // Strip "use " prefix and trailing ";"
+                let text = node_text(&child, src);
+                let imp = text.trim_start_matches("use ").trim_end_matches(';').trim();
+                if !imp.is_empty() {
+                    imports.push(imp.to_string());
+                }
             }
+            "mod_item" => {
+                // `mod foo;` is a direct dependency on `foo.rs` — treat it as
+                // an import so cross-file resolution can recognise it.
+                // `mod foo { ... }` (inline) has a body node; skip those.
+                if child.child_by_field_name("body").is_none() {
+                    if let Some(name) = child.child_by_field_name("name") {
+                        let n = node_text(&name, src);
+                        if !n.is_empty() {
+                            imports.push(n.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
