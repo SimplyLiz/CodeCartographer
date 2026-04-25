@@ -83,6 +83,8 @@ navigator query "how does authentication work?"
 | `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python) |
 | `navigator diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
 | `navigator diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
+| `navigator diagram --format quadrant` | Mermaid `quadrantChart` — churn × complexity scatter (top-right = refactor now) |
+| `navigator diagram --call-graph FILE --format er` | Mermaid `erDiagram` — entity-relationship view inferred from struct fields and type annotations |
 | `navigator diagram --blast-radius MODULE` | Target + direct deps + direct dependents |
 | `navigator diagram --focus FILE [--depth N]` | BFS neighborhood around a module |
 | `navigator diagram --group-by-folder DEPTH` | Collapse graph to folder granularity |
@@ -90,7 +92,7 @@ navigator query "how does authentication work?"
 | `navigator diagram --cochange-threshold N` | Overlay co-change edges |
 | `navigator diagram --docs-only` | Doc-map: Markdown/YAML/TOML/JSON + referenced code |
 
-Sequence and class formats both output Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline get diagrams without extra tooling.
+Sequence, class, quadrant, and ER formats all output Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline get diagrams without extra tooling.
 
 ### Examples — this repo
 
@@ -194,6 +196,52 @@ classDiagram
     MethodDef --> Vis : visibility
 ```
 
+**Quadrant chart — churn × complexity** (`navigator diagram --format quadrant`)
+
+> Bottom-left = stable (leave it). Top-right = danger zone (refactor now). Top-left = risky debt (complex but rarely touched — schedule a refactor). Bottom-right = hotspots (high churn but simple — add tests).
+
+```mermaid
+quadrantChart
+    title Churn vs Complexity
+    x-axis Low Churn --> High Churn
+    y-axis Low Complexity --> High Complexity
+    quadrant-1 Danger zone
+    quadrant-2 Risky debt
+    quadrant-3 Stable
+    quadrant-4 Hotspots
+    api.rs: [0.26, 0.82]
+    main.rs: [0.50, 0.34]
+    mapper.rs: [0.26, 0.49]
+    diagram.rs: [0.26, 0.99]
+    lib.rs: [0.26, 0.60]
+    mcp.rs: [0.99, 0.54]
+    search.rs: [0.01, 0.51]
+    webhooks.rs: [0.01, 0.37]
+```
+
+**ER diagram of `call_graph.rs`** — entity-relationship view of the call-graph data model (`navigator diagram --call-graph src/call_graph.rs --format er`)
+
+```mermaid
+erDiagram
+    FileCallGraph {
+        Vec functions
+        Vec calls
+        usize unresolved_count
+        str language
+    }
+    FunctionInfo {
+        String qualified
+        String simple
+        u32 line
+        str kind
+    }
+    Resolver {
+        HashMap by_qualified
+        HashMap by_simple
+    }
+    FileCallGraph ||--o{ FunctionInfo : "has"
+```
+
 ## Search & File Tools
 
 | Command | Description |
@@ -278,7 +326,7 @@ graph LR
     end
 
     subgraph Rendering["Rendering"]
-        diagram["diagram\nMermaid · DOT · ASCII\nsequence · class"]
+        diagram["diagram\nMermaid · DOT · ASCII\nsequence · class · quadrant · ER"]
         class_graph["class_graph\nUML extraction · Rust/Py/TS/Go"]
         html_export["html_export\ninteractive HTML"]
         diagram_export["diagram_export\nSVG · PNG"]
