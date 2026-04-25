@@ -370,14 +370,16 @@ Full reference in [Diagrams](diagrams.md). Quick summary:
 | Flag | Description |
 |------|-------------|
 | `--format mermaid\|dot\|ascii` | Output format for import graph (default: mermaid) |
+| `--format quadrant` | Churn × complexity scatter — top-right = refactor now |
 | `--format sequence\|seq` | Sequence diagram — requires `--call-graph FILE` (Rust/Python) |
 | `--format class\|uml` | Class diagram — requires `--call-graph FILE` (Rust/Python/TS/Go) |
+| `--format er\|entity\|erd` | ER diagram — requires `--call-graph FILE` (Rust/Python/TS/Go) |
 | `-o FILE` | Write to file; extension determines rendering |
 | `--max-nodes N` | Node cap (default: 60) |
 | `--focus MODULE` | Neighborhood view around a module |
 | `--depth N` | BFS depth for `--focus` (default: 2) |
 | `--blast-radius MODULE` | Epicenter + direct deps + direct dependents |
-| `--call-graph FILE` | File-level analysis: call graph, sequence diagram, or class diagram |
+| `--call-graph FILE` | File-level analysis: call graph, sequence, class, or ER diagram |
 | `--cochange-threshold F` | Overlay co-change edges above this coupling score |
 | `--docs-only` | Show only doc files and their code references |
 | `--group-by-folder DEPTH` | Collapse to folder granularity |

@@ -23,12 +23,14 @@ prints a Mermaid top-60-by-degree view of the current project to stdout.
 | `ascii` (aliases: `tree`, `text`) | Terminals, chat messages, log files | Box-drawing tree rooted at a single node. Cycles break with an `↑ seen` marker so output is bounded. |
 | `sequence` (alias: `seq`) | Understanding call order within a file | Mermaid `sequenceDiagram`. Requires `--call-graph FILE`. |
 | `class` (alias: `uml`) | Onboarding, code review, data-model docs | Mermaid `classDiagram` with typed fields, method signatures, and relationship arrows. Requires `--call-graph FILE`. |
+| `quadrant` | "Where should we refactor?" — visual risk map | Mermaid `quadrantChart` plotting every file on a churn × complexity plane. Automatically triggers git enrichment. No `--call-graph` needed. |
+| `er` (aliases: `entity`, `erd`) | Data-model docs, ORM schemas, API DTOs | Mermaid `erDiagram` with entities and relationships inferred from struct field types. Requires `--call-graph FILE`. |
 
 The format controls the **source** navigator emits. The destination
 (below) controls whether that source gets written as-is, rendered to an
 image, or wrapped in an interactive page.
 
-`sequence` and `class` both emit Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline show the diagram without extra tooling.
+`sequence`, `class`, `quadrant`, and `er` all emit Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline show the diagram without extra tooling.
 
 ---
 
@@ -204,7 +206,7 @@ least-connected first.
 ## File-level analysis (`--call-graph FILE`)
 
 The `--call-graph FILE` flag switches from the project-wide import graph to
-a **single-file analysis** mode. Three formats are available here, each
+a **single-file analysis** mode. Four formats are available here, each
 giving a different view of the same file:
 
 | Format | Output | What it shows |
@@ -212,6 +214,7 @@ giving a different view of the same file:
 | `mermaid` / `dot` / `ascii` | Import-graph-style diagram | Function nodes + call edges in generic graph form |
 | `sequence` | Mermaid `sequenceDiagram` | Call order as a sequence — who calls whom and when |
 | `class` | Mermaid `classDiagram` | Structs, classes, interfaces — typed fields, method signatures, relationships |
+| `er` | Mermaid `erDiagram` | Entities and relationships inferred from struct field types |
 
 Supported languages for `--call-graph`:
 
@@ -220,6 +223,7 @@ Supported languages for `--call-graph`:
 | `mermaid` / `dot` / `ascii` | ✓ | ✓ | | |
 | `sequence` | ✓ | ✓ | | |
 | `class` | ✓ | ✓ | ✓ | ✓ |
+| `er` | ✓ | ✓ | ✓ | ✓ |
 
 ### Call graph (`--format mermaid|dot|ascii`)
 
@@ -312,6 +316,81 @@ Class-diagram mode ignores the import-graph-only options
 (`--cochange-threshold`, `--docs-only`, `--group-by-folder`,
 `--color-by-owner`) rather than erroring.
 
+### Quadrant chart (`--format quadrant`)
+
+Plots every file in the project as a point on a churn × complexity plane.
+No `--call-graph` flag needed — this runs on the full project graph.
+
+```bash
+navigator diagram --format quadrant
+navigator diagram --format quadrant -o hotmap.svg
+```
+
+Quadrant key:
+
+| Quadrant | Churn | Complexity | Action |
+|----------|-------|------------|--------|
+| Top-right (Danger zone) | High | High | Refactor now |
+| Top-left (Risky debt) | Low | High | Schedule a refactor |
+| Bottom-right (Hotspots) | High | Low | Add tests |
+| Bottom-left (Stable) | Low | Low | Leave it |
+
+X axis = churn (commit frequency from git history). Y axis = cyclomatic
+complexity when available, falling back to signature count as a proxy.
+Coordinates are min-max normalised to `[0.01, 0.99]` within the included
+node set, so the axes are always fully used. Nodes with no git history are
+omitted with a count in a comment at the end of the output.
+
+The quadrant chart automatically triggers git enrichment, so `--color-by-owner`
+and `--cochange-threshold` can be combined freely.
+
+```bash
+navigator diagram --format quadrant --max-nodes 30 -o quadrant.svg
+```
+
+### ER diagrams (`--format er`)
+
+Produces a Mermaid `erDiagram` from the struct/class field definitions in a
+single file. Works on the same files as `--format class`.
+
+```bash
+navigator diagram --call-graph src/models.rs --format er
+navigator diagram --call-graph src/models.rs --format er -o models.svg
+```
+
+Relationship detection: for each field whose stripped base type matches
+another struct/class name in the same file, an edge is drawn. Cardinality
+is inferred from the wrapper:
+
+| Wrapper | Mermaid notation | Meaning |
+|---------|-----------------|---------|
+| `Vec<T>`, `HashSet<T>` | `\|\|--o{` | one to many |
+| `Option<T>` | `\|\|--o\|` | zero or one |
+| `Box<T>`, `Arc<T>`, `Rc<T>`, bare `T` | `\|\|--\|\|` | exactly one |
+
+Nested wrappers (`Option<Vec<T>>`) are resolved one level deep. Duplicate
+edges are deduplicated.
+
+```mermaid
+erDiagram
+    FileCallGraph {
+        Vec functions
+        Vec calls
+        usize unresolved_count
+        str language
+    }
+    FunctionInfo {
+        String qualified
+        String simple
+        u32 line
+        str kind
+    }
+    FileCallGraph ||--o{ FunctionInfo : "has"
+```
+
+ER mode ignores the import-graph-only options (`--cochange-threshold`,
+`--docs-only`, `--group-by-folder`, `--color-by-owner`).
+
 ---
 
 ## Recipes
@@ -355,6 +434,18 @@ navigator diagram --call-graph src/services/auth.ts --format class -o auth.svg
 
 # Class diagram of a Go package
 navigator diagram --call-graph internal/storage/repo.go --format class
+
+# Quadrant chart — "where do we refactor?" overview
+navigator diagram --format quadrant
+
+# Quadrant chart as a shareable SVG
+navigator diagram --format quadrant --max-nodes 40 -o quadrant.svg
+
+# ER diagram of a data-model file
+navigator diagram --call-graph src/models.rs --format er
+
+# ER diagram of a TypeScript DTO file
+navigator diagram --call-graph src/types/api.ts --format er -o api-er.svg
 ```
 
 ---
