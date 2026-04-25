@@ -1,0 +1,453 @@
+# CLI Reference
+
+Complete reference for all `navigator` commands and flags.
+
+## Global flags
+
+These flags apply to most commands:
+
+| Flag | Description |
+|------|-------------|
+| `--target TARGET` | Output format: `claude` (default), `cursor`, or `raw` |
+| `--copy` | Also copy output to clipboard |
+| `--ignore FILE` | Additional ignore file(s) to load |
+| `--no-ignore` | Bypass `.navigatorignore` and built-in noise filter |
+| `PATH` | Directory to scan (defaults to current directory) |
+
+## navigator (no subcommand)
+
+```bash
+navigator [PATH] [--target TARGET] [--copy]
+```
+
+Interactive menu. Shows token estimates for each mode and prompts you to pick one.
+
+---
+
+## Context capture
+
+### map
+
+```bash
+navigator map [PATH]
+```
+
+Skeleton map — imports and public signatures only. Writes `navigator_map.xml`.
+
+Approximately 200 tokens per module vs 5,000 for full source. Use this for most tasks.
+
+### source
+
+```bash
+navigator source [PATH]
+```
+
+Full source code. Writes `navigator_source.xml`. Use when you need function bodies.
+
+### copy
+
+```bash
+navigator copy [PATH]
+```
+
+Full source to clipboard only. No disk write. Use for a quick one-off paste.
+
+### context
+
+```bash
+navigator context --focus FILE [--budget TOKENS]
+```
+
+PageRank-ranked skeleton around a seed file, pruned to a token budget.
+
+| Flag | Description |
+|------|-------------|
+| `--focus FILE` | Seed file(s) to center the context on |
+| `--budget TOKENS` | Token budget (default: 8000) |
+
+### query
+
+```bash
+navigator query QUESTION
+```
+
+BM25 search → PageRank → skeleton in one step. Takes a natural-language question and produces ready-to-use context.
+
+### sync
+
+```bash
+navigator sync [PATH]
+```
+
+Incremental update — re-processes only files changed since the last snapshot.
+
+### watch
+
+```bash
+navigator watch [PATH]
+```
+
+Live watcher. Stays running and re-processes changed files on save (debounced 500ms).
+
+---
+
+## Project setup
+
+### init
+
+```bash
+navigator init [PATH]
+```
+
+Initialize a project. Creates `.navigator/config.toml`.
+
+### init-ckb
+
+```bash
+navigator init-ckb [PATH] [--ckb-url URL] [--webhook-url URL]
+```
+
+Initialize with CKB integration. Writes CKB connection settings to `.navigator/config.toml`.
+
+| Flag | Description |
+|------|-------------|
+| `--ckb-url URL` | CKB server URL |
+| `--webhook-url URL` | Webhook endpoint for change notifications |
+
+---
+
+## Architecture analysis
+
+### health
+
+```bash
+navigator health [PATH] [--compare REF] [--json]
+```
+
+Health score 0–100 plus breakdown: cycles, bridges, god modules, layer violations.
+
+| Flag | Description |
+|------|-------------|
+| `--compare REF` | Compare to a git ref (e.g., `main`, `HEAD~1`) |
+| `--json` | Machine-readable JSON output |
+
+### simulate
+
+```bash
+navigator simulate [PATH] [OPTIONS]
+```
+
+Predict architectural impact of a change.
+
+| Flag | Description |
+|------|-------------|
+| `--module MODULE` | Target file (path suffix or full path) |
+| `--new-signature SIG` | Signature to simulate adding |
+| `--remove-signature SIG` | Signature to simulate removing |
+| `--staged` | Analyze all staged git changes |
+| `--diff REF` | Analyze changes relative to a git ref |
+| `--fail-on-cycle` | Exit 1 if simulation would introduce a cycle |
+| `--json` | Machine-readable JSON output |
+
+### check
+
+```bash
+navigator check [PATH]
+```
+
+CI gate. Exits non-zero if any cycle or layer violation exists.
+
+### dead
+
+```bash
+navigator dead [PATH] [--json]
+```
+
+Dead code candidates — files and public symbols with no callers.
+
+### symbols
+
+```bash
+navigator symbols --unreferenced [PATH]
+```
+
+Public symbols with no callers (symbol-level, narrower than `dead`).
+
+### deps
+
+```bash
+navigator deps TARGET [--format json]
+```
+
+Dependency tree of a single module as JSON.
+
+### path
+
+```bash
+navigator path A B
+```
+
+Shortest import path between two modules.
+
+### evolution
+
+```bash
+navigator evolution [PATH] [--days DAYS]
+```
+
+Architectural health trend over the last N days (default 30).
+
+### layers
+
+```bash
+navigator layers [PATH]
+```
+
+Current layer violations against `layers.toml`.
+
+### snapshot
+
+```bash
+navigator snapshot [--diff]
+```
+
+Save or compare architecture snapshots.
+
+---
+
+## Git intelligence
+
+### hotspots
+
+```bash
+navigator hotspots [PATH] [OPTIONS]
+```
+
+High-churn × high-complexity files.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--commits N` | 500 | Commits to analyze |
+| `--top N` | 15 | Results to show |
+| `--untested` | — | Only hotspots without a sibling test file |
+| `--by-author` | — | Show dominant git author |
+| `--bus-factor` | — | Show unique author count |
+| `--json` | — | Machine-readable output |
+
+### cochange
+
+```bash
+navigator cochange [PATH] [OPTIONS]
+```
+
+Files that frequently change together.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--commits N` | 500 | Commits to analyze |
+| `--min-count N` | 5 | Minimum co-change count |
+| `--cluster` | — | Community detection on co-change graph |
+| `--threshold F` | 0.5 | Coupling-score threshold for cluster edges |
+| `--json` | — | Machine-readable output |
+
+### semidiff
+
+```bash
+navigator semidiff COMMIT1 [COMMIT2]
+```
+
+Function-level semantic diff: which public signatures were added, removed, or changed.
+
+### shotgun
+
+```bash
+navigator shotgun [PATH] [OPTIONS]
+```
+
+Shotgun surgery candidates — files whose changes scatter across many unrelated modules.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--commits N` | 500 | Commits to analyze |
+| `--top N` | 20 | Results to show |
+| `--min-partners N` | 3 | Minimum distinct co-change partners |
+
+### todo
+
+```bash
+navigator todo [PATH] [--top N] [--json]
+```
+
+TODO/FIXME/HACK density across source files. Default: top 20.
+
+---
+
+## Search and files
+
+### search
+
+```bash
+navigator search PATTERN [OPTIONS]
+```
+
+Grep-like content search.
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--ignore-case` | `-i` | Case-insensitive |
+| `--invert-match` | `-v` | Lines not matching |
+| `--word-regexp` | `-w` | Whole word only |
+| `--after-context N` | `-A N` | Lines after match |
+| `--before-context N` | `-B N` | Lines before match |
+| `--context N` | `-C N` | Lines before and after |
+| `--glob PATTERN` | | Restrict to glob |
+| `--path DIR` | | Restrict to directory |
+| `--literal` | | Literal string (not regex) |
+
+### find
+
+```bash
+navigator find PATTERN [OPTIONS]
+```
+
+Glob file discovery.
+
+| Flag | Description |
+|------|-------------|
+| `--max-depth N` | Limit traversal depth |
+| `--modified-since DURATION` | Files modified within DURATION (e.g., `24h`, `7d`) |
+| `--min-size SIZE` | Minimum file size (e.g., `10kb`) |
+| `--max-size SIZE` | Maximum file size |
+
+### replace
+
+```bash
+navigator replace PATTERN REPLACEMENT [OPTIONS]
+```
+
+Regex find-and-replace. Supports `$0` (full match), `$1`, `$2` (groups).
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Preview only, no writes |
+| `--literal` | Literal string pattern |
+| `--glob PATTERN` | Restrict to glob |
+| `--exclude-glob PATTERN` | Exclude matching files |
+| `--search-path DIR` | Restrict to directory |
+| `--max-per-file N` | Max replacements per file |
+| `--context-lines N` | Lines of context in dry-run output |
+| `--backup` | Write `.bak` files before replacing |
+
+### extract
+
+```bash
+navigator extract PATTERN [OPTIONS]
+```
+
+Capture-group extraction.
+
+| Flag | Description |
+|------|-------------|
+| `--groups LIST` | Capture group indices (comma-separated) |
+| `--count` | Frequency table mode |
+| `--dedup` | Remove duplicates |
+| `--sort` | Sort alphabetically |
+| `--glob PATTERN` | Restrict to glob |
+| `--search-path DIR` | Restrict to directory |
+| `--limit N` | Maximum results |
+| `--format text\|json\|csv\|tsv` | Output format |
+
+---
+
+## Diagram
+
+```bash
+navigator diagram [PATH] [OPTIONS]
+```
+
+Full reference in [Diagrams](diagrams.md). Quick summary:
+
+| Flag | Description |
+|------|-------------|
+| `--format mermaid\|dot\|ascii` | Output format for import graph (default: mermaid) |
+| `--format sequence\|seq` | Sequence diagram — requires `--call-graph FILE` (Rust/Python) |
+| `--format class\|uml` | Class diagram — requires `--call-graph FILE` (Rust/Python/TS/Go) |
+| `-o FILE` | Write to file; extension determines rendering |
+| `--max-nodes N` | Node cap (default: 60) |
+| `--focus MODULE` | Neighborhood view around a module |
+| `--depth N` | BFS depth for `--focus` (default: 2) |
+| `--blast-radius MODULE` | Epicenter + direct deps + direct dependents |
+| `--call-graph FILE` | File-level analysis: call graph, sequence diagram, or class diagram |
+| `--cochange-threshold F` | Overlay co-change edges above this coupling score |
+| `--docs-only` | Show only doc files and their code references |
+| `--group-by-folder DEPTH` | Collapse to folder granularity |
+| `--color-by-owner` | Node fill by dominant git author |
+
+---
+
+## Context quality
+
+### context-health
+
+```bash
+navigator context-health [FILE] [--model MODEL]
+```
+
+Score a context bundle on six metrics. Grade A–F.
+
+### llmstxt
+
+```bash
+navigator llmstxt [PATH]
+```
+
+Generate `llms.txt` — a structured project index following the LLMs.txt standard.
+
+### claudemd
+
+```bash
+navigator claudemd [PATH]
+```
+
+Generate `CLAUDE.md` — an architecture guide formatted for Claude Code.
+
+---
+
+## Server and config
+
+### serve
+
+```bash
+navigator serve [PATH]
+```
+
+Start the MCP server on stdio (JSON-RPC 2.0). See [MCP Tools](mcp-tools.md).
+
+### config
+
+```bash
+navigator config [--default-target TARGET] [--show]
+```
+
+Manage global configuration.
+
+| Flag | Description |
+|------|-------------|
+| `--default-target TARGET` | Set default output target (`claude`, `cursor`, `raw`) |
+| `--show` | Print current global config |
+
+### status
+
+```bash
+navigator status [PATH]
+```
+
+Project dashboard: file counts, last-sync time, health score summary.
+
+### languages
+
+```bash
+navigator languages [PATH]
+```
+
+Detected programming languages and file counts.

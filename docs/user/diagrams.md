@@ -21,10 +21,14 @@ prints a Mermaid top-60-by-degree view of the current project to stdout.
 | `mermaid` *(default)* | Markdown, MDX, GitHub READMEs, Notion, IDE previews | Renders inline anywhere Mermaid is supported. No external tool needed to read the source. |
 | `dot` (alias: `graphviz`) | Poster-grade static images via Graphviz | Larger graphs render cleaner than Mermaid; lets you pipe to `dot` for SVG/PNG. |
 | `ascii` (aliases: `tree`, `text`) | Terminals, chat messages, log files | Box-drawing tree rooted at a single node. Cycles break with an `↑ seen` marker so output is bounded. |
+| `sequence` (alias: `seq`) | Understanding call order within a file | Mermaid `sequenceDiagram`. Requires `--call-graph FILE`. |
+| `class` (alias: `uml`) | Onboarding, code review, data-model docs | Mermaid `classDiagram` with typed fields, method signatures, and relationship arrows. Requires `--call-graph FILE`. |
 
 The format controls the **source** navigator emits. The destination
 (below) controls whether that source gets written as-is, rendered to an
 image, or wrapped in an interactive page.
+
+`sequence` and `class` both emit Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline show the diagram without extra tooling.
 
 ---
 
@@ -197,10 +201,27 @@ least-connected first.
 
 ---
 
-## Call graphs (`--call-graph FILE`)
+## File-level analysis (`--call-graph FILE`)
 
-Zooms from the module-level import graph down to a **function-level** call
-graph inside a single file. Supported languages: **Rust** and **Python**.
+The `--call-graph FILE` flag switches from the project-wide import graph to
+a **single-file analysis** mode. Three formats are available here, each
+giving a different view of the same file:
+
+| Format | Output | What it shows |
+|--------|--------|---------------|
+| `mermaid` / `dot` / `ascii` | Import-graph-style diagram | Function nodes + call edges in generic graph form |
+| `sequence` | Mermaid `sequenceDiagram` | Call order as a sequence — who calls whom and when |
+| `class` | Mermaid `classDiagram` | Structs, classes, interfaces — typed fields, method signatures, relationships |
+
+Supported languages for `--call-graph`:
+
+| Format | Rust | Python | TypeScript | Go |
+|--------|------|--------|------------|----|
+| `mermaid` / `dot` / `ascii` | ✓ | ✓ | | |
+| `sequence` | ✓ | ✓ | | |
+| `class` | ✓ | ✓ | ✓ | ✓ |
+
+### Call graph (`--format mermaid|dot|ascii`)
 
 ```bash
 navigator diagram --call-graph src/parser.rs --format ascii
@@ -211,17 +232,85 @@ navigator diagram --call-graph src/parser.rs --format ascii
 - Edges are caller → callee relations where the callee resolves to a
   function defined in the same file. Calls into the stdlib or other files
   are dropped.
-- A trailing line reports how many external calls were dropped, so you
-  can tell how much of the file's behaviour lives elsewhere:
+- A trailing line reports how many external calls were dropped:
 
   ```
   Call graph: 24 functions, 54 edges, 229 unresolved external calls
   ```
 
-Call-graph mode ignores the import-graph-only options
+### Sequence diagrams (`--format sequence`)
+
+Shows the call relationships within a file as a Mermaid `sequenceDiagram`.
+Participants are the functions defined in the file (in source order);
+messages are call edges in AST order — a good approximation of execution
+order for top-level flows. Self-calls render as loop arrows. Unresolved
+external calls appear as a note so you can tell how much behaviour lives
+outside the file.
+
+```bash
+navigator diagram --call-graph src/render.rs --format sequence
+navigator diagram --call-graph src/render.rs --format sequence -o calls.svg
+```
+
+```mermaid
+sequenceDiagram
+    participant render
+    participant compute_overlays
+    participant render_mermaid
+    participant render_dot
+    render->>compute_overlays: call
+    render->>render_mermaid: call
+    render->>render_dot: call
+```
+
+### Class diagrams (`--format class`)
+
+Extracts the type structure of a file and renders it as a Mermaid
+`classDiagram`. Useful for onboarding onto an unfamiliar data model, writing
+architecture docs, or reviewing a PR's structural changes at a glance.
+
+```bash
+navigator diagram --call-graph src/models.rs --format class
+navigator diagram --call-graph src/models.rs --format class -o models.svg
+```
+
+What's extracted per language:
+
+**Rust** — `struct` fields (name, type, `pub`/private visibility), `enum`
+variants, `trait` method signatures, `impl` methods attached to their type,
+`impl Trait for Type` arrows (`..|>`).
+
+**Python** — class declarations, base-class inheritance arrows (`--|>`),
+instance fields from `__init__` (including type annotations), method
+signatures (parameters, return type). Name-based visibility: `__` private,
+`_` protected, rest public.
+
+**TypeScript / TSX** — `class` fields with `public`/`private`/`protected`
+modifiers, `extends` inheritance, `implements` interface arrows,
+`interface` declarations with property and method signatures.
+
+**Go** — `struct` fields (uppercase = public, lowercase = private), embedded
+struct inheritance arrows, `interface` method sets, method declarations
+attached to their receiver type.
+
+```mermaid
+classDiagram
+    class Point {
+        +f64 x
+        +f64 y
+        +new(x f64, y f64) Self
+        +distance(other Point) f64
+    }
+    class Shape {
+        <<interface>>
+        +area() f64
+    }
+    Point ..|> Shape
+```
+
+Class-diagram mode ignores the import-graph-only options
 (`--cochange-threshold`, `--docs-only`, `--group-by-folder`,
-`--color-by-owner`) rather than erroring, so you can combine
-`--call-graph` with `--focus`, `--depth`, `--format`, and `-o` freely.
+`--color-by-owner`) rather than erroring.
 
 ---
 
@@ -251,6 +340,21 @@ navigator diagram --call-graph src/parser.rs --format mermaid -o calls.mmd
 
 # Temporal coupling overlay on a focused view
 navigator diagram --focus src/api --cochange-threshold 0.6 -o coupling.svg
+
+# Sequence diagram of a file's internal call flow (paste into a PR for reviewers)
+navigator diagram --call-graph src/handler.rs --format sequence
+
+# Sequence diagram rendered to SVG (requires mmdc)
+navigator diagram --call-graph src/handler.rs --format sequence -o flow.svg
+
+# Class diagram of a data-model file
+navigator diagram --call-graph src/models.rs --format class
+
+# Class diagram of a TypeScript service
+navigator diagram --call-graph src/services/auth.ts --format class -o auth.svg
+
+# Class diagram of a Go package
+navigator diagram --call-graph internal/storage/repo.go --format class
 ```
 
 ---
