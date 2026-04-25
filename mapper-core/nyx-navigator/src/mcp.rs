@@ -29,6 +29,14 @@ macro_rules! mcprop {
         McpProperty {
             type_: $type.to_string(),
             description: $desc.to_string(),
+            enum_: None,
+        }
+    };
+    ($type:literal, $desc:literal, [$($val:literal),+]) => {
+        McpProperty {
+            type_: $type.to_string(),
+            description: $desc.to_string(),
+            enum_: Some(vec![$($val.to_string()),+]),
         }
     };
 }
@@ -47,12 +55,36 @@ macro_rules! mcinput {
     }};
 }
 
+macro_rules! read_only {
+    () => {
+        Some(ToolAnnotations {
+            read_only_hint: Some(true),
+            destructive_hint: None,
+            idempotent_hint: None,
+        })
+    };
+}
+
+macro_rules! destructive {
+    () => {
+        Some(ToolAnnotations {
+            read_only_hint: Some(false),
+            destructive_hint: Some(true),
+            idempotent_hint: None,
+        })
+    };
+}
+
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: String,
     pub input_schema: McpInputSchema,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +100,22 @@ pub struct McpProperty {
     #[serde(rename = "type")]
     pub type_: String,
     pub description: String,
+    #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
+    pub enum_: Option<Vec<String>>,
+}
+
+/// Hints about a tool's behaviour, consumed by MCP clients and LLM planners.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAnnotations {
+    /// true = tool never modifies state (safe to call freely)
+    #[serde(rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    /// true = tool may permanently destroy or overwrite data
+    #[serde(rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// true = repeated calls with the same arguments produce the same result
+    #[serde(rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
 }
 
 /// MCP Resource definition
@@ -106,6 +154,10 @@ pub struct McpCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerInfo {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub version: String,
     pub capabilities: McpCapabilities,
 }
@@ -113,7 +165,14 @@ pub struct McpServerInfo {
 impl Default for McpServerInfo {
     fn default() -> Self {
         Self {
-            name: "Project Nyx.Navigator MCP Server".to_string(),
+            name: "nyx-navigator".to_string(),
+            title: Some("Nyx Navigator".to_string()),
+            description: Some(
+                "Code intelligence and architectural analysis server. Provides dependency \
+                 graph analysis, skeleton views, git intelligence, architectural health \
+                 scoring, and context retrieval for AI-assisted development."
+                    .to_string(),
+            ),
             version: "1.0.0".to_string(),
             capabilities: McpCapabilities {
                 tools: true,
@@ -180,9 +239,13 @@ impl McpServer {
         vec![
             McpTool {
                 name: "get_module_context".to_string(),
-                description:
-                    "Get the public API surface of a specific module with optional dependencies"
-                        .to_string(),
+                title: Some("Get Module Context".to_string()),
+                description: "Returns the public API surface of a module: exports, signatures, and \
+                              imports. Set depth>0 to traverse transitive dependencies. Use \
+                              detail_level=extended for doc comments and inferred types. Prefer \
+                              focused_skeleton for neighbourhood context, or get_symbol_context \
+                              when you need a single symbol."
+                    .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
@@ -191,97 +254,149 @@ impl McpServer {
                             "module_id".to_string(),
                             McpProperty {
                                 type_: "string".to_string(),
-                                description:
-                                    "Unique identifier for the module (file path or module name)"
-                                        .to_string(),
+                                description: "File path or module name (e.g. \"src/api.rs\")"
+                                    .to_string(),
+                                enum_: None,
                             },
                         );
                         props.insert(
                             "depth".to_string(),
                             McpProperty {
                                 type_: "number".to_string(),
-                                description: "Depth of transitive dependencies (0 = module only)"
+                                description: "Transitive dependency depth (0 = this module only, default 0)"
                                     .to_string(),
+                                enum_: None,
                             },
                         );
                         props.insert(
                             "detail_level".to_string(),
-                            mcprop!("string", "Level of detail: minimal, standard, extended"),
+                            mcprop!("string", "Detail level", ["minimal", "standard", "extended"]),
                         );
                         props
                     },
                     required: vec!["module_id".to_string()],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_symbol_context".to_string(),
-                description: "Get context for a specific symbol within a module".to_string(),
-                input_schema: mcinput!(
-                    "module_id" => "string" => "Module containing the symbol",
-                    "symbol_name" => "string" => "Name of the symbol to retrieve",
-                    "detail_level" => "string" => "Level of detail: minimal, standard, extended"
-                ),
+                title: Some("Get Symbol Context".to_string()),
+                description: "Returns the full definition, inferred type, and call-site context for a \
+                              single named symbol inside a module. More targeted than get_module_context \
+                              when you already know which function, struct, or constant you need."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("module_id".to_string(), mcprop!("string", "Module containing the symbol (file path or module name)"));
+                        props.insert("symbol_name".to_string(), mcprop!("string", "Name of the symbol to retrieve"));
+                        props.insert("detail_level".to_string(), mcprop!("string", "Detail level", ["minimal", "standard", "extended"]));
+                        props
+                    },
+                    required: vec!["module_id".to_string(), "symbol_name".to_string()],
+                },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_project_graph".to_string(),
-                description: "Get the full project dependency graph".to_string(),
+                title: Some("Get Project Dependency Graph".to_string()),
+                description: "Returns the complete project import/dependency graph as structured JSON. \
+                              Nodes are modules; edges are import relationships with direction and weight. \
+                              Use skeleton_map or ranked_skeleton for token-efficient structural overviews \
+                              and get_module_context for per-module detail."
+                    .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_dependencies".to_string(),
-                description: "Get direct/transitive dependencies of a module".to_string(),
+                title: Some("Get Module Dependencies".to_string()),
+                description: "Returns the dependency tree rooted at the given module. depth=1 gives \
+                              direct imports only; higher values trace the transitive closure. Each \
+                              node includes a public signature summary."
+                    .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
                         let mut props = HashMap::new();
                         props.insert(
                             "module_id".to_string(),
-                            mcprop!("string", "Module to get dependencies for"),
+                            mcprop!("string", "Module to get dependencies for (file path or module name)"),
                         );
                         props.insert(
                             "depth".to_string(),
-                            mcprop!("number", "Dependency depth (default 1)"),
+                            mcprop!("number", "Dependency depth to traverse (default 1)"),
                         );
                         props
                     },
                     required: vec!["module_id".to_string()],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_dependents".to_string(),
-                description: "Get modules that depend on a given module".to_string(),
+                title: Some("Get Module Dependents".to_string()),
+                description: "Returns all modules that directly import the given module (reverse \
+                              dependency lookup). Run this before changing or removing a public API \
+                              to understand the full breakage scope."
+                    .to_string(),
                 input_schema: mcinput!(
-                    "module_id" => "string" => "Module to get dependents for"
+                    "module_id" => "string" => "Module to get dependents for (file path or module name)"
                 ),
+                annotations: read_only!(),
             },
             McpTool {
                 name: "search_project".to_string(),
-                description: "Search for modules matching a pattern".to_string(),
-                input_schema: mcinput!(
-                    "query" => "string" => "Search pattern",
-                    "query_type" => "string" => "Type: node or edge"
-                ),
+                title: Some("Search Project Graph".to_string()),
+                description: "Searches the project graph by module name or import edge pattern. \
+                              Use query_type=node to match file paths and module names; \
+                              query_type=edge to match import relationships. For full-text search \
+                              inside files, use search_content instead."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("query".to_string(), mcprop!("string", "Search pattern to match against module names or import edges"));
+                        props.insert("query_type".to_string(), mcprop!("string", "Search domain: node (module names/paths) or edge (import relationships)", ["node", "edge"]));
+                        props
+                    },
+                    required: vec!["query".to_string()],
+                },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_blast_radius".to_string(),
-                description: "Get files and symbols affected by changing a target module. \
-                              Each related entry includes lip_uris — the LIP symbol URIs \
-                              (lip://local/<path>#<symbol>) of public symbols in that file — \
-                              so CKB can drill into any affected symbol without a second lookup."
+                title: Some("Get Blast Radius".to_string()),
+                description: "Returns all files and symbols transitively reachable from the target — \
+                              the full impact set for a proposed change. Each related entry includes \
+                              lip_uris (LIP symbol URIs: lip://local/<path>#<symbol>) so CKB can \
+                              resolve any affected symbol without a follow-up lookup."
                     .to_string(),
-                input_schema: mcinput!(
-                    "target" => "string" => "File path or symbol name",
-                    "max_related" => "number" => "Maximum related items (default 10)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("target".to_string(), mcprop!("string", "File path or symbol name to analyse"));
+                        props.insert("max_related".to_string(), mcprop!("number", "Maximum related items to return (default 10)"));
+                        props
+                    },
+                    required: vec!["target".to_string()],
+                },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_evolution".to_string(),
-                description: "Get architectural health trend, debt indicators, and recommendations. \
-                              Useful for understanding how code quality is trending."
+                title: Some("Get Architectural Evolution".to_string()),
+                description: "Returns the architectural health trend over a configurable time window: \
+                              health score trajectory, per-indicator deltas (cycles added/removed, \
+                              god-module growth, new layer violations), and actionable recommendations. \
+                              Increase days to widen the look-back period."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -295,30 +410,53 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "watch_status".to_string(),
-                description: "Check whether files changed since the last `navigator watch` \
-                              cycle. Returns { lastChangedMs, changedFiles } or \
-                              { watching: false } if watch is not running."
+                title: Some("Watch Status".to_string()),
+                description: "Polls the background watch daemon for recent file changes. Returns \
+                              { lastChangedMs, changedFiles } when the daemon is active, or \
+                              { watching: false } when it is not running. Prefer poll_changes for \
+                              timestamp-based queries that work without the watch daemon."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "set_compression_level".to_string(),
-                description: "Configure compression level for responses".to_string(),
-                input_schema: mcinput!(
-                    "level" => "string" => "Compression level: minimal, standard, aggressive"
-                ),
+                title: Some("Set Compression Level".to_string()),
+                description: "Configures how aggressively responses are compressed for the remainder \
+                              of this session. minimal preserves full detail; standard collapses \
+                              boilerplate; aggressive maximises token savings at the cost of some \
+                              fidelity. Affects all subsequent tool responses."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("level".to_string(), mcprop!("string", "Compression level", ["minimal", "standard", "aggressive"]));
+                        props
+                    },
+                    required: vec!["level".to_string()],
+                },
+                annotations: Some(ToolAnnotations {
+                    read_only_hint: Some(false),
+                    destructive_hint: None,
+                    idempotent_hint: Some(true),
+                }),
             },
             McpTool {
                 name: "find_files".to_string(),
-                description: "Find files matching a glob pattern (like find). Returns path, \
-                              language, and size. Use instead of find/ls tool calls."
+                title: Some("Find Files".to_string()),
+                description: "Finds files whose path matches a glob pattern and returns path, language, \
+                              and byte size for each match. Patterns without a path separator match the \
+                              filename anywhere in the tree. Use instead of shell find or ls. For \
+                              content search, use search_content."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -336,12 +474,15 @@ impl McpServer {
                     },
                     required: vec!["pattern".to_string()],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "search_content".to_string(),
-                description: "Search for text or regex patterns across project files (like grep). \
-                              Returns matching lines with optional context. Use this instead of \
-                              grep/find tool calls."
+                title: Some("Search File Content".to_string()),
+                description: "Searches file content for a regex or literal pattern (ripgrep-style) \
+                              and returns matching lines with optional surrounding context. Restrict \
+                              scope with fileGlob. Use instead of shell grep calls. For searches \
+                              scoped to a function body, use search_in_symbol."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -375,6 +516,7 @@ impl McpServer {
                     },
                     required: vec!["pattern".to_string()],
                 },
+                annotations: read_only!(),
             },
 
             // -----------------------------------------------------------------
@@ -382,53 +524,70 @@ impl McpServer {
             // -----------------------------------------------------------------
             McpTool {
                 name: "get_health".to_string(),
-                description: "Return the architectural health score and summary counts (cycles, \
-                              bridges, god modules, layer violations)."
+                title: Some("Get Architectural Health".to_string()),
+                description: "Returns the overall architectural health score (0–100) and summary \
+                              counts: dependency cycles, bridge modules, god modules, and layer \
+                              violations. Use get_cycles or check_layers to drill into specific \
+                              issue categories."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "get_cycles".to_string(),
-                description: "Return all circular dependency cycles with severity and a suggested \
-                              pivot node to break each cycle."
+                title: Some("Get Dependency Cycles".to_string()),
+                description: "Returns all circular dependency cycles in the project graph, each with \
+                              a severity rating and a suggested pivot node to break the cycle. Call \
+                              get_health first for a quick count; use this tool when you need \
+                              actionable cycle-breaking details."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "check_layers".to_string(),
-                description: "Check the project against its layers.toml architectural layer \
-                              config. Returns violations with source/target layer and severity."
+                title: Some("Check Layer Constraints".to_string()),
+                description: "Validates the project against its layers.toml architectural layer \
+                              config. Returns each violation with source module, target module, \
+                              the layers involved, and severity. Reports no violations if \
+                              layers.toml is absent."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "unreferenced_symbols".to_string(),
-                description: "Return public symbols that appear unreferenced across the project \
-                              (dead-code candidates). Heuristic — does not account for dynamic \
-                              dispatch or external consumers."
+                title: Some("Find Unreferenced Symbols".to_string()),
+                description: "Lists public symbols that appear unreferenced anywhere in the project — \
+                              dead-code candidates. Heuristic: does not account for dynamic dispatch, \
+                              reflection, or external consumers outside the mapped scope."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "simulate_change".to_string(),
-                description: "Predict the architectural impact of changing a module: affected \
-                              modules, cycle risk, layer violations, and health delta."
+                title: Some("Simulate Module Change".to_string()),
+                description: "Predicts the architectural impact of modifying a module without writing \
+                              any code: affected module set, cycle risk introduced, new layer \
+                              violations, and the projected health score delta. Optionally specify a \
+                              signature being added or removed for more precise impact modelling."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -441,6 +600,7 @@ impl McpServer {
                     },
                     required: vec!["module_id".to_string()],
                 },
+                annotations: read_only!(),
             },
 
             // -----------------------------------------------------------------
@@ -448,44 +608,51 @@ impl McpServer {
             // -----------------------------------------------------------------
             McpTool {
                 name: "skeleton_map".to_string(),
-                description: "Return a compressed skeleton of every project file: imports and \
-                              public signatures only. Ideal for giving a model a full structural \
-                              overview within a token budget."
+                title: Some("Get Skeleton Map".to_string()),
+                description: "Returns a compressed structural overview of every project file: imports \
+                              and public signatures only, no bodies. Ideal for a full project overview \
+                              within a tight token budget. Use ranked_skeleton for relevance-ordered \
+                              output, or focused_skeleton when working in a specific area."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
                         let mut props = HashMap::new();
-                        props.insert("detail".to_string(), mcprop!("string", "Detail level: minimal, standard, or extended (default standard)"));
+                        props.insert("detail".to_string(), mcprop!("string", "Detail level", ["minimal", "standard", "extended"]));
                         props
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "ranked_skeleton".to_string(),
-                description: "Return a token-budget-aware skeleton ranked by PageRank. Optionally \
-                              personalise to a set of focus files so the most relevant modules \
-                              surface first."
+                title: Some("Get Ranked Skeleton".to_string()),
+                description: "Returns a token-budget-aware skeleton of project files ordered by \
+                              PageRank importance. Optionally personalise to a set of focus files so \
+                              the most relevant modules surface first. The preferred starting point \
+                              for broad architectural questions."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
                         let mut props = HashMap::new();
-                        props.insert("focus".to_string(), mcprop!("string", "JSON array of focus file paths for personalization, e.g. [\"src/api.rs\"]"));
+                        props.insert("focus".to_string(), mcprop!("string", "JSON array of focus file paths for personalisation, e.g. [\"src/api.rs\"]"));
                         props.insert("budget".to_string(), mcprop!("number", "Max tokens to include (0 = unlimited)"));
                         props
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
 
             McpTool {
                 name: "focused_skeleton".to_string(),
-                description: "Return the enriched skeleton for a file and all files within N \
-                              import-hops of it (both importers and importees). Use this instead \
-                              of skeleton_map when you are already working in a specific area \
-                              and want neighbourhood context without the full project."
+                title: Some("Get Focused Skeleton".to_string()),
+                description: "Returns the enriched skeleton for a focus file and all files within N \
+                              import-hops of it — both importers and importees. Use this instead of \
+                              skeleton_map when working in a specific area and needing neighbourhood \
+                              context without the full project. depth=1 is usually sufficient."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -493,29 +660,33 @@ impl McpServer {
                         let mut props = HashMap::new();
                         props.insert("focus".to_string(), mcprop!("string", "File path or module ID to centre on, e.g. \"src/api.rs\""));
                         props.insert("depth".to_string(), mcprop!("number", "Import-hop radius (default 1). 0 = focus file only, 2 = two hops out."));
-                        props.insert("detail".to_string(), mcprop!("string", "Detail level: minimal, standard, or extended (default standard)"));
+                        props.insert("detail".to_string(), mcprop!("string", "Detail level", ["minimal", "standard", "extended"]));
                         props
                     },
                     required: vec!["focus".to_string()],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "diff_skeleton".to_string(),
-                description: "Return the enriched skeleton for files changed between two commits \
-                              plus their immediate importers — the minimal context needed to \
-                              understand a diff's blast radius. Defaults to HEAD~1..HEAD."
+                title: Some("Get Diff Skeleton".to_string()),
+                description: "Returns the enriched skeleton for files changed between two commits plus \
+                              their immediate importers — the minimal structural context needed to \
+                              understand a diff's blast radius. Defaults to HEAD~1..HEAD. Pass from/to \
+                              to target specific commits or refs."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
                         let mut props = HashMap::new();
-                        props.insert("from".to_string(), mcprop!("string", "Base commit (default HEAD~1)"));
-                        props.insert("to".to_string(), mcprop!("string", "Target commit (default HEAD)"));
+                        props.insert("from".to_string(), mcprop!("string", "Base commit or ref (default HEAD~1)"));
+                        props.insert("to".to_string(), mcprop!("string", "Target commit or ref (default HEAD)"));
                         props.insert("include_importers".to_string(), mcprop!("boolean", "Also include files that import the changed files (default true)"));
                         props
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
 
             // -----------------------------------------------------------------
@@ -523,8 +694,11 @@ impl McpServer {
             // -----------------------------------------------------------------
             McpTool {
                 name: "git_churn".to_string(),
-                description: "Return per-file commit counts over recent git history. High-churn \
-                              files are hotspot candidates."
+                title: Some("Get Git Churn".to_string()),
+                description: "Returns per-file commit frequency over recent git history, sorted by \
+                              churn count. High-churn files are hotspot candidates likely to need \
+                              refactoring or extra test coverage. Pair with shotgun_surgery to \
+                              identify churn driven by scattered cross-module changes."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -535,12 +709,15 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "git_cochange".to_string(),
-                description: "Return file pairs that frequently change together (temporal \
-                              coupling). High coupling score = files that almost always change \
-                              in the same commit."
+                title: Some("Get Git Co-Change".to_string()),
+                description: "Returns pairs of files that frequently change in the same commit, ranked \
+                              by coupling score. A high score indicates implicit structural coupling \
+                              even without an import edge. Use hidden_coupling to filter to pairs \
+                              with no static import edge."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -552,11 +729,15 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "hidden_coupling".to_string(),
-                description: "Return file pairs that co-change frequently but have NO import \
-                              edge — implicit coupling invisible in the static graph."
+                title: Some("Find Hidden Coupling".to_string()),
+                description: "Returns file pairs that co-change frequently in git history but share \
+                              no import edge — implicit coupling invisible in the static graph. These \
+                              pairs are candidates for extracting shared logic or making the \
+                              dependency explicit."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -568,21 +749,35 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "semidiff".to_string(),
-                description: "Return a function-level semantic diff between two commits: which \
-                              public signatures were added, removed, or changed."
+                title: Some("Semantic Diff".to_string()),
+                description: "Returns a function-level semantic diff between two commits: which \
+                              public signatures were added, removed, or changed. More informative \
+                              than a raw git diff for understanding API-level impact. commit1 \
+                              defaults to HEAD~1; commit2 defaults to HEAD."
                     .to_string(),
-                input_schema: mcinput!(
-                    "commit1" => "string" => "Base commit SHA or ref (e.g. HEAD~1)",
-                    "commit2" => "string" => "Target commit SHA or ref (default HEAD)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("commit1".to_string(), mcprop!("string", "Base commit SHA or ref (default HEAD~1)"));
+                        props.insert("commit2".to_string(), mcprop!("string", "Target commit SHA or ref (default HEAD)"));
+                        props
+                    },
+                    required: vec![],
+                },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "poll_changes".to_string(),
-                description: "Return project files modified since a given epoch-millisecond \
-                              timestamp. Use 0 to get files changed in the last 60 seconds."
+                title: Some("Poll File Changes".to_string()),
+                description: "Returns project files modified since a given epoch-millisecond \
+                              timestamp. Pass since_ms=0 to retrieve files changed in the last \
+                              60 seconds. Useful for building incremental update loops independent \
+                              of the watch daemon."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -593,6 +788,7 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
 
             // -----------------------------------------------------------------
@@ -600,9 +796,11 @@ impl McpServer {
             // -----------------------------------------------------------------
             McpTool {
                 name: "replace_content".to_string(),
-                description: "Find-and-replace across project files (sed-like). Supports regex \
-                              with $1/$2 capture group references. Use dry_run=true to preview \
-                              changes as a diff before writing."
+                title: Some("Replace File Content".to_string()),
+                description: "Performs find-and-replace across project files using a regex or literal \
+                              pattern. Supports $0 (whole match) and $1/$2 capture-group references in \
+                              the replacement string. Always use dryRun=true first to preview changes \
+                              as a unified diff before writing."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -610,7 +808,7 @@ impl McpServer {
                         let mut props = HashMap::new();
                         props.insert("pattern".to_string(), mcprop!("string", "Regex pattern to search for"));
                         props.insert("replacement".to_string(), mcprop!("string", "Replacement string; supports $0 (whole match) and $1/$2 (capture groups)"));
-                        props.insert("dryRun".to_string(), mcprop!("boolean", "Preview changes without writing to disk (default false)"));
+                        props.insert("dryRun".to_string(), mcprop!("boolean", "Preview changes as a unified diff without writing to disk (default false)"));
                         props.insert("literal".to_string(), mcprop!("boolean", "Treat pattern as a literal string (default false)"));
                         props.insert("caseSensitive".to_string(), mcprop!("boolean", "Case-sensitive matching (default true)"));
                         props.insert("fileGlob".to_string(), mcprop!("string", "Restrict to files matching this glob, e.g. \"*.rs\""));
@@ -622,12 +820,15 @@ impl McpServer {
                     },
                     required: vec!["pattern".to_string(), "replacement".to_string()],
                 },
+                annotations: destructive!(),
             },
             McpTool {
                 name: "extract_content".to_string(),
-                description: "Extract capture-group values from regex matches across project \
-                              files (awk-like). Use count=true for frequency tables, \
-                              groups=[1,2] for specific capture groups."
+                title: Some("Extract Pattern Matches".to_string()),
+                description: "Extracts regex capture-group values from matching lines across project \
+                              files. Use count=true for a frequency table, groups=[1,2] to isolate \
+                              specific capture groups, and dedup=true to unique the output. Useful \
+                              for auditing patterns like all pub fn names, TODO owners, or import paths."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -646,18 +847,20 @@ impl McpServer {
                     },
                     required: vec!["pattern".to_string()],
                 },
+                annotations: read_only!(),
             },
             // PKG retrieval — full query → rank → score pipeline
             // -----------------------------------------------------------------
             McpTool {
                 name: "query_context".to_string(),
-                description: "Full retrieval pipeline for code-question context injection. \
-                              Given a natural-language query or symbol name: (1) searches \
-                              the codebase for matching files, (2) uses PageRank personalised \
-                              to those files to build a token-budget-aware skeleton, \
-                              (3) scores the bundle with context_health. Returns the ready-to-inject \
-                              context string plus health metadata. Use this instead of calling \
-                              search_content + ranked_skeleton + context_health separately."
+                title: Some("Query Context".to_string()),
+                description: "Full retrieval pipeline for code-question context injection. Given a \
+                              natural-language query or symbol name: (1) searches the codebase for \
+                              matching files, (2) uses PageRank personalised to those files to build \
+                              a token-budget-aware skeleton, (3) scores the bundle with context_health. \
+                              Returns the ready-to-inject context string plus health metadata. Use this \
+                              instead of calling search_content + ranked_skeleton + context_health \
+                              separately."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -665,20 +868,22 @@ impl McpServer {
                         let mut props = HashMap::new();
                         props.insert("query".to_string(), mcprop!("string", "Natural language question or symbol/pattern to search for"));
                         props.insert("budget".to_string(), mcprop!("number", "Max tokens for the skeleton portion (default: 8000)"));
-                        props.insert("model".to_string(), mcprop!("string", "Target model family for health scoring: claude (default), gpt4, llama, gpt35"));
+                        props.insert("model".to_string(), mcprop!("string", "Target model family for health scoring", ["claude", "gpt4", "llama", "gpt35"]));
                         props.insert("maxSearchResults".to_string(), mcprop!("number", "Max search hits used as focus seeds (default: 20)"));
                         props
                     },
                     required: vec!["query".to_string()],
                 },
+                annotations: read_only!(),
             },
             // Shotgun surgery / co-change dispersion
             // -----------------------------------------------------------------
             McpTool {
                 name: "shotgun_surgery".to_string(),
-                description: "Detect shotgun surgery candidates — files whose changes scatter \
-                              across many unrelated modules. Computes co-change dispersion \
-                              (arXiv:2504.18511): partner count and Shannon entropy over the \
+                title: Some("Detect Shotgun Surgery".to_string()),
+                description: "Identifies files whose changes scatter widely across unrelated modules — \
+                              a classic shotgun surgery smell. Computes co-change dispersion \
+                              (arXiv:2504.18511): partner count and Shannon entropy over each file's \
                               co-change distribution. High entropy + many partners means a single \
                               change forces edits in many unrelated places."
                     .to_string(),
@@ -693,24 +898,25 @@ impl McpServer {
                     },
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             // Context quality
             // -----------------------------------------------------------------
             McpTool {
                 name: "context_health".to_string(),
-                description: "Analyse the quality of an LLM context bundle. Returns a \
-                              composite health score (0–100, graded A–F) plus per-metric \
-                              breakdown: signal density, compression density, position health, \
-                              entity density, utilisation headroom, and dedup ratio. Warnings \
-                              and recommendations are included when thresholds are breached. \
-                              Pair with ranked_skeleton to produce high-scoring context bundles."
+                title: Some("Score Context Health".to_string()),
+                description: "Scores an LLM context bundle on a 0–100 scale (A–F grade) with a \
+                              per-metric breakdown: signal density, compression density, position \
+                              health, entity density, utilisation headroom, and dedup ratio. Warnings \
+                              and recommendations are included when thresholds are breached. Pair with \
+                              ranked_skeleton to iteratively build high-scoring context bundles."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: {
                         let mut props = HashMap::new();
                         props.insert("content".to_string(), mcprop!("string", "The context text to score (e.g. a ranked_skeleton output)"));
-                        props.insert("model".to_string(), mcprop!("string", "Target model family: claude (default, 200K), gpt4 (128K), llama (128K), gpt35 (16K)"));
+                        props.insert("model".to_string(), mcprop!("string", "Target model family", ["claude", "gpt4", "llama", "gpt35"]));
                         props.insert("windowSize".to_string(), mcprop!("number", "Override context window size in tokens (0 = use model default)"));
                         props.insert("signatureCount".to_string(), mcprop!("number", "Number of symbol signatures in the content (improves entity density scoring)"));
                         props.insert("signatureTokens".to_string(), mcprop!("number", "Tokens occupied by signature text (improves signal density scoring)"));
@@ -719,16 +925,18 @@ impl McpServer {
                     },
                     required: vec!["content".to_string()],
                 },
+                annotations: read_only!(),
             },
             // -----------------------------------------------------------------
             // Symbol-scoped search
             // -----------------------------------------------------------------
             McpTool {
                 name: "search_in_symbol".to_string(),
-                description: "Search for a pattern scoped to the body of a named function or \
-                              method. Returns only matches within that symbol's approximate line \
-                              range, filtering out occurrences elsewhere in the file. Useful for \
-                              \"find X only inside handleKeyMsg()\" without wading through \
+                title: Some("Search Within Symbol".to_string()),
+                description: "Searches for a pattern scoped to the body of a named function or \
+                              method, filtering out matches elsewhere in the file. Returns only \
+                              lines within that symbol's approximate body range. Useful for queries \
+                              like \"find X only inside handleKeyMsg()\" without wading through \
                               whole-file grep results."
                     .to_string(),
                 input_schema: {
@@ -743,16 +951,18 @@ impl McpServer {
                         required: vec!["file".to_string(), "symbol".to_string(), "pattern".to_string()],
                     }
                 },
+                annotations: read_only!(),
             },
             // -----------------------------------------------------------------
             // TUI key-binding map
             // -----------------------------------------------------------------
             McpTool {
                 name: "list_key_handlers".to_string(),
-                description: "Extract a structured key-binding map from a TUI source file. \
-                              Groups all `case \"key\":` and `== \"key\"` patterns by key string \
-                              with surrounding context. Works for Go/Bubble Tea, Rust/crossterm, \
-                              and any framework using quoted key strings."
+                title: Some("List Key Handlers".to_string()),
+                description: "Extracts a structured key-binding map from a TUI source file. Groups \
+                              all `case \"key\":` and `== \"key\"` patterns by key string with \
+                              surrounding context. Works for Go/Bubble Tea, Rust/crossterm, and any \
+                              framework using quoted key strings in match arms or if-chains."
                     .to_string(),
                 input_schema: {
                     let mut props = HashMap::new();
@@ -764,17 +974,19 @@ impl McpServer {
                         required: vec!["file".to_string()],
                     }
                 },
+                annotations: read_only!(),
             },
             // -----------------------------------------------------------------
             // State-machine mapper
             // -----------------------------------------------------------------
             McpTool {
                 name: "map_state_machine".to_string(),
-                description: "Correlate state guards with nearby key handlers to produce a \
-                              state × handlers matrix. Given a state variable name and enum \
-                              prefix, returns which keys are handled in each state with guard \
-                              line numbers. Ideal for large TUI files with switch-on-state \
-                              dispatch (e.g. Bubble Tea chatview)."
+                title: Some("Map State Machine".to_string()),
+                description: "Correlates state guards with nearby key handlers to produce a \
+                              state × handlers matrix. Given a state variable name and enum prefix, \
+                              returns which keys are active in each state with guard line numbers. \
+                              Ideal for large TUI files with switch-on-state dispatch such as \
+                              Bubble Tea chatview."
                     .to_string(),
                 input_schema: {
                     let mut props = HashMap::new();
@@ -788,17 +1000,19 @@ impl McpServer {
                         required: vec!["file".to_string()],
                     }
                 },
+                annotations: read_only!(),
             },
             // -----------------------------------------------------------------
             // Incremental graph push events
             // -----------------------------------------------------------------
             McpTool {
                 name: "watch_graph".to_string(),
-                description: "Watch a directory for source file changes and emit incremental \
-                              graph events as newline-delimited JSON to stdout. Each event \
-                              includes the kind (file_reindexed or graph_updated), the file \
-                              path, and a millisecond timestamp. Runs until timeout_secs \
-                              elapses (default 30, max 300)."
+                title: Some("Watch Graph".to_string()),
+                description: "Watches a directory recursively for source file changes and emits \
+                              incremental graph events as newline-delimited JSON to stdout. Each \
+                              event includes kind (file_reindexed or graph_updated), the file path, \
+                              and a millisecond timestamp. Runs until timeout_secs elapses \
+                              (default 30, max 300)."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
@@ -810,30 +1024,34 @@ impl McpServer {
                     },
                     required: vec!["root".to_string()],
                 },
+                annotations: read_only!(),
             },
             // -----------------------------------------------------------------
             // Document-oriented tools
             // -----------------------------------------------------------------
             McpTool {
                 name: "doc_index".to_string(),
-                description: "Return all document-type files (Markdown, YAML, TOML, JSON) \
-                              in the project with their extracted headings, config keys, \
-                              cross-reference edges, and edge counts. Useful as a table \
-                              of contents for the project's documentation."
+                title: Some("Get Document Index".to_string()),
+                description: "Returns all document-type files (Markdown, YAML, TOML, JSON) in the \
+                              project with their extracted headings, config keys, cross-reference \
+                              edges, and edge counts. Use as a table of contents before drilling \
+                              into a specific document with doc_context."
                     .to_string(),
                 input_schema: McpInputSchema {
                     type_: "object".to_string(),
                     properties: HashMap::new(),
                     required: vec![],
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "doc_context".to_string(),
-                description: "Get a single document's extracted structure plus the skeleton \
-                              of all code files it cross-references. Follows import edges \
-                              from the doc into code, ranked by relevance. Returns the doc \
-                              first, then supporting code — ideal for understanding what a \
-                              doc describes."
+                title: Some("Get Document Context".to_string()),
+                description: "Returns a single document's extracted structure plus the skeleton of \
+                              all code files it cross-references. Follows import edges from the doc \
+                              into code, ranked by relevance. The document comes first, supporting \
+                              code follows — ideal for understanding what a doc describes before \
+                              editing."
                     .to_string(),
                 input_schema: {
                     let mut props = HashMap::new();
@@ -847,13 +1065,16 @@ impl McpServer {
                         required: vec!["doc_path".to_string()],
                     }
                 },
+                annotations: read_only!(),
             },
             McpTool {
                 name: "query_docs".to_string(),
-                description: "Doc-biased context retrieval: searches documents first, then \
-                              follows cross-reference edges into the code they describe. \
-                              Returns a bundle with docs and supporting code separated. \
-                              Like query_context but prioritises documentation."
+                title: Some("Query Documentation".to_string()),
+                description: "Doc-biased context retrieval: searches project documents first, then \
+                              follows cross-reference edges into the code they describe. Returns a \
+                              bundle with docs and supporting code separated. Prefer this over \
+                              query_context when the user's question is most likely answered by \
+                              documentation."
                     .to_string(),
                 input_schema: {
                     let mut props = HashMap::new();
@@ -862,13 +1083,14 @@ impl McpServer {
                     props.insert("budget".to_string(), mcprop!("number",
                         "Max total tokens (default 8000)"));
                     props.insert("model".to_string(), mcprop!("string",
-                        "Target model for health scoring: claude, gpt4, llama (default claude)"));
+                        "Target model for health scoring", ["claude", "gpt4", "llama", "gpt35"]));
                     McpInputSchema {
                         type_: "object".to_string(),
                         properties: props,
                         required: vec!["query".to_string()],
                     }
                 },
+                annotations: read_only!(),
             },
         ]
     }
@@ -878,13 +1100,17 @@ impl McpServer {
             McpResource {
                 uri: "navigator://project-graph".to_string(),
                 name: "project_graph".to_string(),
-                description: "Full project dependency graph in JSON format".to_string(),
+                description: "Complete project dependency graph as JSON. Prefer get_project_graph \
+                              for on-demand retrieval; use this resource for polling or caching."
+                    .to_string(),
                 mime_type: Some("application/json".to_string()),
             },
             McpResource {
                 uri: "navigator://module-index".to_string(),
                 name: "module_index".to_string(),
-                description: "Index of all mapped modules with their signatures".to_string(),
+                description: "Flat index of all project modules with their public signatures. \
+                              Useful for enumeration before targeted get_module_context calls."
+                    .to_string(),
                 mime_type: Some("application/json".to_string()),
             },
         ]
@@ -894,25 +1120,29 @@ impl McpServer {
         vec![
             McpPrompt {
                 name: "analyze_module".to_string(),
-                description: "Generate a prompt for analyzing a specific module".to_string(),
+                description: "Pre-filled prompt for deep analysis of a module: its purpose, \
+                              dependencies, and improvement opportunities."
+                    .to_string(),
                 arguments: vec![McpArgument {
                     name: "module_id".to_string(),
-                    description: "Module to analyze".to_string(),
+                    description: "File path or module name to analyse".to_string(),
                     required: true,
                 }],
             },
             McpPrompt {
                 name: "plan_refactoring".to_string(),
-                description: "Generate a prompt for planning refactoring of a module".to_string(),
+                description: "Pre-filled prompt for generating a step-by-step refactoring plan \
+                              targeting a specific module and stated goal."
+                    .to_string(),
                 arguments: vec![
                     McpArgument {
                         name: "module_id".to_string(),
-                        description: "Module to refactor".to_string(),
+                        description: "File path or module name to refactor".to_string(),
                         required: true,
                     },
                     McpArgument {
                         name: "goal".to_string(),
-                        description: "Refactoring goal".to_string(),
+                        description: "Refactoring goal (e.g. \"reduce coupling\", \"extract service\")".to_string(),
                         required: true,
                     },
                 ],

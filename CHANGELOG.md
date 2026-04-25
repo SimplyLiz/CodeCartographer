@@ -4,6 +4,34 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Added — MCP tool schema: title, annotations, and enum hints
+
+`McpTool` now carries two new optional fields that MCP clients and LLM planners
+can consume without calling the tool:
+
+- **`title`** — human-readable display name (e.g. `"Get Module Context"`).
+  All 38 tools have a title; `McpServerInfo` gains one too (`"Nyx Navigator"`).
+- **`annotations`** — `ToolAnnotations` struct with `readOnlyHint`,
+  `destructiveHint`, and `idempotentHint`. Every read-only tool advertises
+  `readOnlyHint: true` via the `read_only!()` macro; `replace_content` sets
+  `destructiveHint: true`; `set_compression_level` is `idempotentHint: true`.
+- **`enum` hints** on string parameters with a fixed value set:
+  `detail_level` (`minimal`/`standard`/`extended`), `level`
+  (`minimal`/`standard`/`aggressive`), `query_type` (`node`/`edge`), and
+  `model` (`claude`/`gpt4`/`llama`/`gpt35`) across `context_health`,
+  `query_context`, and `query_docs`.
+
+**Schema correctness fixes** (found during review):
+- `get_symbol_context`: `detail_level` was incorrectly required and lacked an
+  enum; it is now optional with `["minimal","standard","extended"]`.
+- `search_project`: `query_type` was required; now optional with
+  `["node","edge"]` enum.
+- `get_blast_radius`: `max_related` was required despite having a default.
+- `semidiff`: `commit1` and `commit2` were required despite both defaulting
+  to `HEAD~1` / `HEAD`.
+- `query_docs`: `model` enum was missing `"gpt35"` vs the other two scoring
+  tools.
+
 ### Added — function-level call graphs for Rust and Python
 
 `navigator diagram --call-graph PATH` now extracts a file-local call graph
