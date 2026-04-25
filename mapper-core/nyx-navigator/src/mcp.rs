@@ -689,6 +689,26 @@ impl McpServer {
                 annotations: read_only!(),
             },
 
+            McpTool {
+                name: "search_skeleton".to_string(),
+                description: "Return skeleton sections for files whose path or symbol names \
+                              contain the given pattern (case-insensitive substring). Use this \
+                              when you know a keyword but not the exact module — cheaper than \
+                              skeleton_map, more discoverable than focused_skeleton."
+                    .to_string(),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("pattern".to_string(), mcprop!("string", "Substring matched against file paths and symbol names (case-insensitive)"));
+                        props.insert("detail".to_string(), mcprop!("string", "Detail level: minimal, standard, or extended (default standard)"));
+                        props.insert("budget".to_string(), mcprop!("number", "Max tokens to return (0 = unlimited)"));
+                        props
+                    },
+                    required: vec!["pattern".to_string()],
+                },
+            },
+
             // -----------------------------------------------------------------
             // Git intelligence
             // -----------------------------------------------------------------
@@ -2002,6 +2022,62 @@ impl McpServer {
             }
 
             // -----------------------------------------------------------------
+            // search_skeleton
+            // -----------------------------------------------------------------
+
+            "search_skeleton" => {
+                let args = &call.arguments;
+                let pattern = args.get("pattern").and_then(|v| v.as_str())
+                    .ok_or("Missing required parameter: pattern")?;
+                let detail = args.get("detail").and_then(|v| v.as_str()).unwrap_or("standard");
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+                let pat_lower = pattern.to_lowercase();
+                let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let churn_map = crate::git_analysis::git_churn(&self.api_state.root_path, 300);
+                let churn_labels = compute_churn_labels(&churn_map, files.values().map(|f| f.path.as_str()));
+                let tested_names = collect_tested_names(files.values());
+                let max_sigs = match detail { "minimal" => 5, "extended" => usize::MAX, _ => 20 };
+
+                // Collect matches; path matches take precedence over symbol matches.
+                let mut matched: Vec<(&crate::mapper::MappedFile, &'static str)> = Vec::new();
+                for mf in files.values() {
+                    if mf.path.to_lowercase().contains(&pat_lower) {
+                        matched.push((mf, "path"));
+                    } else if mf.signatures.iter().any(|s| s.raw.to_lowercase().contains(&pat_lower)) {
+                        matched.push((mf, "symbol"));
+                    }
+                }
+                // Path matches first, then alphabetical within each group.
+                matched.sort_by_key(|(mf, role)| (if *role == "path" { 0u8 } else { 1u8 }, mf.path.clone()));
+
+                let total_matched = matched.len();
+                let mut result_files: Vec<serde_json::Value> = Vec::new();
+                let mut tokens_used: usize = 0;
+
+                for (mf, role) in &matched {
+                    let rendered = render_mf(mf, role, max_sigs, &churn_labels, &tested_names);
+                    let est = serde_json::to_string(&rendered).unwrap_or_default().len() / 4;
+                    if budget > 0 && tokens_used + est > budget {
+                        break;
+                    }
+                    tokens_used += est;
+                    result_files.push(rendered);
+                }
+
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                        "pattern": pattern,
+                        "matched": total_matched,
+                        "returned": result_files.len(),
+                        "files": result_files,
+                        "estimatedTokens": tokens_used,
+                    })).unwrap_or_default())],
+                    is_error: None,
+                })
+            }
+
+            // -----------------------------------------------------------------
             // Git intelligence tools
             // -----------------------------------------------------------------
 
@@ -3205,8 +3281,11 @@ fn compute_churn_labels<'a>(
     paths: impl Iterator<Item = &'a str>,
 ) -> std::collections::HashMap<String, &'static str> {
     let mut counts: Vec<usize> = paths.map(|p| *churn_map.get(p).unwrap_or(&0)).collect();
+    if counts.is_empty() {
+        return std::collections::HashMap::new();
+    }
     counts.sort_unstable();
-    let n = counts.len().max(1);
+    let n = counts.len();
     let hot_t = counts[n * 3 / 4];
     let stable_t = counts[n / 4];
     let max_c = *counts.last().unwrap_or(&0);
@@ -3336,5 +3415,38 @@ mod tests {
         let api_state = std::sync::Arc::new(ApiState::new(std::path::PathBuf::from("/test")));
         let server = McpServer::new(api_state);
         assert!(!server.list_tools().is_empty());
+    }
+
+    #[test]
+    fn search_skeleton_tool_is_registered() {
+        let api_state = std::sync::Arc::new(ApiState::new(std::path::PathBuf::from("/test")));
+        let server = McpServer::new(api_state);
+        assert!(server.list_tools().iter().any(|t| t.name == "search_skeleton"));
+    }
+
+    #[test]
+    fn search_skeleton_requires_pattern() {
+        let api_state = std::sync::Arc::new(ApiState::new(std::path::PathBuf::from("/test")));
+        let server = McpServer::new(api_state);
+        let call = McpToolCall {
+            name: "search_skeleton".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(server.call_tool(call).is_err());
+    }
+
+    #[test]
+    fn search_skeleton_empty_project_returns_zero_matches() {
+        let api_state = std::sync::Arc::new(ApiState::new(std::path::PathBuf::from("/test")));
+        let server = McpServer::new(api_state);
+        let call = McpToolCall {
+            name: "search_skeleton".to_string(),
+            arguments: serde_json::json!({ "pattern": "anything" }),
+        };
+        let result = server.call_tool(call).unwrap();
+        let text = match &result.content[0] { McpContent::Text { text } => text.clone(), _ => String::new() };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["matched"], 0);
+        assert_eq!(v["returned"], 0);
     }
 }
