@@ -81,12 +81,16 @@ navigator query "how does authentication work?"
 | `navigator diagram -o graph.html` | Interactive self-contained HTML explorer |
 | `navigator diagram -o graph.svg\|.png` | SVG/PNG via `mmdc` or `dot` |
 | `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python) |
+| `navigator diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
+| `navigator diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
 | `navigator diagram --blast-radius MODULE` | Target + direct deps + direct dependents |
 | `navigator diagram --focus FILE [--depth N]` | BFS neighborhood around a module |
 | `navigator diagram --group-by-folder DEPTH` | Collapse graph to folder granularity |
 | `navigator diagram --color-by-owner` | Node fill by dominant git author |
 | `navigator diagram --cochange-threshold N` | Overlay co-change edges |
 | `navigator diagram --docs-only` | Doc-map: Markdown/YAML/TOML/JSON + referenced code |
+
+Sequence and class formats both output Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline get diagrams without extra tooling.
 
 ### Examples — this repo
 
@@ -105,6 +109,90 @@ navigator query "how does authentication work?"
 **Function-level call graph for `diagram.rs`** (`navigator diagram --call-graph src/diagram.rs --format dot -o calls.svg`)
 
 ![Call graph for diagram.rs](docs/images/call-graph-diagram.svg)
+
+**Sequence diagram of `diagram.rs`** — function call order within the renderer (`navigator diagram --call-graph src/diagram.rs --format sequence`)
+
+```mermaid
+sequenceDiagram
+    participant render
+    participant collapse_by_folder
+    participant blast_radius_selection
+    participant bfs_from_anchor
+    participant docs_only_selection
+    participant top_by_degree
+    participant compute_overlays
+    participant render_mermaid
+    participant render_dot
+    participant render_ascii
+    participant ascii_walk
+    participant ascii_label
+    render->>collapse_by_folder: call
+    render->>blast_radius_selection: call
+    render->>bfs_from_anchor: call
+    render->>docs_only_selection: call
+    render->>top_by_degree: call
+    render->>compute_overlays: call
+    render->>render_mermaid: call
+    render->>render_dot: call
+    render->>render_ascii: call
+    render_ascii->>ascii_walk: call
+    ascii_walk->>ascii_label: call
+    ascii_walk->>ascii_walk: call
+    render_ascii->>ascii_label: call
+    render_mermaid->>role_class_suffix: call
+    render_dot->>role_color_dot: call
+```
+
+**Class diagram of `class_graph.rs`** — the UML extraction data model (`navigator diagram --call-graph src/class_graph.rs --format class`)
+
+```mermaid
+classDiagram
+    class ClassGraph {
+        +classes Vec~ClassNode~
+        +relationships Vec~ClassRelationship~
+        +language str
+    }
+    class ClassNode {
+        +name String
+        +kind ClassKind
+        +fields Vec~FieldDef~
+        +methods Vec~MethodDef~
+    }
+    class FieldDef {
+        +name String
+        +type_annotation String
+        +visibility Vis
+    }
+    class MethodDef {
+        +name String
+        +params String
+        +return_type String
+        +visibility Vis
+        +is_static bool
+        +is_constructor bool
+    }
+    class ClassKind {
+        <<enumeration>>
+        Struct
+        Class
+        Interface
+        Trait
+        Enum
+    }
+    class Vis {
+        <<enumeration>>
+        Public
+        Private
+        Protected
+    }
+    ClassGraph "1" --> "*" ClassNode : classes
+    ClassGraph "1" --> "*" ClassRelationship : relationships
+    ClassNode "1" --> "*" FieldDef : fields
+    ClassNode "1" --> "*" MethodDef : methods
+    ClassNode --> ClassKind : kind
+    FieldDef --> Vis : visibility
+    MethodDef --> Vis : visibility
+```
 
 ## Search & File Tools
 
@@ -190,7 +278,8 @@ graph LR
     end
 
     subgraph Rendering["Rendering"]
-        diagram["diagram\nMermaid · DOT · ASCII"]
+        diagram["diagram\nMermaid · DOT · ASCII\nsequence · class"]
+        class_graph["class_graph\nUML extraction · Rust/Py/TS/Go"]
         html_export["html_export\ninteractive HTML"]
         diagram_export["diagram_export\nSVG · PNG"]
     end
@@ -214,6 +303,8 @@ graph LR
     api --> html_export
     api --> call_graph
     api --> mcp
+    call_graph --> diagram
+    class_graph --> diagram
     diagram --> diagram_export
     memory --> formatter
     memory --> sync

@@ -1,5 +1,6 @@
 mod api;
 mod call_graph;
+mod class_graph;
 mod diagram;
 mod diagram_export;
 mod extractor;
@@ -3239,6 +3240,67 @@ fn diagram_mode(
         let abs = if file.is_absolute() { file.to_path_buf() } else { root.join(file) };
         let source = std::fs::read_to_string(&abs)
             .map_err(|e| anyhow::anyhow!("cannot read {}: {}", abs.display(), e))?;
+        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+        // Sequence diagrams render directly from the call graph without going
+        // through to_project_graph — they need call order, not a node set.
+        if fmt == diagram::DiagramFormat::Sequence {
+            let cg = call_graph::build_file_call_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "sequence diagram not supported for this file type (expected .rs / .py): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_sequence(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "Sequence diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "Sequence diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "Sequence diagram PNG exported to",
+                    _ => "Sequence diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "Sequence: {} participants, {} messages, {} unresolved external calls dropped",
+                cg.functions.len(), cg.calls.len(), cg.unresolved_count
+            );
+            return Ok(());
+        }
+
+        // Class diagrams render from a dedicated class extractor.
+        if fmt == diagram::DiagramFormat::Class {
+            let cg = class_graph::build_class_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "class diagram not supported for this file type (supported: .rs .py .ts .tsx .go): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_class(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "Class diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "Class diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "Class diagram PNG exported to",
+                    _ => "Class diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "Class diagram: {} classes, {} relationships",
+                cg.classes.len(), cg.relationships.len()
+            );
+            return Ok(());
+        }
+
         let cg = call_graph::build_file_call_graph(&abs, &source)
             .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(
@@ -3246,7 +3308,6 @@ fn diagram_mode(
                 abs.display()
             ))?;
         let graph = call_graph::to_project_graph(&cg, &abs);
-        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
         let opts = diagram::RenderOptions {
             format: fmt,
             focus,
