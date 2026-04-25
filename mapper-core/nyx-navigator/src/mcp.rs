@@ -285,11 +285,17 @@ impl McpServer {
                               single named symbol inside a module. More targeted than get_module_context \
                               when you already know which function, struct, or constant you need."
                     .to_string(),
-                input_schema: mcinput!(
-                    "module_id" => "string" => "Module containing the symbol (file path or module name)",
-                    "symbol_name" => "string" => "Name of the symbol to retrieve",
-                    "detail_level" => "string" => "Detail level: minimal, standard, or extended"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("module_id".to_string(), mcprop!("string", "Module containing the symbol (file path or module name)"));
+                        props.insert("symbol_name".to_string(), mcprop!("string", "Name of the symbol to retrieve"));
+                        props.insert("detail_level".to_string(), mcprop!("string", "Detail level", ["minimal", "standard", "extended"]));
+                        props
+                    },
+                    required: vec!["module_id".to_string(), "symbol_name".to_string()],
+                },
                 annotations: read_only!(),
             },
             McpTool {
@@ -352,10 +358,16 @@ impl McpServer {
                               query_type=edge to match import relationships. For full-text search \
                               inside files, use search_content instead."
                     .to_string(),
-                input_schema: mcinput!(
-                    "query" => "string" => "Search pattern to match against module names or import edges",
-                    "query_type" => "string" => "Search domain: node (module names/paths) or edge (import relationships)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("query".to_string(), mcprop!("string", "Search pattern to match against module names or import edges"));
+                        props.insert("query_type".to_string(), mcprop!("string", "Search domain: node (module names/paths) or edge (import relationships)", ["node", "edge"]));
+                        props
+                    },
+                    required: vec!["query".to_string()],
+                },
                 annotations: read_only!(),
             },
             McpTool {
@@ -366,10 +378,16 @@ impl McpServer {
                               lip_uris (LIP symbol URIs: lip://local/<path>#<symbol>) so CKB can \
                               resolve any affected symbol without a follow-up lookup."
                     .to_string(),
-                input_schema: mcinput!(
-                    "target" => "string" => "File path or symbol name to analyse",
-                    "max_related" => "number" => "Maximum related items to return (default 10)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("target".to_string(), mcprop!("string", "File path or symbol name to analyse"));
+                        props.insert("max_related".to_string(), mcprop!("number", "Maximum related items to return (default 10)"));
+                        props
+                    },
+                    required: vec!["target".to_string()],
+                },
                 annotations: read_only!(),
             },
             McpTool {
@@ -417,9 +435,15 @@ impl McpServer {
                               boilerplate; aggressive maximises token savings at the cost of some \
                               fidelity. Affects all subsequent tool responses."
                     .to_string(),
-                input_schema: mcinput!(
-                    "level" => "string" => "Compression level: minimal, standard, or aggressive"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("level".to_string(), mcprop!("string", "Compression level", ["minimal", "standard", "aggressive"]));
+                        props
+                    },
+                    required: vec!["level".to_string()],
+                },
                 annotations: Some(ToolAnnotations {
                     read_only_hint: Some(false),
                     destructive_hint: None,
@@ -735,10 +759,16 @@ impl McpServer {
                               than a raw git diff for understanding API-level impact. commit1 \
                               defaults to HEAD~1; commit2 defaults to HEAD."
                     .to_string(),
-                input_schema: mcinput!(
-                    "commit1" => "string" => "Base commit SHA or ref (e.g. HEAD~1)",
-                    "commit2" => "string" => "Target commit SHA or ref (default HEAD)"
-                ),
+                input_schema: McpInputSchema {
+                    type_: "object".to_string(),
+                    properties: {
+                        let mut props = HashMap::new();
+                        props.insert("commit1".to_string(), mcprop!("string", "Base commit SHA or ref (default HEAD~1)"));
+                        props.insert("commit2".to_string(), mcprop!("string", "Target commit SHA or ref (default HEAD)"));
+                        props
+                    },
+                    required: vec![],
+                },
                 annotations: read_only!(),
             },
             McpTool {
@@ -1053,7 +1083,7 @@ impl McpServer {
                     props.insert("budget".to_string(), mcprop!("number",
                         "Max total tokens (default 8000)"));
                     props.insert("model".to_string(), mcprop!("string",
-                        "Target model for health scoring", ["claude", "gpt4", "llama"]));
+                        "Target model for health scoring", ["claude", "gpt4", "llama", "gpt35"]));
                     McpInputSchema {
                         type_: "object".to_string(),
                         properties: props,
