@@ -1,5 +1,6 @@
 mod api;
 mod call_graph;
+mod reach;
 mod class_graph;
 mod cross_call;
 mod diagram;
@@ -609,6 +610,30 @@ enum Commands {
         #[command(subcommand)]
         command: SnapshotCommands,
     },
+    /// Semantic graph traversal — AI-optimized context tree from a symbol [EXPERIMENTAL]
+    Reach {
+        /// Symbol name to start from (e.g. "verify_token" or "Auth::verify_token")
+        #[arg(value_name = "SYMBOL")]
+        symbol: String,
+        /// Disambiguate to a specific file when the symbol appears in multiple files
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
+        /// Graph traversal depth (default 2)
+        #[arg(long, default_value = "2")]
+        depth: usize,
+        /// Token budget — hard cap on output size (default 6000)
+        #[arg(long, default_value = "6000")]
+        budget: usize,
+        /// Include test call sites (default: collapse and count them)
+        #[arg(long)]
+        include_tests: bool,
+        /// Output format: compact (default) or json
+        #[arg(long, default_value = "compact")]
+        format: String,
+        /// Project path to scan (defaults to current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
     /// Re-run the install script to upgrade to the latest build
     Update,
 }
@@ -911,6 +936,10 @@ fn main() -> Result<()> {
         Some(Commands::Snapshot { command }) => {
             let cwd2 = cwd.clone();
             snapshot_mode(&cwd2, command)
+        }
+        Some(Commands::Reach { symbol, file, depth, budget, include_tests, format, path }) => {
+            let root = resolve_path(&cwd, path)?;
+            reach_mode(&root, &symbol, file.as_deref(), depth, budget, include_tests, &format)
         }
         Some(Commands::Update) => {
             update_mode()
@@ -5735,6 +5764,103 @@ fn snapshot_list(root: &Path) -> Result<()> {
 // =============================================================================
 // UPDATE MODE — re-run install.sh to upgrade
 // =============================================================================
+
+fn reach_mode(
+    root: &Path,
+    symbol: &str,
+    file_filter: Option<&str>,
+    depth: usize,
+    budget: usize,
+    include_tests: bool,
+    format: &str,
+) -> Result<()> {
+    use reach::{build_reach, render_reach, ReachOptions};
+
+    // Scan project files to build the mapped skeleton.
+    let scan_result = scan_files_with_noise_tracking(root)?;
+    let mut mapped: Vec<MappedFile> = Vec::new();
+    for path in &scan_result.files {
+        if !is_source_file(path) {
+            continue;
+        }
+        if let Some(content) = read_text_file(path) {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let mf = extract_skeleton(rel, &content);
+            if !mf.imports.is_empty() || !mf.signatures.is_empty() {
+                mapped.push(mf);
+            }
+        }
+    }
+
+    let opts = ReachOptions {
+        depth,
+        budget,
+        file_filter: file_filter.map(|s| s.to_string()),
+        include_tests,
+        ..Default::default()
+    };
+
+    match build_reach(root, &mapped, symbol, &opts) {
+        Ok(result) => {
+            match format {
+                "json" => {
+                    // Structured JSON output for programmatic consumers.
+                    // Minimal fields — callers, callees, depth2 — no inline rendering.
+                    let json = serde_json::json!({
+                        "root": {
+                            "name": result.root.name,
+                            "file": result.root.file,
+                            "line": result.root.line,
+                            "sig": result.root.sig,
+                            "kind": format!("{:?}", result.root.kind),
+                        },
+                        "callers": result.callers.iter().map(|c| serde_json::json!({
+                            "file": c.file,
+                            "line": c.line,
+                            "snippet": c.snippet,
+                            "tag": c.tag.as_ref().map(|t| t.label()),
+                            "is_test": c.is_test,
+                        })).collect::<Vec<_>>(),
+                        "test_callers_collapsed": result.test_callers_collapsed,
+                        "callees": result.callees.iter().map(|c| serde_json::json!({
+                            "name": c.name,
+                            "file": c.file,
+                            "line": c.line,
+                            "sig": c.sig,
+                        })).collect::<Vec<_>>(),
+                        "depth2": result.depth2.iter().map(|n| serde_json::json!({
+                            "name": n.name,
+                            "file": n.file,
+                            "line": n.line,
+                            "sig": n.sig,
+                        })).collect::<Vec<_>>(),
+                        "tokens_used": result.tokens_used,
+                        "budget_hit": result.budget_hit,
+                        "language_note": result.language_note,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                }
+                _ => {
+                    // Default: compact tree format.
+                    print!("{}", render_reach(&result));
+                    eprintln!(
+                        "\n[reach] {} tokens · depth {} · {} caller(s) · {} callee(s){}",
+                        result.tokens_used,
+                        depth,
+                        result.callers.len(),
+                        result.callees.len(),
+                        if result.budget_hit { " [budget hit]" } else { "" },
+                    );
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("reach: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 fn update_mode() -> Result<()> {
     // Find the install script relative to the binary's own location or from the

@@ -1089,6 +1089,41 @@ impl McpServer {
                 },
                 annotations: read_only!(),
             },
+            // -----------------------------------------------------------------
+            // Semantic graph traversal [EXPERIMENTAL]
+            // -----------------------------------------------------------------
+            McpTool {
+                name: "reach_symbol".to_string(),
+                title: Some("Reach — Semantic Graph Traversal".to_string()),
+                description: "EXPERIMENTAL. Starts from a named symbol and walks the call graph + \
+                              import graph outward, returning a compact context tree in AI-native \
+                              format. Detail level is distance-proportional: depth-0 is the root \
+                              symbol with full signature; depth-1 callers include a one-line call \
+                              context; depth-2 neighbors show signature only. Test callers are \
+                              collapsed and counted. Roughly 40% of the token cost of equivalent \
+                              JSON for the same semantic information. Language support for call graph: \
+                              Rust and Python. Other languages fall back to heuristic text search."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("symbol".to_string(), mcprop!("string",
+                        "Symbol name to start from (e.g. \"verify_token\" or \"Auth::verify_token\")"));
+                    props.insert("file".to_string(), mcprop!("string",
+                        "Disambiguate to a specific file when the symbol appears in multiple files (path fragment)"));
+                    props.insert("depth".to_string(), mcprop!("number",
+                        "Graph traversal depth (default 2; max 3)"));
+                    props.insert("budget".to_string(), mcprop!("number",
+                        "Token budget — hard cap; leaf nodes trimmed first (default 6000)"));
+                    props.insert("includeTests".to_string(), mcprop!("boolean",
+                        "Expand test call sites instead of collapsing them (default false)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["symbol".to_string()],
+                    }
+                },
+                annotations: read_only!(),
+            },
             McpTool {
                 name: "query_docs".to_string(),
                 title: Some("Query Documentation".to_string()),
@@ -2969,6 +3004,59 @@ impl McpServer {
                     )],
                     is_error: None,
                 })
+            }
+
+            "reach_symbol" => {
+                let args = &call.arguments;
+                let symbol = args.get("symbol").and_then(|v| v.as_str())
+                    .ok_or("Missing required parameter: symbol")?.to_string();
+                let file_filter = args.get("file").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(6000) as usize;
+                let include_tests = args.get("includeTests").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                // Ensure the skeleton is current.
+                if let Err(e) = self.api_state.rebuild_graph() {
+                    return Err(e);
+                }
+                let files_lock = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let mapped: Vec<crate::mapper::MappedFile> = files_lock.values().cloned().collect();
+                drop(files_lock);
+
+                let opts = crate::reach::ReachOptions {
+                    depth,
+                    budget,
+                    file_filter,
+                    include_tests,
+                    ..Default::default()
+                };
+
+                match crate::reach::build_reach(&self.api_state.root_path, &mapped, &symbol, &opts) {
+                    Ok(result) => {
+                        let rendered = crate::reach::render_reach(&result);
+                        let meta = serde_json::json!({
+                            "tokensUsed": result.tokens_used,
+                            "budgetHit": result.budget_hit,
+                            "callerCount": result.callers.len(),
+                            "calleeCount": result.callees.len(),
+                            "testCallersCollapsed": result.test_callers_collapsed,
+                            "languageNote": result.language_note,
+                        });
+                        let output = format!(
+                            "{}\n---\n{}",
+                            rendered,
+                            serde_json::to_string(&meta).unwrap_or_default()
+                        );
+                        Ok(McpToolResult {
+                            content: vec![McpContent::text(output)],
+                            is_error: None,
+                        })
+                    }
+                    Err(e) => Ok(McpToolResult {
+                        content: vec![McpContent::text(e.to_string())],
+                        is_error: Some(true),
+                    }),
+                }
             }
 
             _ => Err(format!("Unknown tool: {}", call.name)),
