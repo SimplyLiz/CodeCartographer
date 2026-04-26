@@ -624,7 +624,7 @@ impl ApiState {
                     .iter()
                     .filter(|sig| {
                         // FFI exports are consumed by C callers; import-graph can't see them.
-                        if sig.raw.contains("extern \"C\"") || sig.raw.contains("extern \"c\"") {
+                        if sig.raw.contains("extern \"C\"") {
                             return false;
                         }
                         let is_public = public_prefixes
@@ -1024,8 +1024,7 @@ pub fn is_entry_point_path(path: &str) -> bool {
     matches!(
         name,
         "main.rs"
-            | "lib.rs"
-            | "mod.rs"
+            | "lib.rs"  // crate root — no Rust-side callers by design
             | "main.py"
             | "main.go"
             | "main.ts"
