@@ -308,24 +308,22 @@ fn score_symbol(
         }
     }
 
+    let mut name_score = 0.0f64;
+    let mut sig_score = 0.0f64;
+    let mut doc_score = 0.0f64;
+
     for term in query_terms {
-        // Strong: term in the symbol name.
-        if name.contains(term.as_str()) {
-            sym_score += 3.0;
-        }
-        // Medium: term in raw signature (parameters, return types).
-        if raw.contains(term.as_str()) {
-            sym_score += 1.5;
-        }
-        // Weak: term in doc comment.
-        if doc.contains(term.as_str()) {
-            sym_score += 0.5;
-        }
+        if name.contains(term.as_str()) { name_score += 3.0; }
+        if raw.contains(term.as_str())  { sig_score  += 1.5; }
+        if doc.contains(term.as_str())  { doc_score  += 0.5; }
     }
 
-    // Symbol itself must contribute at least something — this is the gate
-    // that prevents "high-BM25 file, unrelated symbol" combinations.
-    if sym_score == 0.0 {
+    sym_score += name_score + sig_score + doc_score;
+
+    // Gate: require meaningful signal beyond a doc-comment coincidence.
+    // A doc-only match (name=0, sig=0, doc>0) is too weak — the symbol is
+    // unrelated and the doc comment just happened to use a common word.
+    if sym_score == 0.0 || (name_score == 0.0 && sig_score == 0.0) {
         return 0.0;
     }
 

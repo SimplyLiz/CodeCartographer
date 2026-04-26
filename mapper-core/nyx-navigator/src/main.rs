@@ -646,6 +646,9 @@ enum Commands {
         /// Include test call sites (default: collapse and count them)
         #[arg(long)]
         include_tests: bool,
+        /// Include the function body of the root symbol (up to 40 lines)
+        #[arg(long)]
+        show_body: bool,
         /// Output format: compact (default) or json
         #[arg(long, default_value = "compact")]
         format: String,
@@ -960,9 +963,9 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, path)?;
             answer_mode(&root, &question, max_items, budget, !no_body)
         }
-        Some(Commands::Reach { symbol, file, depth, budget, include_tests, format, path }) => {
+        Some(Commands::Reach { symbol, file, depth, budget, include_tests, show_body, format, path }) => {
             let root = resolve_path(&cwd, path)?;
-            reach_mode(&root, &symbol, file.as_deref(), depth, budget, include_tests, &format)
+            reach_mode(&root, &symbol, file.as_deref(), depth, budget, include_tests, show_body, &format)
         }
         Some(Commands::Update) => {
             update_mode()
@@ -5845,6 +5848,7 @@ fn reach_mode(
     depth: usize,
     budget: usize,
     include_tests: bool,
+    show_body: bool,
     format: &str,
 ) -> Result<()> {
     use reach::{build_reach, render_reach, ReachOptions};
@@ -5870,6 +5874,7 @@ fn reach_mode(
         budget,
         file_filter: file_filter.map(|s| s.to_string()),
         include_tests,
+        show_body,
         ..Default::default()
     };
 

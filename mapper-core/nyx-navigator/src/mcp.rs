@@ -1116,6 +1116,8 @@ impl McpServer {
                         "Token budget — hard cap; leaf nodes trimmed first (default 6000)"));
                     props.insert("includeTests".to_string(), mcprop!("boolean",
                         "Expand test call sites instead of collapsing them (default false)"));
+                    props.insert("showBody".to_string(), mcprop!("boolean",
+                        "Include the function body of the root symbol, up to 40 lines (default false)"));
                     McpInputSchema {
                         type_: "object".to_string(),
                         properties: props,
@@ -3084,6 +3086,7 @@ impl McpServer {
                 let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
                 let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(6000) as usize;
                 let include_tests = args.get("includeTests").and_then(|v| v.as_bool()).unwrap_or(false);
+                let show_body = args.get("showBody").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 // Ensure the skeleton is current.
                 if let Err(e) = self.api_state.rebuild_graph() {
@@ -3098,6 +3101,7 @@ impl McpServer {
                     budget,
                     file_filter,
                     include_tests,
+                    show_body,
                     ..Default::default()
                 };
 

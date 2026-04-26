@@ -41,6 +41,8 @@ pub struct ReachOptions {
     pub include_tests: bool,
     /// Maximum caller entries to show (before collapsing). Default 12.
     pub max_callers: usize,
+    /// Include the function body of the root symbol (up to 40 lines). Default false.
+    pub show_body: bool,
 }
 
 impl Default for ReachOptions {
@@ -51,6 +53,7 @@ impl Default for ReachOptions {
             file_filter: None,
             include_tests: false,
             max_callers: 12,
+            show_body: false,
         }
     }
 }
@@ -158,6 +161,8 @@ pub struct ReachResult {
     pub depth2: Vec<NeighborInfo>,
     /// Warning emitted when call graph is unavailable for the root's language.
     pub language_note: Option<String>,
+    /// Function body of the root symbol (populated when show_body = true).
+    pub root_body: Option<String>,
     pub tokens_used: usize,
     pub budget_hit: bool,
 }
@@ -184,14 +189,28 @@ pub fn build_reach(
     // --- 3. Find callees via call graph (Rust/Python) or unresolved stubs ---
     let (callees, language_note) = find_callees(root_path, mapped, &root, opts);
 
-    // --- 4. Depth-2 neighbors (signatures of callee types + their neighbors) ---
+    // --- 4. Depth-2 neighbors ---
+    // For functions: types referenced in callee signatures.
+    // For structs/enums/types: types referenced in the struct's own fields (body).
     let depth2 = if opts.depth >= 2 {
-        find_depth2(mapped, &callees)
+        match root.kind {
+            SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum => {
+                find_depth2_from_type(mapped, &root)
+            }
+            _ => find_depth2(mapped, &callees),
+        }
     } else {
         vec![]
     };
 
-    // --- 5. Assemble + apply token budget ---
+    // --- 5. Optionally read the root function body ---
+    let root_body = if opts.show_body {
+        read_root_body(root_path, &root, 40)
+    } else {
+        None
+    };
+
+    // --- 6. Assemble + apply token budget ---
     let mut result = ReachResult {
         root,
         callers,
@@ -199,6 +218,7 @@ pub fn build_reach(
         callees,
         depth2,
         language_note,
+        root_body,
         tokens_used: 0,
         budget_hit: false,
     };
@@ -706,6 +726,52 @@ fn find_depth2(mapped: &[MappedFile], callees: &[CalleeInfo]) -> Vec<NeighborInf
     neighbors
 }
 
+/// Depth-2 for a struct/enum root: find the types of its fields from the body.
+/// This surfaces the types an AI needs to understand the data shape — more
+/// useful than callee types when the root is a type, not a function.
+fn find_depth2_from_type(mapped: &[MappedFile], root: &RootSymbol) -> Vec<NeighborInfo> {
+    // The struct body is stored in Signature.body as a compact field list,
+    // e.g. "pub callers: Vec<CallerInfo>; pub depth2: Vec<NeighborInfo>; …"
+    // We also have the raw signature line and file for additional context.
+    let sig = mapped
+        .iter()
+        .find(|m| m.path == root.file)
+        .and_then(|m| {
+            m.signatures.iter().find(|s| {
+                s.symbol_name.as_deref() == Some(&root.name)
+                    || s.qualified_name.as_deref() == Some(&root.name)
+            })
+        });
+
+    let body_text = sig
+        .and_then(|s| s.body.as_deref())
+        .unwrap_or("");
+
+    // Combine body + raw sig to extract type names.
+    let combined = format!("{} {}", root.sig, body_text);
+    let type_names = sig_type_names(&combined);
+
+    let mut neighbors: Vec<NeighborInfo> = vec![];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(root.name.clone()); // don't self-reference
+
+    for type_name in type_names {
+        if seen.contains(&type_name) { continue; }
+        if let Some((mf, field_sig)) = lookup_sig_any(mapped, &type_name) {
+            seen.insert(type_name.clone());
+            neighbors.push(NeighborInfo {
+                name: type_name,
+                file: mf.path.clone(),
+                line: field_sig.line_start as u32 + 1,
+                sig: field_sig.raw.clone(),
+            });
+            if neighbors.len() >= 8 { break; }
+        }
+    }
+
+    neighbors
+}
+
 // ---------------------------------------------------------------------------
 // Signature lookup helpers
 // ---------------------------------------------------------------------------
@@ -747,6 +813,43 @@ fn is_too_generic(name: &str) -> bool {
         | "read" | "open" | "close" | "format" | "parse" | "split" | "trim"
         | "lock" | "unlock" | "send" | "recv" | "next" | "yield" | "drop"
     )
+}
+
+/// Read the body of the root symbol from source, starting after its signature.
+fn read_root_body(root_path: &Path, root: &RootSymbol, max_lines: usize) -> Option<String> {
+    let abs = root_path.join(&root.file);
+    let source = std::fs::read_to_string(&abs).ok()?;
+    let lines: Vec<&str> = source.lines().collect();
+    let start = root.line as usize; // root.line is 1-based; skip the sig line itself
+
+    // Find the opening brace.
+    let mut brace_line = start.saturating_sub(1);
+    for (i, line) in lines[brace_line..].iter().enumerate() {
+        if line.contains('{') {
+            brace_line = brace_line + i;
+            break;
+        }
+        if i > 8 { return None; }
+    }
+
+    let mut depth = 0i32;
+    let mut body: Vec<&str> = vec![];
+    let mut in_body = false;
+
+    for line in &lines[brace_line..] {
+        for ch in line.chars() {
+            if ch == '{' { depth += 1; in_body = true; }
+            else if ch == '}' { depth -= 1; }
+        }
+        if in_body { body.push(line); }
+        if in_body && depth == 0 { break; }
+        if body.len() >= max_lines {
+            body.push("    // … (truncated)");
+            break;
+        }
+    }
+
+    if body.is_empty() { None } else { Some(body.join("\n")) }
 }
 
 /// Read the function signature starting at `line` (1-based) from source text.
@@ -876,6 +979,14 @@ pub fn render_reach(result: &ReachResult) -> String {
 
     // Signature
     out.push_str(&format!("   sig  {}\n", result.root.sig.trim()));
+
+    // Body (optional)
+    if let Some(ref body) = result.root_body {
+        out.push_str("   body\n");
+        for line in body.lines() {
+            out.push_str(&format!("   {}\n", line));
+        }
+    }
 
     // Callers
     let prod_count = result.callers.iter().filter(|c| !c.is_test).count();
@@ -1163,6 +1274,7 @@ mod tests {
                 sig: "struct Claims { sub: UserId, exp: u64 }".into(),
             }],
             language_note: None,
+            root_body: None,
             tokens_used: 0,
             budget_hit: false,
         };
