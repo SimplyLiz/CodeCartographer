@@ -162,6 +162,17 @@ Parameters:
 
 Returns a ready-to-use context string plus health metadata. This is the highest-level tool — use it when you want Navigator to figure out what context is relevant rather than specifying files manually.
 
+### `search_skeleton`
+
+Skeleton sections for files whose path or symbol names match a keyword. Cheaper than `skeleton_map`, more discoverable than `focused_skeleton` when you know a keyword but not the exact module.
+
+```
+Parameters:
+  pattern  string  — substring matched against file paths and symbol names (case-insensitive) (required)
+  detail?  string  — "minimal" | "standard" | "extended" (default: standard)
+  budget?  number  — max tokens (0 = unlimited)
+```
+
 ### `get_module_context`
 
 Public API surface of a single module.
@@ -514,16 +525,6 @@ Parameters:
 ```
 
 `aggressive` compression is useful when working in a token-constrained context. `minimal` preserves more detail.
-
-### `renderArchitecture`
-
-Returns a diagram directly as a string. Supported formats: `mermaid`, `dot`, `ascii`, `sequence`, `class`.
-
-```
-Parameters: same as navigator diagram CLI flags
-```
-
-`sequence` and `class` require a `call_graph` file path parameter (same as `--call-graph FILE` on the CLI). Both produce Mermaid syntax, so MCP-aware IDEs that render Mermaid inline get class and sequence diagrams without any external tooling.
 
 ### `list_key_handlers`
 

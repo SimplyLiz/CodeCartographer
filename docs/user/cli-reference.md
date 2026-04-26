@@ -184,10 +184,16 @@ Dependency tree of a single module as JSON.
 ### path
 
 ```bash
-navigator path A B
+navigator path --from A --to B [PATH]
 ```
 
 Shortest import path between two modules.
+
+| Flag | Description |
+|------|-------------|
+| `--from FILE` | Starting file (repo-relative path or module id) |
+| `--to FILE` | Destination file (repo-relative path or module id) |
+| `--json` | Machine-readable JSON output |
 
 ### evolution
 
@@ -200,18 +206,31 @@ Architectural health trend over the last N days (default 30).
 ### layers
 
 ```bash
-navigator layers [PATH]
+navigator layers [PATH] SUBCOMMAND
 ```
 
-Current layer violations against `layers.toml`.
+Manage architectural layer definitions.
+
+| Subcommand | Description |
+|-----------|-------------|
+| `init [-o FILE]` | Auto-propose a `layers.toml` from the current import graph |
+| `validate [--config FILE] [--json]` | Check violations against `layers.toml` |
+| `diagram [--config FILE] [--format mermaid\|dot]` | Show the collapsed layer graph |
+| `suggest [--config FILE]` | Suggest improvements to an existing `layers.toml` |
 
 ### snapshot
 
 ```bash
-navigator snapshot [--diff]
+navigator snapshot SUBCOMMAND
 ```
 
 Save or compare architecture snapshots.
+
+| Subcommand | Description |
+|-----------|-------------|
+| `save TAG [PATH]` | Save current architecture with an identifying tag |
+| `diff TAG1 TAG2 [--json]` | Compare two saved snapshots |
+| `list [PATH]` | List all saved snapshots |
 
 ---
 
@@ -332,8 +351,8 @@ Regex find-and-replace. Supports `$0` (full match), `$1`, `$2` (groups).
 | `--dry-run` | Preview only, no writes |
 | `--literal` | Literal string pattern |
 | `--glob PATTERN` | Restrict to glob |
-| `--exclude-glob PATTERN` | Exclude matching files |
-| `--search-path DIR` | Restrict to directory |
+| `--exclude PATTERN` | Exclude files matching a glob |
+| `--path DIR` | Restrict to a subdirectory |
 | `--max-per-file N` | Max replacements per file |
 | `--context-lines N` | Lines of context in dry-run output |
 | `--backup` | Write `.bak` files before replacing |
@@ -348,12 +367,12 @@ Capture-group extraction.
 
 | Flag | Description |
 |------|-------------|
-| `--groups LIST` | Capture group indices (comma-separated) |
+| `--group N` | Capture group index to extract (repeatable: `--group 1 --group 2`), short: `-g` |
 | `--count` | Frequency table mode |
 | `--dedup` | Remove duplicates |
 | `--sort` | Sort alphabetically |
 | `--glob PATTERN` | Restrict to glob |
-| `--search-path DIR` | Restrict to directory |
+| `--path DIR` | Restrict to a subdirectory |
 | `--limit N` | Maximum results |
 | `--format text\|json\|csv\|tsv` | Output format |
 
@@ -501,3 +520,11 @@ navigator languages [PATH]
 ```
 
 Detected programming languages and file counts.
+
+### update
+
+```bash
+navigator update
+```
+
+Re-runs the install script to build and install the latest version from source. Requires the repo to be present at the expected location relative to the binary.
