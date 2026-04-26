@@ -4,6 +4,100 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Added — cross-file sequence trace (PR #9, spike)
+
+`navigator diagram --entry FILE::FUNCTION --format sequence [--depth N]` traces
+call edges across file boundaries rather than within a single file.
+
+Resolution is two-level: (1) direct-import match — callee name found in a module
+the current file explicitly imports; (2) heuristic match — callee name is unique
+across the whole project. Heuristic edges are annotated `(~)` in the diagram so
+reviewers can spot lower-confidence steps.
+
+**`src/call_graph.rs`** — `FileCallGraph` gains `unresolved_calls: Vec<(String,
+String)>` (caller, raw callee name). Previously the count was tracked but the
+names were discarded, making cross-file resolution impossible.
+
+**`src/cross_call.rs`** (new) — `trace_from_entry()` builds a symbol index from
+the project's `MappedFile` map and an import adjacency graph, then BFS-walks from
+the entry function up to `depth` cross-file hops. `CrossCallTrace` holds ordered
+`(module, fn)` steps and a list of unmatched calls for diagnostics.
+
+**`src/diagram.rs`** — `render_cross_sequence()` renders a `CrossCallTrace` as a
+Mermaid `sequenceDiagram` with one participant per module (not per function).
+
+**`src/extractor.rs`** — Rust `mod foo;` declarations (without a body) are now
+captured as imports so the adjacency builder can recognise them as direct
+dependencies. Previously only `use` declarations were recorded.
+
+**`src/main.rs`** — `--entry FILE::FUNCTION` flag on `navigator diagram`; triggers
+a full project scan to build the symbol index before tracing.
+
+Spike validated on `diagram_mode` (the target from charts.md): 13 modules,
+60 resolved edges in correct call order; direct-import edges unqualified,
+transitive edges correctly annotated `(~)`.
+
+### Added — quadrant chart and ER diagram formats (PR #8)
+
+Two new `--format` values for `navigator diagram`:
+
+**`--format quadrant`** — Mermaid `quadrantChart` plotting every file on a churn ×
+complexity plane. Top-right = danger zone (refactor now); top-left = risky debt;
+bottom-right = hotspots (add tests); bottom-left = stable. Coordinates are
+min-max normalised to `[0.01, 0.99]` within the included node set. Uses
+`signature_count` as a complexity proxy until tree-sitter cyclomatic complexity
+extraction lands. Automatically triggers git enrichment — no extra flags needed.
+
+**`--format er`** (with `--call-graph FILE`) — Mermaid `erDiagram` derived from
+the existing `ClassGraph` extractor. Entities come from struct/class definitions;
+relationships are inferred from field types: `Vec<T>` / `HashSet<T>` → one-to-many
+(`||--o{`), `Option<T>` → zero-or-one (`||--o|`), bare `T` / `Box<T>` / `Arc<T>`
+→ exactly-one (`||--||`). Nested wrappers are resolved one level deep; duplicate
+edges are deduplicated. Language coverage matches `--format class` (Rust, Python,
+TypeScript, Go).
+
+Both formats route through `export_mermaid()` — SVG/PNG export via `mmdc` works
+unchanged. `DiagramFormat` gains `Quadrant` and `Er` variants; `lib.rs` and
+`diagram_export.rs` updated to cover all arms.
+
+**Also fixes three pre-existing bugs:**
+- `enrich_with_git` was keying churn, co-change, and owner lookups on
+  `node.path` (absolute filesystem path) instead of `node.module_id`
+  (repo-relative path matching `git log --name-only` output). This silently
+  zeroed all git-backed overlays — hotspot sizing, co-change edges, and
+  colour-by-owner — for every diagram command.
+- `search_skeleton` `McpTool` was missing `title` and `annotations` fields,
+  causing a compile error introduced in PR #6.
+- `McpServerInfo::default()` name did not match the test expectation.
+
+### Added — sequence and UML class diagrams (PR #7)
+
+**`--format sequence`** (with `--call-graph FILE`) — Mermaid `sequenceDiagram`
+showing the call order among functions defined in a single file. Participants are
+emitted in source order; messages are call edges in AST order. Self-calls render
+as Mermaid loop arrows. A trailing note reports how many external calls were
+dropped so the reader knows the graph is file-local.
+
+**`--format class`** (with `--call-graph FILE`) — Mermaid `classDiagram` extracted
+from a single file's type structure. Coverage by language:
+
+- **Rust** — `struct` fields (name, type, `pub`/private), `enum` variants, `trait`
+  method signatures, `impl` methods attached to their type, `impl Trait for Type`
+  arrows (`..|>`).
+- **Python** — class declarations, base-class inheritance (`--|>`), instance fields
+  from `__init__` with type annotations, method signatures.
+- **TypeScript / TSX** — class fields with access modifiers, `extends` inheritance,
+  `implements` interface arrows, `interface` declarations.
+- **Go** — struct fields (uppercase = public), embedded struct inheritance, interface
+  method sets, methods attached to their receiver type.
+
+**`src/class_graph.rs`** (new) — `ClassGraph`, `ClassNode`, `FieldDef`, `MethodDef`
+structs; `build_class_graph()` dispatches to per-language extractors via tree-sitter.
+`ClassRelationship` covers `Inherits`, `Implements`, `Composes`, and `Depends`.
+
+**`src/diagram.rs`** — `render_sequence()` and `render_class()` alongside the
+existing `render()`; `DiagramFormat::Sequence` and `DiagramFormat::Class` variants.
+
 ### Added — `search_skeleton` MCP tool (PR #6)
 
 New `search_skeleton` tool fills the gap between `focused_skeleton` (requires
