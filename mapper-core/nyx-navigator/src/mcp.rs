@@ -1125,6 +1125,34 @@ impl McpServer {
                 annotations: read_only!(),
             },
             McpTool {
+                name: "answer_question".to_string(),
+                title: Some("Answer — Question-Driven Evidence Chain".to_string()),
+                description: "EXPERIMENTAL. Takes a natural-language question and assembles the \
+                              minimum set of semantic units that together answer it, in reading order. \
+                              Unlike query_context (which returns a skeleton by PageRank), answer \
+                              returns a numbered evidence chain: types before the functions that use \
+                              them, entry points before internals, connections annotated between items. \
+                              The top-scored item shows its function body by default."
+                    .to_string(),
+                input_schema: {
+                    let mut props = HashMap::new();
+                    props.insert("question".to_string(), mcprop!("string",
+                        "Natural language question (e.g. \"how does rate limiting work?\")"));
+                    props.insert("maxItems".to_string(), mcprop!("number",
+                        "Maximum evidence items (default 6)"));
+                    props.insert("budget".to_string(), mcprop!("number",
+                        "Token budget (default 8000)"));
+                    props.insert("showBody".to_string(), mcprop!("boolean",
+                        "Show function body for top item (default true)"));
+                    McpInputSchema {
+                        type_: "object".to_string(),
+                        properties: props,
+                        required: vec!["question".to_string()],
+                    }
+                },
+                annotations: read_only!(),
+            },
+            McpTool {
                 name: "query_docs".to_string(),
                 title: Some("Query Documentation".to_string()),
                 description: "Doc-biased context retrieval: searches project documents first, then \
@@ -3002,6 +3030,48 @@ impl McpServer {
                     content: vec![McpContent::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
                     )],
+                    is_error: None,
+                })
+            }
+
+            "answer_question" => {
+                let args = &call.arguments;
+                let question = args.get("question").and_then(|v| v.as_str())
+                    .ok_or("Missing required parameter: question")?.to_string();
+                let max_items = args.get("maxItems").and_then(|v| v.as_u64()).unwrap_or(6) as usize;
+                let budget = args.get("budget").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+                let show_body = args.get("showBody").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                if let Err(e) = self.api_state.rebuild_graph() {
+                    return Err(e);
+                }
+                let files_lock = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                let mapped: Vec<crate::mapper::MappedFile> = files_lock.values().cloned().collect();
+                drop(files_lock);
+
+                let opts = crate::answer::AnswerOptions {
+                    budget,
+                    max_items,
+                    show_top_body: show_body,
+                };
+
+                let result = crate::answer::build_answer(
+                    &self.api_state.root_path, &mapped, &question, &opts,
+                );
+                let rendered = crate::answer::render_answer(&result);
+                let meta = serde_json::json!({
+                    "tokensUsed": result.tokens_used,
+                    "itemCount": result.items.len(),
+                    "filesSearched": result.files_searched,
+                    "budgetHit": result.budget_hit,
+                });
+                let output = format!(
+                    "{}\n---\n{}",
+                    rendered,
+                    serde_json::to_string(&meta).unwrap_or_default()
+                );
+                Ok(McpToolResult {
+                    content: vec![McpContent::text(output)],
                     is_error: None,
                 })
             }

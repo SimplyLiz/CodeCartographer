@@ -179,7 +179,7 @@ pub fn build_reach(
     let root = resolve_symbol(mapped, symbol_query, opts.file_filter.as_deref())?;
 
     // --- 2. Find callers via text search ---
-    let (callers, test_callers_collapsed) = find_callers(root_path, &root, opts);
+    let (callers, test_callers_collapsed) = find_callers(root_path, mapped, &root, opts);
 
     // --- 3. Find callees via call graph (Rust/Python) or unresolved stubs ---
     let (callees, language_note) = find_callees(root_path, mapped, &root, opts);
@@ -340,6 +340,7 @@ fn detect_visibility(raw: &str) -> Visibility {
 
 fn find_callers(
     root_path: &Path,
+    mapped: &[MappedFile],
     root: &RootSymbol,
     opts: &ReachOptions,
 ) -> (Vec<CallerInfo>, usize) {
@@ -377,7 +378,10 @@ fn find_callers(
             continue;
         }
 
-        let is_test = is_test_path(&m.path);
+        let is_test = is_test_path(&m.path)
+            || snippet_looks_like_test(trimmed)
+            || same_file_is_test_fn(mapped, &m.path, m.line_number);
+
         if is_test {
             test_count += 1;
             if !opts.include_tests {
@@ -457,6 +461,49 @@ fn is_test_path(path: &str) -> bool {
     || lower.contains("/spec") || lower.contains("_spec.")
     // "src/test/foo" — single "test" directory component with surrounding slashes
     || lower.contains("/test/")
+}
+
+/// Heuristic: does this call-site snippet look like it's inside a test?
+/// Catches `mod tests` blocks in source files that don't have `_test` in the path.
+fn snippet_looks_like_test(snippet: &str) -> bool {
+    // Test snippets almost always contain assert macros or expect calls.
+    let s = snippet;
+    s.contains("assert!(") || s.contains("assert_eq!(") || s.contains("assert_ne!(")
+        || s.contains("assert!(") || s.contains(".unwrap().unwrap()")
+        || (s.contains(".unwrap()") && s.trim_start().starts_with("let cg ="))
+        || s.contains("should_panic") || s.contains("proptest!")
+}
+
+/// Check if a call site in `file` at `line` falls inside one of the file's
+/// known test functions. We use `inline_test_fns` names from the mapped skeleton
+/// to find test function signatures and estimate their line ranges.
+fn same_file_is_test_fn(mapped: &[MappedFile], file: &str, line: usize) -> bool {
+    let mf = match mapped.iter().find(|m| m.path == file) {
+        Some(m) => m,
+        None => return false,
+    };
+    if mf.inline_test_fns.is_empty() {
+        return false;
+    }
+    // Find signatures of test functions and check if our line falls after
+    // the last test fn's line_start. Test functions are at the end of the file
+    // and clustered together, so the earliest test fn start is a reasonable boundary.
+    let test_start = mf
+        .signatures
+        .iter()
+        .filter(|s| {
+            s.symbol_name
+                .as_deref()
+                .map(|n| mf.inline_test_fns.iter().any(|t| t == n))
+                .unwrap_or(false)
+        })
+        .map(|s| s.line_start)
+        .min();
+
+    match test_start {
+        Some(start) => line > start,
+        None => false,
+    }
 }
 
 fn classify_caller_path(path: &str) -> Option<CallerTag> {

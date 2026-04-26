@@ -1,3 +1,4 @@
+mod answer;
 mod api;
 mod call_graph;
 mod reach;
@@ -610,6 +611,24 @@ enum Commands {
         #[command(subcommand)]
         command: SnapshotCommands,
     },
+    /// Question-driven evidence chain — assembles minimum context to answer a question [EXPERIMENTAL]
+    Answer {
+        /// Natural language question about the codebase
+        #[arg(value_name = "QUESTION")]
+        question: String,
+        /// Maximum items in the evidence chain (default 6)
+        #[arg(long, default_value = "6")]
+        max_items: usize,
+        /// Token budget (default 8000)
+        #[arg(long, default_value = "8000")]
+        budget: usize,
+        /// Do not show the body of the top-scored item
+        #[arg(long)]
+        no_body: bool,
+        /// Project path (defaults to current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
     /// Semantic graph traversal — AI-optimized context tree from a symbol [EXPERIMENTAL]
     Reach {
         /// Symbol name to start from (e.g. "verify_token" or "Auth::verify_token")
@@ -936,6 +955,10 @@ fn main() -> Result<()> {
         Some(Commands::Snapshot { command }) => {
             let cwd2 = cwd.clone();
             snapshot_mode(&cwd2, command)
+        }
+        Some(Commands::Answer { question, max_items, budget, no_body, path }) => {
+            let root = resolve_path(&cwd, path)?;
+            answer_mode(&root, &question, max_items, budget, !no_body)
         }
         Some(Commands::Reach { symbol, file, depth, budget, include_tests, format, path }) => {
             let root = resolve_path(&cwd, path)?;
@@ -5764,6 +5787,56 @@ fn snapshot_list(root: &Path) -> Result<()> {
 // =============================================================================
 // UPDATE MODE — re-run install.sh to upgrade
 // =============================================================================
+
+fn answer_mode(
+    root: &Path,
+    question: &str,
+    max_items: usize,
+    budget: usize,
+    show_top_body: bool,
+) -> Result<()> {
+    use answer::{build_answer, render_answer, AnswerOptions};
+
+    let scan_result = scan_files_with_noise_tracking(root)?;
+    let mut mapped: Vec<MappedFile> = Vec::new();
+    for path in &scan_result.files {
+        if !is_source_file(path) {
+            continue;
+        }
+        if let Some(content) = read_text_file(path) {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let mf = extract_skeleton(rel, &content);
+            if !mf.imports.is_empty() || !mf.signatures.is_empty() {
+                mapped.push(mf);
+            }
+        }
+    }
+
+    let opts = AnswerOptions {
+        budget,
+        max_items,
+        show_top_body,
+    };
+
+    let result = build_answer(root, &mapped, question, &opts);
+
+    if result.items.is_empty() {
+        eprintln!("answer: no relevant symbols found for query \"{question}\"");
+        eprintln!("  ({} files searched)", result.files_searched);
+        return Ok(());
+    }
+
+    print!("{}", render_answer(&result));
+    eprintln!(
+        "\n[answer] {} tokens · {} item(s) · {} files searched{}",
+        result.tokens_used,
+        result.items.len(),
+        result.files_searched,
+        if result.budget_hit { " [budget hit]" } else { "" },
+    );
+
+    Ok(())
+}
 
 fn reach_mode(
     root: &Path,
