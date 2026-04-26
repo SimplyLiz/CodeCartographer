@@ -107,19 +107,78 @@ pub fn build_answer(
         seen.len()
     };
 
+    // Extract query terms upfront — needed for both file selection and symbol scoring.
+    // Extract query terms and PascalCase symbol names upfront (used in file selection too).
+    let query_terms = tokenize_query(query);
+    let pascal_terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| {
+            t.len() >= 4
+                && t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                && t.chars().any(|c| c.is_lowercase())
+        })
+        .map(|t| t.to_string())
+        .collect();
+
     // Collect unique candidate files ranked by BM25 score.
-    let mut file_scores: HashMap<String, f64> = HashMap::new();
+    // Normalize by match count so large files don't dominate small ones.
+    let mut file_matches: HashMap<String, usize> = HashMap::new();
+    let mut file_total_chars: HashMap<String, usize> = HashMap::new();
     for m in &bm25.matches {
-        let entry = file_scores.entry(m.path.clone()).or_default();
-        *entry += 1.0; // increment per match; BM25 already weights by relevance
+        *file_matches.entry(m.path.clone()).or_default() += 1;
+    }
+    for (path, _) in &file_matches {
+        let chars = mapped
+            .iter()
+            .find(|mf| &mf.path == path)
+            .map(|mf| mf.signatures.iter().map(|s| s.raw.len()).sum::<usize>())
+            .unwrap_or(1000);
+        file_total_chars.insert(path.clone(), chars.max(1));
     }
 
-    let mut ranked_files: Vec<(String, f64)> = file_scores.into_iter().collect();
+    let mut ranked_files: Vec<(String, f64)> = file_matches
+        .iter()
+        .map(|(path, &hits)| {
+            // Normalise hits by estimated file density so large files don't win by volume.
+            let density = hits as f64 / (file_total_chars[path] as f64).sqrt();
+            (path.clone(), density)
+        })
+        .collect();
     ranked_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     ranked_files.truncate(10);
 
-    // --- 2. Score symbols in candidate files ---
-    let query_terms = tokenize_query(query);
+    // Supplement BM25 with filename-match candidates.
+    // BM25 IDF-penalises terms that appear in many files (e.g. "reach" in a repo
+    // named "reach"), causing the directly relevant file to rank below noise.
+    // Any file whose stem matches a query term gets added with a small sentinel score.
+    let existing: std::collections::HashSet<_> = ranked_files.iter().map(|(p, _)| p.clone()).collect();
+    for mf in mapped {
+        if existing.contains(&mf.path) { continue; }
+        let stem = mf.path
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(".rs")
+            .trim_end_matches(".py")
+            .trim_end_matches(".go")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".js")
+            .to_lowercase();
+        let matches_filename = query_terms.iter().any(|t| {
+            t.len() >= 4 && (stem.contains(t.as_str()) || t.contains(stem.as_str()))
+        });
+        // Also boost files containing PascalCase terms from the query.
+        let matches_pascal = pascal_terms.iter().any(|pt| {
+            mf.signatures.iter().any(|s| {
+                s.symbol_name.as_deref() == Some(pt.as_str())
+                    || s.qualified_name.as_deref() == Some(pt.as_str())
+            })
+        });
+        if matches_filename || matches_pascal {
+            ranked_files.push((mf.path.clone(), 0.5)); // sentinel score below BM25 hits
+        }
+    }
+
     let mut scored: Vec<ScoredSymbol> = vec![];
 
     for (file, file_score) in &ranked_files {
@@ -128,7 +187,21 @@ pub fn build_answer(
             None => continue,
         };
         for sig in &mf.signatures {
-            let sym_score = score_symbol(sig, &query_terms, *file_score);
+            // Skip test functions — they're never the answer to "how does X work".
+            if is_test_symbol(sig, mf) {
+                continue;
+            }
+            // Skip bare module declarations — not explanatory.
+            if matches!(sig.kind, SymbolKind::Namespace) {
+                continue;
+            }
+            if sig.raw.trim_start().starts_with("mod ") {
+                continue;
+            }
+
+            let sym_score = score_symbol(sig, &query_terms, &pascal_terms, *file_score);
+            // Require the symbol itself to contribute — reject symbols that only
+            // scored because their file happened to match.
             if sym_score > 0.0 {
                 scored.push(ScoredSymbol {
                     file: file.clone(),
@@ -195,60 +268,98 @@ struct ScoredSymbol {
     score: f64,
 }
 
+const STOP_WORDS: &[&str] = &[
+    "how", "does", "what", "where", "when", "who", "why", "which",
+    "the", "and", "but", "for", "are", "was", "is", "it", "its",
+    "this", "that", "with", "from", "have", "has", "had", "not",
+    "can", "will", "should", "would", "could", "may", "get", "do",
+    "did", "use", "used", "find", "work", "works", "make", "made",
+    "show", "shows", "give", "gives", "call", "calls", "run", "runs",
+    "set", "sets", "add", "adds", "all", "any", "each", "into",
+];
+
 fn tokenize_query(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| t.len() >= 3)
+        .filter(|t| t.len() >= 3 && !STOP_WORDS.contains(&t.to_lowercase().as_str()))
         .map(|t| t.to_lowercase())
         .collect()
 }
 
-fn score_symbol(sig: &Signature, query_terms: &[String], file_score: f64) -> f64 {
-    let name = sig
-        .symbol_name
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+fn score_symbol(
+    sig: &Signature,
+    query_terms: &[String],
+    pascal_terms: &[String],
+    file_score: f64,
+) -> f64 {
+    let sym_name = sig.symbol_name.as_deref().unwrap_or("");
+    let name = sym_name.to_lowercase();
     let raw = sig.raw.to_lowercase();
-    let doc = sig
-        .doc_comment
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+    let doc = sig.doc_comment.as_deref().unwrap_or("").to_lowercase();
 
-    let mut score = 0.0;
+    let mut sym_score = 0.0f64;
+
+    // Exact PascalCase symbol name match — very strong signal.
+    for pt in pascal_terms {
+        if sym_name == pt.as_str()
+            || sig.qualified_name.as_deref() == Some(pt.as_str())
+        {
+            sym_score += 15.0;
+        }
+    }
 
     for term in query_terms {
-        // Strong match: term appears in the symbol name itself.
+        // Strong: term in the symbol name.
         if name.contains(term.as_str()) {
-            score += 3.0;
+            sym_score += 3.0;
         }
-        // Medium: term in the raw signature (parameters, return types).
+        // Medium: term in raw signature (parameters, return types).
         if raw.contains(term.as_str()) {
-            score += 1.5;
+            sym_score += 1.5;
         }
         // Weak: term in doc comment.
         if doc.contains(term.as_str()) {
-            score += 0.5;
+            sym_score += 0.5;
         }
     }
 
-    // Boost public symbols over private ones — they're more likely to be the
-    // interface an AI needs to understand.
+    // Symbol itself must contribute at least something — this is the gate
+    // that prevents "high-BM25 file, unrelated symbol" combinations.
+    if sym_score == 0.0 {
+        return 0.0;
+    }
+
+    // Boost public symbols.
     if sig.raw.trim_start().starts_with("pub") {
-        score *= 1.4;
+        sym_score *= 1.4;
     }
 
-    // Boost functions and methods over fields and constants — they're more
-    // explanatory.
-    match sig.kind {
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => score *= 1.2,
-        SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface => score *= 1.1,
-        _ => {}
-    }
+    // Boost functions and types over misc symbols.
+    sym_score *= match sig.kind {
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => 1.2,
+        SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface => 1.1,
+        _ => 1.0,
+    };
 
-    // Incorporate the BM25 file-level relevance.
-    score * (1.0 + file_score * 0.1)
+    // File-level BM25 relevance as a mild multiplier (not the primary driver).
+    sym_score * (1.0 + file_score * 0.05)
+}
+
+/// True if this signature is a test function that should not appear in answer chains.
+fn is_test_symbol(sig: &Signature, mf: &MappedFile) -> bool {
+    let name = sig.symbol_name.as_deref().unwrap_or("");
+    // Inline test functions listed in the file's test set.
+    if mf.inline_test_fns.iter().any(|t| t == name) {
+        return true;
+    }
+    // Function name patterns common in test modules.
+    if name.ends_with("_works") || name.ends_with("_test") || name.ends_with("_spec")
+        || name.starts_with("test_") || name.starts_with("check_")
+    {
+        return true;
+    }
+    // Test files by path.
+    crate::reach::is_test_path_pub(&mf.path)
 }
 
 // ---------------------------------------------------------------------------
@@ -616,14 +727,14 @@ mod tests {
     #[test]
     fn score_symbol_matches_name_terms() {
         let sig = make_sig("verify_token", SymbolKind::Function, "pub fn verify_token(t: &str)", 0);
-        let score = score_symbol(&sig, &["verify".to_string(), "token".to_string()], 1.0);
+        let score = score_symbol(&sig, &["verify".to_string(), "token".to_string()], &[], 1.0);
         assert!(score > 5.0, "expected high score for name match, got {score}");
     }
 
     #[test]
     fn score_symbol_zero_for_no_match() {
         let sig = make_sig("unrelated_fn", SymbolKind::Function, "fn unrelated_fn()", 0);
-        let score = score_symbol(&sig, &["auth".to_string(), "login".to_string()], 1.0);
+        let score = score_symbol(&sig, &["auth".to_string(), "login".to_string()], &[], 1.0);
         assert_eq!(score, 0.0);
     }
 

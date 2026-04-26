@@ -451,6 +451,10 @@ fn is_comment_line(line: &str) -> bool {
     t.starts_with("//") || t.starts_with('#') || t.starts_with("/*") || t.starts_with('*')
 }
 
+pub fn is_test_path_pub(path: &str) -> bool {
+    is_test_path(path)
+}
+
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     // "/tests/foo" or "tests/foo" at the top level
