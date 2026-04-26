@@ -415,6 +415,54 @@ Generate `CLAUDE.md` — an architecture guide formatted for Claude Code.
 
 ---
 
+## Semantic traversal (experimental)
+
+### reach
+
+```bash
+navigator reach SYMBOL [OPTIONS] [PATH]
+```
+
+Semantic graph traversal from a named symbol. Returns a compact AI-native context tree: callers with one-line snippets, callees with signatures, depth-2 type definitions. 135–500 tokens per symbol.
+
+| Flag | Description |
+|------|-------------|
+| `--file FILE` | Disambiguate when the symbol name appears in multiple files |
+| `--depth N` | Traversal depth (default: 2) |
+| `--budget TOKENS` | Token cap; trims leaf nodes first (default: 6000) |
+| `--include-tests` | Expand test call sites (default: collapsed and counted) |
+| `--show-body` | Include the function body of the root symbol, up to 40 lines |
+| `--format compact\|json` | Output format (default: compact) |
+
+```bash
+navigator reach verify_token
+navigator reach "Auth::verify_token" --file src/auth.rs
+navigator reach FileCallGraph --depth 1
+navigator reach build_reach --show-body
+```
+
+### answer
+
+```bash
+navigator answer QUESTION [OPTIONS] [PATH]
+```
+
+Question-driven evidence chain. Takes a natural-language question and returns a numbered list of the minimum semantic units that together answer it, in reading order with inter-item connections annotated.
+
+| Flag | Description |
+|------|-------------|
+| `--max-items N` | Maximum evidence items (default: 6) |
+| `--budget TOKENS` | Token cap (default: 8000) |
+| `--no-body` | Skip the function body for the top-scored item |
+
+```bash
+navigator answer "how does rate limiting work?"
+navigator answer "what is FileCallGraph and how is it built"
+navigator answer "how does token budget trimming work" --max-items 4
+```
+
+---
+
 ## Server and config
 
 ### serve

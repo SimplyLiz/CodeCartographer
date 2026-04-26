@@ -52,6 +52,50 @@ In addition to tools, the server exposes two readable resources:
 
 ---
 
+## Semantic traversal tools (experimental)
+
+These tools provide AI-optimized context at 1–3% of the token cost of skeleton tools. They trade breadth for precision: instead of the full project skeleton, they return exactly the context needed for a specific symbol or question.
+
+### `reach_symbol`
+
+Semantic graph traversal from a named symbol. Returns a compact context tree with distance-proportional detail: full signature + callee signatures at depth 1, type definitions at depth 2.
+
+```
+Parameters:
+  symbol        string   — symbol name (e.g. "verify_token" or "Auth::verify_token") (required)
+  file?         string   — file path fragment to disambiguate when name appears in multiple files
+  depth?        number   — traversal depth (default: 2)
+  budget?       number   — token cap; leaf nodes trimmed first (default: 6000)
+  includeTests? boolean  — expand test call sites instead of collapsing them (default: false)
+  showBody?     boolean  — include the function body of the root symbol, up to 40 lines (default: false)
+```
+
+**What you get:** root symbol with signature, production callers with one-line call context (tagged `[handler]`/`[middleware]`/`[entry]`), callees with signatures, depth-2 type definitions. Test callers are collapsed and counted. Private callee functions are surfaced for Rust/Python via call graph.
+
+**Token cost:** 135–500 tokens per symbol vs ~18,000 for `ranked_skeleton` on the same files.
+
+**Disambiguation:** if the symbol name appears in multiple files, the tool returns an error listing all candidates — pass `file` to select one.
+
+### `answer_question`
+
+Question-driven evidence chain. Takes a natural-language question and returns a numbered list of the minimum semantic units that together answer it, in reading order.
+
+```
+Parameters:
+  question    string   — natural language question (e.g. "how does rate limiting work?") (required)
+  maxItems?   number   — maximum evidence items (default: 6)
+  budget?     number   — token cap (default: 8000)
+  showBody?   boolean  — show function body for top-scored item (default: true)
+```
+
+**What you get:** numbered items (types before functions, entry points before internals), inter-item connections annotated (`[uses type #2]`, `[calls #3]`, `[imports from #4]`), role labels (`[core logic]`, `[entry point]`, `[internal]`, `[type]`). Private implementation functions are included when they score above the noise floor.
+
+**Token cost:** 220–560 tokens for a 6-item chain vs ~18,000 for the equivalent `query_context` output.
+
+**Best for:** conceptual questions ("how does X work?", "what is Y used for?"). For targeted per-symbol questions, `reach_symbol` is more precise.
+
+---
+
 ## Context and skeleton tools
 
 These are the most-used tools in a daily Claude Code session.
