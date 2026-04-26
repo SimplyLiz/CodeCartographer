@@ -322,11 +322,12 @@ fn score_symbol(
     }
 
     let mut name_score = 0.0f64;
+    let mut name_term_hits: usize = 0;
     let mut sig_score = 0.0f64;
     let mut doc_score = 0.0f64;
 
     for term in query_terms {
-        if name.contains(term.as_str()) { name_score += 3.0; }
+        if name.contains(term.as_str()) { name_score += 3.0; name_term_hits += 1; }
         if raw.contains(term.as_str())  { sig_score  += 1.5; }
         if doc.contains(term.as_str())  { doc_score  += 0.5; }
     }
@@ -352,10 +353,12 @@ fn score_symbol(
         _ => 1.0,
     };
 
-    // Private functions (confidence < 25) need a clearer name match to appear.
-    // Without this, any private fn whose name contains a common term ("token",
-    // "graph", etc.) would noise up results above more relevant public symbols.
-    if sig.confidence < 25 && name_score < 3.0 {
+    // Private functions (confidence < 25) must match at least two distinct
+    // query terms in their name. A single-term hit (e.g. "graph" in
+    // health_graph_at_ref for a "call graph" query) is too weak — it surfaces
+    // private helpers from high-BM25 files (main.rs, api.rs) above more
+    // relevant public symbols.
+    if sig.confidence < 25 && name_term_hits < 2 {
         return 0.0;
     }
 
