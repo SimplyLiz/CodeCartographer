@@ -67,7 +67,7 @@ navigator query "how does authentication work?"
 | `navigator shotgun` | Shotgun surgery candidates (high co-change dispersion) |
 | `navigator semidiff HEAD~1` | Function-level semantic diff between two commits |
 | `navigator evolution --days 30` | Architectural trends over time |
-| `navigator path <A> <B>` | Shortest import path between two modules |
+| `navigator path --from <A> --to <B>` | Shortest import path between two modules |
 | `navigator deps <MODULE>` | Dependencies of a module as JSON |
 | `navigator todo` | TODO/FIXME/HACK density across source files |
 | `navigator languages` | Languages detected and their file counts |

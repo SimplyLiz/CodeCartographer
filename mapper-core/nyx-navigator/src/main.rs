@@ -1313,8 +1313,7 @@ fn overview_mode(
         "source"  => source_mode(root, cwd, target, copy, ignore_set),
         "diagram" => {
             use crate::diagram;
-            let mut graph = {
-                use crate::api::ApiState;
+            let graph = {
                 use crate::scanner::is_source_file;
                 let scan = scan_files_with_noise_tracking(root)?;
                 let mapped: std::collections::HashMap<String, MappedFile> = scan.files.iter()
@@ -1516,7 +1515,7 @@ fn print_navigator_report(included_count: usize, ignored: &[IgnoredFile], tokens
 // Token Budget Check
 // =============================================================================
 
-fn handle_token_budget_copy(content: &str, tokens: usize, auto_copy: bool) -> Result<()> {
+fn handle_token_budget_copy(content: &str, _tokens: usize, auto_copy: bool) -> Result<()> {
     if auto_copy {
         copy_to_clipboard(content)?;
     } else {
@@ -2062,7 +2061,10 @@ fn health_mode(root: &Path, compare: Option<&str>, json_out: bool) -> Result<()>
                 })
                 .unwrap_or_default();
 
-            let suggestion = if callers == 0 {
+            let is_entry = crate::api::is_entry_point_path(&node.path);
+            let suggestion = if callers == 0 && is_entry {
+                "no callers — entry point; this is expected".to_string()
+            } else if callers == 0 {
                 "no callers — likely dead bridge, consider removal".to_string()
             } else if caller_dirs.len() >= 2 {
                 let dirs: Vec<&str> = caller_dirs.iter().copied().take(3).collect();
@@ -2707,6 +2709,9 @@ fn cochange_mode(
 
     if filtered.is_empty() {
         println!("No co-change pairs found with count >= {}.", min_count);
+        if min_count > 2 {
+            println!("Tip: try a lower threshold — e.g. `navigator cochange --min-count 2`");
+        }
         return Ok(());
     }
 
@@ -3089,9 +3094,24 @@ fn hotspots_mode(
 // =============================================================================
 
 fn shotgun_mode(root: &Path, commits: usize, top: usize, min_partners: usize) -> Result<()> {
+    use crate::scanner::{IGNORED_FILES, NOISE_LOCK_FILES, NOISE_MAP_EXTENSIONS};
     let mut entries = crate::git_analysis::git_cochange_dispersion(root, commits);
 
-    entries.retain(|e| e.partner_count >= min_partners);
+    entries.retain(|e| {
+        if e.partner_count < min_partners {
+            return false;
+        }
+        let filename = e.file.rsplit('/').next().unwrap_or(&e.file);
+        if IGNORED_FILES.contains(&filename) || NOISE_LOCK_FILES.contains(&filename) {
+            return false;
+        }
+        if let Some(ext) = filename.rsplit('.').next() {
+            if NOISE_MAP_EXTENSIONS.contains(&ext) {
+                return false;
+            }
+        }
+        true
+    });
     entries.truncate(top);
 
     println!("╔═══════════════════════════════════════════════════════════╗");
@@ -5113,6 +5133,7 @@ fn symbols_mode(root: &Path, unreferenced_only: bool) -> Result<()> {
     println!();
     println!("Note: Uses import-token heuristic. Does not account for dynamic dispatch,");
     println!("reflection, or external consumers of library crates.");
+    println!("      `pub extern \"C\"` / FFI exports are excluded automatically.");
 
     Ok(())
 }
@@ -5445,6 +5466,18 @@ fn context_health_mode(
 
     let content = if let Some(path) = file {
         fs::read_to_string(path).with_context(|| format!("Reading {}", path.display()))?
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // No file arg and stdin is a terminal — fall back to navigator_map.xml in cwd.
+        let map_path = std::path::Path::new("navigator_map.xml");
+        if map_path.exists() {
+            eprintln!("(reading navigator_map.xml)");
+            fs::read_to_string(map_path).context("Reading navigator_map.xml")?
+        } else {
+            anyhow::bail!(
+                "No input: pass a file (`navigator context-health FILE`) or pipe content, \
+                 or run `navigator map` first to generate navigator_map.xml"
+            );
+        }
     } else {
         use io::Read;
         let mut buf = String::new();
