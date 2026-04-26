@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::formatter::estimate_tokens;
+use regex::Regex;
 use crate::mapper::{MappedFile, Signature, SymbolKind};
 use crate::search::{bm25_search, BM25Options};
 
@@ -186,7 +187,21 @@ pub fn build_answer(
             Some(m) => m,
             None => continue,
         };
-        for sig in &mf.signatures {
+
+        // Collect public symbols from the skeleton.
+        let mut file_sigs: Vec<std::borrow::Cow<Signature>> = mf
+            .signatures
+            .iter()
+            .map(std::borrow::Cow::Borrowed)
+            .collect();
+
+        // Supplement with private function signatures for BM25-matched files.
+        // The skeleton only contains public symbols; private helper functions
+        // (e.g. find_callers, trim_to_budget) are often the real implementation.
+        let private_sigs = extract_private_fn_sigs(root_path, file);
+        file_sigs.extend(private_sigs.into_iter().map(std::borrow::Cow::Owned));
+
+        for sig in &file_sigs {
             // Skip test functions — they're never the answer to "how does X work".
             if is_test_symbol(sig, mf) {
                 continue;
@@ -200,12 +215,10 @@ pub fn build_answer(
             }
 
             let sym_score = score_symbol(sig, &query_terms, &pascal_terms, *file_score);
-            // Require the symbol itself to contribute — reject symbols that only
-            // scored because their file happened to match.
             if sym_score > 0.0 {
                 scored.push(ScoredSymbol {
                     file: file.clone(),
-                    sig: sig.clone(),
+                    sig: sig.as_ref().clone(),
                     score: sym_score,
                 });
             }
@@ -338,6 +351,13 @@ fn score_symbol(
         SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface => 1.1,
         _ => 1.0,
     };
+
+    // Private functions (confidence < 25) need a clearer name match to appear.
+    // Without this, any private fn whose name contains a common term ("token",
+    // "graph", etc.) would noise up results above more relevant public symbols.
+    if sig.confidence < 25 && name_score < 3.0 {
+        return 0.0;
+    }
 
     // File-level BM25 relevance as a mild multiplier (not the primary driver).
     sym_score * (1.0 + file_score * 0.05)
@@ -481,11 +501,75 @@ fn role_note_for(sig: &Signature, is_top: bool) -> Option<String> {
             if raw.starts_with("pub") {
                 Some("entry point".to_string())
             } else {
-                Some("helper".to_string())
+                Some("internal".to_string())
             }
         }
         _ => None,
     }
+}
+
+/// Extract private (non-pub) top-level function signatures from a source file.
+/// These are absent from the skeleton (which only stores public symbols) but are
+/// often the real implementation behind a public entry point.
+/// Returns lightweight Signature objects with name, raw sig, and line_start.
+fn extract_private_fn_sigs(root_path: &Path, file_path: &str) -> Vec<Signature> {
+    let abs = root_path.join(file_path);
+    let source = match std::fs::read_to_string(&abs) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    // Regex to match private function declarations.
+    // Matches lines that start a fn but NOT pub/pub(crate)/pub(super)/extern.
+    let fn_start = Regex::new(
+        r"^(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\("
+    ).unwrap();
+    // Exclude lines that are pub or part of a trait/impl definition.
+    let pub_prefix = Regex::new(r"^pub|^extern|^impl\b|^trait\b").unwrap();
+
+    let mut sigs: Vec<Signature> = vec![];
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if pub_prefix.is_match(trimmed) {
+            continue;
+        }
+        if let Some(caps) = fn_start.captures(trimmed) {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if name.is_empty() { continue; }
+
+            // Collect the signature up to the opening brace (may span multiple lines).
+            let mut sig_parts: Vec<&str> = vec![];
+            for sig_line in &lines[i..] {
+                sig_parts.push(sig_line.trim());
+                if sig_line.contains('{') || sig_parts.len() >= 5 { break; }
+            }
+            let raw = sig_parts.join(" ")
+                .split('{').next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
+
+            sigs.push(Signature {
+                raw,
+                ckb_id: None,
+                symbol_name: Some(name.clone()),
+                qualified_name: Some(name),
+                kind: SymbolKind::Function,
+                line_start: i,
+                col_start: 0,
+                line_end: i,
+                col_end: 0,
+                confidence: 20, // lower confidence than public symbols
+                doc_comment: None,
+                body: None,
+                tested: false,
+            });
+        }
+    }
+
+    sigs
 }
 
 /// Annotate each item with how it connects to others in the chain.

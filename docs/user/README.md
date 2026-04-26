@@ -11,6 +11,7 @@ Nyx.Navigator packages your repository into a structured snapshot an AI can reas
 | [Architecture Analysis](architecture-analysis.md) | Health scoring, simulate-change, dead code, layer enforcement, evolution |
 | [Git Intelligence](git-intelligence.md) | Hotspots, co-change, hidden coupling, semidiff, shotgun surgery |
 | [Search](search.md) | search, find, replace, extract — grep/sed/awk for your codebase |
+| [Semantic Traversal](cli-reference.md#semantic-traversal-experimental) | `reach` and `answer` — symbol-scoped and question-driven context at 1–3% of skeleton token cost |
 | [Diagrams](diagrams.md) | Dependency graphs, call graphs, blast radius, HTML explorer |
 | [MCP Tools](mcp-tools.md) | MCP server setup and full tool reference |
 | [Configuration](configuration.md) | Global config, per-repo config, .navigatorignore, layers.toml |
