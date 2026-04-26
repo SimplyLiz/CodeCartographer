@@ -154,8 +154,10 @@ pub const IGNORED_FILES: &[&str] = &[
     "navigator_map.md",
     "navigator_map.json",
     ".navigator_memory.json",
+    ".cartographer_memory.json",
     // Nyx.Navigator runtime state files
     ".navigator_cache.json",
+    ".cartographer_cache.json",
     ".navigator_watch_state.json",
     ".navigator_history.json",
 ];

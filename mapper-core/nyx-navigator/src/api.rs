@@ -623,6 +623,10 @@ impl ApiState {
                     .signatures
                     .iter()
                     .filter(|sig| {
+                        // FFI exports are consumed by C callers; import-graph can't see them.
+                        if sig.raw.contains("extern \"C\"") || sig.raw.contains("extern \"c\"") {
+                            return false;
+                        }
                         let is_public = public_prefixes
                             .iter()
                             .any(|pfx| sig.raw.starts_with(pfx));
@@ -1020,6 +1024,8 @@ pub fn is_entry_point_path(path: &str) -> bool {
     matches!(
         name,
         "main.rs"
+            | "lib.rs"
+            | "mod.rs"
             | "main.py"
             | "main.go"
             | "main.ts"
