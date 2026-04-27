@@ -1085,6 +1085,176 @@ pub fn render_reach(result: &ReachResult) -> String {
     out
 }
 
+/// Render a unified context tree from two or more reach results.
+///
+/// Callers are merged (deduped by file:line). Callees are merged (deduped by
+/// name; those appearing in multiple roots are annotated `[shared]`). Depth-2
+/// types that appear in more than one result are promoted to a "shared types"
+/// section so they don't get buried.
+pub fn render_multi_reach(results: &[ReachResult]) -> String {
+    assert!(!results.is_empty(), "render_multi_reach: empty results slice");
+
+    let mut out = String::with_capacity(4096);
+
+    // Header
+    let names: Vec<&str> = results.iter().map(|r| r.root.name.as_str()).collect();
+    out.push_str(&format!("── reach: {}\n\n", names.join(" + ")));
+
+    // One header line + signature per root symbol.
+    for r in results {
+        let kind_label = kind_str(r.root.kind);
+        let vis_label = match r.root.visibility {
+            Visibility::Public => "  pub",
+            Visibility::Crate => "  pub(crate)",
+            Visibility::Private => "",
+        };
+        out.push_str(&format!(
+            "── {}  {}  {}:{}{}\n",
+            r.root.name, kind_label, short_path(&r.root.file), r.root.line, vis_label
+        ));
+        out.push_str(&format!("   sig  {}\n", r.root.sig.trim()));
+        if let Some(ref body) = r.root_body {
+            out.push_str("   body\n");
+            for line in body.lines() {
+                out.push_str(&format!("   {}\n", line));
+            }
+        }
+    }
+    out.push('\n');
+
+    // Merged callers — union deduped by (file, line).
+    let mut seen_locs: std::collections::HashSet<(String, usize)> = Default::default();
+    let mut all_callers: Vec<&CallerInfo> = Vec::new();
+    for r in results {
+        for c in &r.callers {
+            if seen_locs.insert((c.file.clone(), c.line)) {
+                all_callers.push(c);
+            }
+        }
+    }
+    let prod_count = all_callers.iter().filter(|c| !c.is_test).count();
+    let test_total = all_callers.iter().filter(|c| c.is_test).count()
+        + results.iter().map(|r| r.test_callers_collapsed).sum::<usize>();
+
+    if prod_count > 0 || test_total > 0 {
+        let test_part = if test_total > 0 { format!(" · {} test", test_total) } else { String::new() };
+        out.push_str(&format!("   callers  {} prod{}\n", prod_count, test_part));
+        let max_loc_len = all_callers
+            .iter()
+            .map(|c| format!("{}:{}", short_path(&c.file), c.line).len())
+            .max()
+            .unwrap_or(0);
+        for caller in &all_callers {
+            let loc = format!("{}:{}", short_path(&caller.file), caller.line);
+            let pad = " ".repeat(max_loc_len.saturating_sub(loc.len()));
+            let tag_str = caller
+                .tag
+                .as_ref()
+                .map(|t| format!("[{}]  ", t.label()))
+                .unwrap_or_else(|| "  ".to_string());
+            let snip = truncate_snippet(&caller.snippet, 72);
+            out.push_str(&format!("     {}{}  {}{}\n", loc, pad, tag_str, snip));
+        }
+    } else {
+        out.push_str("   callers  none found\n");
+    }
+
+    // Merged callees — union deduped by name; shared ones annotated.
+    let callee_hit_count: std::collections::HashMap<&str, usize> = {
+        let mut m: std::collections::HashMap<&str, usize> = Default::default();
+        for r in results {
+            for c in &r.callees {
+                *m.entry(c.name.as_str()).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+    let mut seen_callee_names: std::collections::HashSet<&str> = Default::default();
+    let mut all_callees: Vec<&CalleeInfo> = Vec::new();
+    for r in results {
+        for c in &r.callees {
+            if seen_callee_names.insert(c.name.as_str()) {
+                all_callees.push(c);
+            }
+        }
+    }
+    if !all_callees.is_empty() {
+        out.push_str("   callees\n");
+        let max_name = all_callees.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        let max_loc = all_callees
+            .iter()
+            .map(|c| format!("{}:{}", short_path(&c.file), c.line).len())
+            .max()
+            .unwrap_or(0);
+        for callee in &all_callees {
+            let shared = *callee_hit_count.get(callee.name.as_str()).unwrap_or(&0) >= 2;
+            let name_pad = " ".repeat(max_name.saturating_sub(callee.name.len()));
+            let loc = format!("{}:{}", short_path(&callee.file), callee.line);
+            let loc_pad = " ".repeat(max_loc.saturating_sub(loc.len()));
+            let sig = truncate_snippet(callee.sig.trim(), 72);
+            let shared_tag = if shared { "  [shared]" } else { "" };
+            out.push_str(&format!(
+                "     {}{}  {}{}  {}{}\n",
+                callee.name, name_pad, loc, loc_pad, sig, shared_tag
+            ));
+        }
+    }
+
+    // Depth-2: collect counts across all results.
+    let depth2_hit_count: std::collections::HashMap<&str, usize> = {
+        let mut m: std::collections::HashMap<&str, usize> = Default::default();
+        for r in results {
+            for n in &r.depth2 {
+                *m.entry(n.name.as_str()).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+    let mut seen_depth2: std::collections::HashSet<&str> = Default::default();
+    let mut promoted: Vec<&NeighborInfo> = Vec::new();
+    let mut ordinary: Vec<&NeighborInfo> = Vec::new();
+    for r in results {
+        for n in &r.depth2 {
+            if seen_depth2.insert(n.name.as_str()) {
+                if *depth2_hit_count.get(n.name.as_str()).unwrap_or(&0) >= 2 {
+                    promoted.push(n);
+                } else {
+                    ordinary.push(n);
+                }
+            }
+        }
+    }
+
+    if !promoted.is_empty() {
+        out.push_str("   shared types  [promoted from depth-2]\n");
+        for n in &promoted {
+            let loc = format!("{}:{}", short_path(&n.file), n.line);
+            let sig = truncate_snippet(n.sig.trim(), 80);
+            out.push_str(&format!("     {}  {}  {}\n", n.name, loc, sig));
+        }
+    }
+    if !ordinary.is_empty() {
+        out.push_str("   depth-2  [sig only]\n");
+        for n in &ordinary {
+            let loc = format!("{}:{}", short_path(&n.file), n.line);
+            let sig = truncate_snippet(n.sig.trim(), 80);
+            out.push_str(&format!("     {}  {}  {}\n", n.name, loc, sig));
+        }
+    }
+
+    // Language notes
+    for r in results {
+        if let Some(ref note) = r.language_note {
+            out.push_str(&format!("   note  {} ({})\n", note, r.root.name));
+        }
+    }
+
+    let total: usize = results.iter().map(|r| r.tokens_used).sum();
+    out.push_str(&format!("\n[{} tokens combined]\n", total));
+
+    out
+}
+
 fn kind_str(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => "fn",

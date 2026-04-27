@@ -625,16 +625,19 @@ enum Commands {
         /// Do not show the body of the top-scored item
         #[arg(long)]
         no_body: bool,
+        /// Drill into evidence item N with reach, appended below the answer chain
+        #[arg(long = "then", value_name = "N")]
+        then_item: Option<usize>,
         /// Project path (defaults to current directory)
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
     /// Semantic graph traversal — AI-optimized context tree from a symbol [EXPERIMENTAL]
     Reach {
-        /// Symbol name to start from (e.g. "verify_token" or "Auth::verify_token")
-        #[arg(value_name = "SYMBOL")]
-        symbol: String,
-        /// Disambiguate to a specific file when the symbol appears in multiple files
+        /// Symbol name(s) to start from. Provide two for intersection view.
+        #[arg(value_name = "SYMBOL", num_args = 1..)]
+        symbols: Vec<String>,
+        /// Disambiguate to a specific file (single-symbol mode only)
         #[arg(long, value_name = "FILE")]
         file: Option<String>,
         /// Graph traversal depth (default 2)
@@ -959,13 +962,14 @@ fn main() -> Result<()> {
             let cwd2 = cwd.clone();
             snapshot_mode(&cwd2, command)
         }
-        Some(Commands::Answer { question, max_items, budget, no_body, path }) => {
+        Some(Commands::Answer { question, max_items, budget, no_body, then_item, path }) => {
             let root = resolve_path(&cwd, path)?;
-            answer_mode(&root, &question, max_items, budget, !no_body)
+            answer_mode(&root, &question, max_items, budget, !no_body, then_item)
         }
-        Some(Commands::Reach { symbol, file, depth, budget, include_tests, show_body, format, path }) => {
+        Some(Commands::Reach { symbols, file, depth, budget, include_tests, show_body, format, path }) => {
             let root = resolve_path(&cwd, path)?;
-            reach_mode(&root, &symbol, file.as_deref(), depth, budget, include_tests, show_body, &format)
+            let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+            reach_mode(&root, &sym_refs, file.as_deref(), depth, budget, include_tests, show_body, &format)
         }
         Some(Commands::Update) => {
             update_mode()
@@ -5830,6 +5834,7 @@ fn answer_mode(
     max_items: usize,
     budget: usize,
     show_top_body: bool,
+    then_item: Option<usize>,
 ) -> Result<()> {
     use answer::{build_answer, render_answer, AnswerOptions};
 
@@ -5871,12 +5876,41 @@ fn answer_mode(
         if result.budget_hit { " [budget hit]" } else { "" },
     );
 
+    // --then N: drill into evidence item N via reach, appended below.
+    if let Some(n) = then_item {
+        if n == 0 || n > result.items.len() {
+            eprintln!(
+                "answer --then {n}: no item #{n} (chain has {} item{})",
+                result.items.len(),
+                if result.items.len() == 1 { "" } else { "s" }
+            );
+            return Ok(());
+        }
+        use reach::{build_reach, render_reach, ReachOptions};
+        let item = &result.items[n - 1];
+        eprintln!("\n── expanding item #{n}: {}", item.name);
+        let reach_opts = ReachOptions {
+            file_filter: Some(item.file.clone()),
+            ..Default::default()
+        };
+        match build_reach(root, &mapped, &item.name, &reach_opts) {
+            Ok(rr) => {
+                print!("{}", render_reach(&rr));
+                eprintln!(
+                    "[reach] {} tokens · {} caller(s) · {} callee(s)",
+                    rr.tokens_used, rr.callers.len(), rr.callees.len()
+                );
+            }
+            Err(e) => eprintln!("reach: {e}"),
+        }
+    }
+
     Ok(())
 }
 
 fn reach_mode(
     root: &Path,
-    symbol: &str,
+    symbols: &[&str],
     file_filter: Option<&str>,
     depth: usize,
     budget: usize,
@@ -5884,7 +5918,7 @@ fn reach_mode(
     show_body: bool,
     format: &str,
 ) -> Result<()> {
-    use reach::{build_reach, render_reach, ReachOptions};
+    use reach::{build_reach, render_reach, render_multi_reach, ReachOptions};
 
     // Scan project files to build the mapped skeleton.
     let scan_result = scan_files_with_noise_tracking(root)?;
@@ -5902,74 +5936,103 @@ fn reach_mode(
         }
     }
 
-    let opts = ReachOptions {
-        depth,
-        budget,
-        file_filter: file_filter.map(|s| s.to_string()),
-        include_tests,
-        show_body,
-        ..Default::default()
-    };
-
-    match build_reach(root, &mapped, symbol, &opts) {
-        Ok(result) => {
-            match format {
-                "json" => {
-                    // Structured JSON output for programmatic consumers.
-                    // Minimal fields — callers, callees, depth2 — no inline rendering.
-                    let json = serde_json::json!({
-                        "root": {
-                            "name": result.root.name,
-                            "file": result.root.file,
-                            "line": result.root.line,
-                            "sig": result.root.sig,
-                            "kind": format!("{:?}", result.root.kind),
-                        },
-                        "callers": result.callers.iter().map(|c| serde_json::json!({
-                            "file": c.file,
-                            "line": c.line,
-                            "snippet": c.snippet,
-                            "tag": c.tag.as_ref().map(|t| t.label()),
-                            "is_test": c.is_test,
-                        })).collect::<Vec<_>>(),
-                        "test_callers_collapsed": result.test_callers_collapsed,
-                        "callees": result.callees.iter().map(|c| serde_json::json!({
-                            "name": c.name,
-                            "file": c.file,
-                            "line": c.line,
-                            "sig": c.sig,
-                        })).collect::<Vec<_>>(),
-                        "depth2": result.depth2.iter().map(|n| serde_json::json!({
-                            "name": n.name,
-                            "file": n.file,
-                            "line": n.line,
-                            "sig": n.sig,
-                        })).collect::<Vec<_>>(),
-                        "tokens_used": result.tokens_used,
-                        "budget_hit": result.budget_hit,
-                        "language_note": result.language_note,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+    // Single-symbol: existing behaviour unchanged.
+    if symbols.len() == 1 {
+        let opts = ReachOptions {
+            depth,
+            budget,
+            file_filter: file_filter.map(|s| s.to_string()),
+            include_tests,
+            show_body,
+            ..Default::default()
+        };
+        match build_reach(root, &mapped, symbols[0], &opts) {
+            Ok(result) => {
+                match format {
+                    "json" => {
+                        let json = serde_json::json!({
+                            "root": {
+                                "name": result.root.name,
+                                "file": result.root.file,
+                                "line": result.root.line,
+                                "sig": result.root.sig,
+                                "kind": format!("{:?}", result.root.kind),
+                            },
+                            "callers": result.callers.iter().map(|c| serde_json::json!({
+                                "file": c.file,
+                                "line": c.line,
+                                "snippet": c.snippet,
+                                "tag": c.tag.as_ref().map(|t| t.label()),
+                                "is_test": c.is_test,
+                            })).collect::<Vec<_>>(),
+                            "test_callers_collapsed": result.test_callers_collapsed,
+                            "callees": result.callees.iter().map(|c| serde_json::json!({
+                                "name": c.name,
+                                "file": c.file,
+                                "line": c.line,
+                                "sig": c.sig,
+                            })).collect::<Vec<_>>(),
+                            "depth2": result.depth2.iter().map(|n| serde_json::json!({
+                                "name": n.name,
+                                "file": n.file,
+                                "line": n.line,
+                                "sig": n.sig,
+                            })).collect::<Vec<_>>(),
+                            "tokens_used": result.tokens_used,
+                            "budget_hit": result.budget_hit,
+                            "language_note": result.language_note,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                    }
+                    _ => {
+                        print!("{}", render_reach(&result));
+                        eprintln!(
+                            "\n[reach] {} tokens · depth {} · {} caller(s) · {} callee(s){}",
+                            result.tokens_used,
+                            depth,
+                            result.callers.len(),
+                            result.callees.len(),
+                            if result.budget_hit { " [budget hit]" } else { "" },
+                        );
+                    }
                 }
-                _ => {
-                    // Default: compact tree format.
-                    print!("{}", render_reach(&result));
-                    eprintln!(
-                        "\n[reach] {} tokens · depth {} · {} caller(s) · {} callee(s){}",
-                        result.tokens_used,
-                        depth,
-                        result.callers.len(),
-                        result.callees.len(),
-                        if result.budget_hit { " [budget hit]" } else { "" },
-                    );
-                }
+                Ok(())
             }
-            Ok(())
+            Err(e) => {
+                eprintln!("reach: {e}");
+                std::process::exit(1);
+            }
         }
-        Err(e) => {
-            eprintln!("reach: {e}");
+    } else {
+        // Multi-symbol: run build_reach for each, merge and render.
+        // --file and --format json are not supported in multi-symbol mode.
+        let mut results = Vec::new();
+        for &sym in symbols {
+            let opts = ReachOptions {
+                depth,
+                budget,
+                file_filter: None,
+                include_tests,
+                show_body,
+                ..Default::default()
+            };
+            match build_reach(root, &mapped, sym, &opts) {
+                Ok(r) => results.push(r),
+                Err(e) => eprintln!("reach: {sym}: {e}"),
+            }
+        }
+        if results.is_empty() {
+            eprintln!("reach: no symbols resolved");
             std::process::exit(1);
         }
+        print!("{}", render_multi_reach(&results));
+        let total: usize = results.iter().map(|r| r.tokens_used).sum();
+        let resolved = results.len();
+        eprintln!(
+            "\n[reach] {} tokens combined · {} of {} symbol(s) resolved",
+            total, resolved, symbols.len()
+        );
+        Ok(())
     }
 }
 
