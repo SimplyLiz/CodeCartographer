@@ -17,7 +17,7 @@ Nyx.Navigator packages your repository into a structured snapshot an AI can reas
 | [Configuration](configuration.md) | Global config, per-repo config, .navigatorignore, layers.toml |
 | [GitHub Action](github-action.md) | CI health gates and PR health-delta comments |
 | [Ecosystem](ecosystem.md) | How Nyx.Navigator fits with CKB, TruthKeeper, LLMRouter, and CCE |
-| [Integration](integration.md) | Hop AI and ShellAI integration |
+| [Integration](integration.md) | ShellAI integration |
 
 ## How it works
 
