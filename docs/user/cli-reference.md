@@ -390,9 +390,9 @@ Full reference in [Diagrams](diagrams.md). Quick summary:
 |------|-------------|
 | `--format mermaid\|dot\|ascii` | Output format for import graph (default: mermaid) |
 | `--format quadrant` | Churn × complexity scatter — top-right = refactor now |
-| `--format sequence\|seq` | Sequence diagram — requires `--call-graph FILE` (Rust/Python) |
-| `--format class\|uml` | Class diagram — requires `--call-graph FILE` (Rust/Python/TS/Go) |
-| `--format er\|entity\|erd` | ER diagram — requires `--call-graph FILE` (Rust/Python/TS/Go) |
+| `--format sequence\|seq` | Sequence diagram — requires `--call-graph FILE` (Rust/Python/Go/C/C++) |
+| `--format class\|uml` | Class diagram — requires `--call-graph FILE` (Rust/Python/Go/C++/TS) |
+| `--format er\|entity\|erd` | ER diagram — requires `--call-graph FILE` (Rust/Python/Go/C++/TS) |
 | `-o FILE` | Write to file; extension determines rendering |
 | `--max-nodes N` | Node cap (default: 60) |
 | `--focus MODULE` | Neighborhood view around a module |
@@ -466,7 +466,7 @@ navigator reach build_reach --show-body
 navigator answer QUESTION [OPTIONS] [PATH]
 ```
 
-Question-driven evidence chain. Takes a natural-language question and returns a numbered list of the minimum semantic units that together answer it, in reading order with inter-item connections annotated.
+Question-driven evidence chain. Takes a natural-language question and returns a numbered list of the minimum semantic units that together answer it, in reading order with inter-item connections annotated. When companion implementations score within 10% of each other, the one from the older file ranks first.
 
 | Flag | Description |
 |------|-------------|

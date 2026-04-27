@@ -218,12 +218,12 @@ giving a different view of the same file:
 
 Supported languages for `--call-graph`:
 
-| Format | Rust | Python | TypeScript | Go |
-|--------|------|--------|------------|----|
-| `mermaid` / `dot` / `ascii` | ✓ | ✓ | | |
-| `sequence` | ✓ | ✓ | | |
-| `class` | ✓ | ✓ | ✓ | ✓ |
-| `er` | ✓ | ✓ | ✓ | ✓ |
+| Format | Rust | Python | Go | C | C++ | TypeScript |
+|--------|------|--------|----|---|-----|------------|
+| `mermaid` / `dot` / `ascii` | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `sequence` | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `class` | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| `er` | ✓ | ✓ | ✓ | | ✓ | ✓ |
 
 ### Call graph (`--format mermaid|dot|ascii`)
 
@@ -231,8 +231,9 @@ Supported languages for `--call-graph`:
 navigator diagram --call-graph src/parser.rs --format ascii
 ```
 
-- Nodes are functions / methods (qualified `Type::method` in Rust,
-  `Class.method` in Python).
+- Nodes are functions / methods. Qualified names follow language convention:
+  `Type::method` in Rust and C++, `Class.method` in Python and Go,
+  plain `name` in C.
 - Edges are caller → callee relations where the callee resolves to a
   function defined in the same file. Calls into the stdlib or other files
   are dropped.

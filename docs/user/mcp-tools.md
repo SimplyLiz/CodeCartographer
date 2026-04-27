@@ -70,7 +70,7 @@ Parameters:
   showBody?     boolean  — include the function body of the root symbol, up to 40 lines (default: false)
 ```
 
-**What you get:** root symbol with signature, production callers with one-line call context (tagged `[handler]`/`[middleware]`/`[entry]`), callees with signatures, depth-2 type definitions. Test callers are collapsed and counted. Private callee functions are surfaced for Rust/Python via call graph.
+**What you get:** root symbol with signature, production callers with one-line call context (tagged `[handler]`/`[middleware]`/`[entry]`), callees with signatures, depth-2 type definitions. Test callers are collapsed and counted. Callee functions are resolved via AST call graph for Rust, Python, Go, C, and C++; other languages fall back to import-graph heuristics.
 
 **Token cost:** 135–500 tokens per symbol vs ~18,000 for `ranked_skeleton` on the same files.
 
@@ -88,7 +88,7 @@ Parameters:
   showBody?   boolean  — show function body for top-scored item (default: true)
 ```
 
-**What you get:** numbered items (types before functions, entry points before internals), inter-item connections annotated (`[uses type #2]`, `[calls #3]`, `[imports from #4]`), role labels (`[core logic]`, `[entry point]`, `[internal]`, `[type]`). Private implementation functions are included when they score above the noise floor.
+**What you get:** numbered items (types before functions, entry points before internals), inter-item connections annotated (`[uses type #2]`, `[calls #3]`, `[imports from #4]`), role labels (`[core logic]`, `[entry point]`, `[internal]`, `[type]`). Private implementation functions are included when at least two distinct query terms match their name. When two functions from different files score within 10% of each other, the one from the older file ranks first — so the original implementation appears before companion files added later.
 
 **Token cost:** 220–560 tokens for a 6-item chain vs ~18,000 for the equivalent `query_context` output.
 
