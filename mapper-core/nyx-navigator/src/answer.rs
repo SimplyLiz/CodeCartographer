@@ -230,7 +230,8 @@ pub fn build_answer(
     scored.truncate(opts.max_items * 2); // keep extras for ordering pass
 
     // --- 3. Order for readability ---
-    let ordered = order_for_reading(scored, opts.max_items);
+    let file_ages = collect_file_creation_ages(root_path, &scored);
+    let ordered = order_for_reading(scored, opts.max_items, &file_ages);
 
     // --- 4. Build evidence items with connections ---
     let mut items: Vec<EvidenceItem> = build_evidence_items(root_path, mapped, &ordered, opts);
@@ -384,12 +385,61 @@ fn is_test_symbol(sig: &Signature, mf: &MappedFile) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// File creation age (for companion ordering)
+// ---------------------------------------------------------------------------
+
+/// Return the Unix timestamp of the first git commit that added `file`
+/// (relative to `root_path`). Returns `None` if git is unavailable or the
+/// file has no history.
+fn git_file_creation_timestamp(root_path: &Path, file: &str) -> Option<u64> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            &root_path.to_string_lossy(),
+            "log",
+            "--follow",
+            "--diff-filter=A",
+            "--reverse",
+            "--format=%ct",
+            "--",
+            file,
+        ])
+        .output()
+        .ok()?;
+    let stdout = std::str::from_utf8(&out.stdout).ok()?;
+    stdout.lines().next()?.trim().parse::<u64>().ok()
+}
+
+/// Batch-collect creation timestamps for all unique files in `scored`.
+/// Files with no git history are absent from the returned map, and the
+/// caller treats absent entries as u64::MAX (newest).
+fn collect_file_creation_ages(root_path: &Path, scored: &[ScoredSymbol]) -> HashMap<String, u64> {
+    let mut unique: Vec<&str> = scored.iter().map(|s| s.file.as_str()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    unique
+        .into_iter()
+        .filter_map(|file| {
+            git_file_creation_timestamp(root_path, file).map(|ts| (file.to_string(), ts))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Ordering for readability
 // ---------------------------------------------------------------------------
 
 /// Order symbols so types come before functions that use them, and entry
 /// points come before internal helpers. The goal is to read like a guided tour.
-fn order_for_reading(mut scored: Vec<ScoredSymbol>, max: usize) -> Vec<ScoredSymbol> {
+///
+/// `file_ages` maps relative file paths to their git first-commit Unix timestamp.
+/// When two functions from different files score within 10% of the top scorer,
+/// the one from the older file is ranked first — it's the original implementation.
+fn order_for_reading(
+    mut scored: Vec<ScoredSymbol>,
+    max: usize,
+    file_ages: &HashMap<String, u64>,
+) -> Vec<ScoredSymbol> {
     // Partition into: types first, then functions/methods, then rest.
     // Within each partition, keep score order.
     let mut types: Vec<ScoredSymbol> = vec![];
@@ -405,6 +455,30 @@ fn order_for_reading(mut scored: Vec<ScoredSymbol>, max: usize) -> Vec<ScoredSym
             | SymbolKind::TypeAlias => types.push(s),
             SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => fns.push(s),
             _ => rest.push(s),
+        }
+    }
+
+    // Companion ordering: functions that score within 10% of the top scorer
+    // are re-sorted by file creation date so the original implementation
+    // appears before companion files added later (e.g. class_graph.rs vs
+    // call_graph.rs scoring nearly identically for a "call graph" query).
+    // The tail (outside 10%) keeps pure score order.
+    if !file_ages.is_empty() {
+        let max_score = fns.iter().map(|s| s.score).fold(f64::NEG_INFINITY, f64::max);
+        if max_score > 0.0 {
+            let threshold = max_score * 0.9;
+            // fns is already score-sorted; find where the within-10% group ends.
+            let tail_start = fns.iter().position(|s| s.score < threshold);
+            let tail = tail_start.map(|i| fns.split_off(i)).unwrap_or_default();
+            // Re-sort the within-10% group by age (smaller timestamp = older = first),
+            // breaking ties by score descending.
+            fns.sort_by(|a, b| {
+                let a_age = file_ages.get(&a.file).copied().unwrap_or(u64::MAX);
+                let b_age = file_ages.get(&b.file).copied().unwrap_or(u64::MAX);
+                a_age.cmp(&b_age)
+                    .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            fns.extend(tail);
         }
     }
 
@@ -837,11 +911,66 @@ mod tests {
                 score: 10.0,
             },
         ];
-        let ordered = order_for_reading(scored, 4);
+        let ordered = order_for_reading(scored, 4, &HashMap::new());
         assert_eq!(ordered[0].sig.symbol_name.as_deref(), Some("verify"),
             "top fn should come first");
         assert_eq!(ordered[1].sig.symbol_name.as_deref(), Some("Claims"),
             "type should follow");
+    }
+
+    #[test]
+    fn order_prefers_older_file_within_10pct_score() {
+        // Two companion functions that score within 10% of each other.
+        // The one from the older file (smaller timestamp) should rank first.
+        let scored = vec![
+            ScoredSymbol {
+                file: "src/class_graph.rs".into(),
+                sig: make_sig("build_class_graph", SymbolKind::Function, "pub fn build_class_graph()", 0),
+                score: 10.0,
+            },
+            ScoredSymbol {
+                file: "src/call_graph.rs".into(),
+                sig: make_sig("build_file_call_graph", SymbolKind::Function, "pub fn build_file_call_graph()", 0),
+                score: 9.6, // within 10% of 10.0
+            },
+        ];
+        let mut ages = HashMap::new();
+        ages.insert("src/class_graph.rs".to_string(), 1_700_000_000u64); // newer
+        ages.insert("src/call_graph.rs".to_string(),  1_600_000_000u64); // older
+        let ordered = order_for_reading(scored, 4, &ages);
+        assert_eq!(
+            ordered[0].sig.symbol_name.as_deref(),
+            Some("build_file_call_graph"),
+            "older file should come first when scores within 10%"
+        );
+    }
+
+    #[test]
+    fn order_respects_score_outside_10pct() {
+        // When the score gap exceeds 10%, the higher-scoring item wins
+        // regardless of which file is older. Items must be pre-sorted by score
+        // descending (matching build_answer's contract).
+        let scored = vec![
+            ScoredSymbol {
+                file: "src/new.rs".into(),
+                sig: make_sig("high_scorer", SymbolKind::Function, "pub fn high_scorer()", 0),
+                score: 10.0,
+            },
+            ScoredSymbol {
+                file: "src/old.rs".into(),
+                sig: make_sig("low_scorer", SymbolKind::Function, "pub fn low_scorer()", 0),
+                score: 7.0, // 30% below 10.0 — outside the 10% band
+            },
+        ];
+        let mut ages = HashMap::new();
+        ages.insert("src/old.rs".to_string(), 1_600_000_000u64); // older
+        ages.insert("src/new.rs".to_string(), 1_700_000_000u64); // newer
+        let ordered = order_for_reading(scored, 4, &ages);
+        assert_eq!(
+            ordered[0].sig.symbol_name.as_deref(),
+            Some("high_scorer"),
+            "higher score should win outside 10% band"
+        );
     }
 
     #[test]
