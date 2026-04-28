@@ -80,7 +80,7 @@ navigator query "how does authentication work?"
 | `navigator diagram --format dot\|ascii` | Graphviz DOT or ASCII tree |
 | `navigator diagram -o graph.html` | Interactive self-contained HTML explorer |
 | `navigator diagram -o graph.svg\|.png` | SVG/PNG via `mmdc` or `dot` |
-| `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python) |
+| `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python/Go/C/C++) |
 | `navigator diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
 | `navigator diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
 | `navigator diagram --format quadrant` | Mermaid `quadrantChart` — churn × complexity scatter (top-right = refactor now) |
@@ -241,6 +241,33 @@ erDiagram
     }
     FileCallGraph ||--o{ FunctionInfo : "has"
 ```
+
+## Semantic Traversal (experimental)
+
+Two commands for AI-optimised, symbol-level context — much tighter than a full skeleton.
+
+| Command | Description |
+|---------|-------------|
+| `navigator reach <SYMBOL>` | Context tree from a named symbol: callers with snippets, callees with sigs, depth-2 types. 135–500 tokens. |
+| `navigator reach <A> <B>` | Intersection view: merged callers, shared callees annotated, shared depth-2 types promoted. |
+| `navigator answer "<QUESTION>"` | Evidence chain: minimum symbols that answer the question, in reading order with inter-item connections. |
+| `navigator answer "<QUESTION>" --then N` | Drill into evidence item #N via `reach`, appended below the chain. |
+
+```bash
+# Single symbol — who calls it, what it calls, what types it touches
+navigator reach verify_token
+
+# Two symbols — shared context between them
+navigator reach verify_token decode_jwt
+
+# Question → ranked evidence chain
+navigator answer "how does rate limiting work?"
+
+# Drill into item #2 for more detail
+navigator answer "how does the call graph work?" --then 2
+```
+
+Callee resolution uses AST call graphs for Rust, Python, Go, C, and C++; other languages fall back to import-graph heuristics.
 
 ## Search & File Tools
 

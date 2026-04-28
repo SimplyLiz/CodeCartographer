@@ -4,6 +4,67 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Added — multi-symbol reach and answer --then
+
+**`navigator reach SYMBOL [SYMBOL ...]`** — passing two or more symbols
+produces a unified intersection view. Callers are merged and deduped by
+`(file, line)`. Callees appearing in more than one root are annotated
+`[shared]`. Depth-2 types present in multiple results are promoted to a
+"shared types" section above the ordinary depth-2 tail, rather than being
+buried at the end. Ambiguous or not-found symbols are reported per-symbol
+and skipped; the remaining results still render.
+
+**`navigator answer QUESTION --then N`** — after printing the evidence
+chain, drills into item #N via `reach` (using the item's file for
+disambiguation) and appends the context tree below. Reuses the scan
+already done by `answer`, so there is no second disk pass.
+
+### Added — companion ordering in `answer`
+
+When two functions from different files score within 10% of the top scorer,
+the one from the older file (earliest git first-commit timestamp) now ranks
+first. This surfaces the original implementation before companions added
+later — e.g. `build_file_call_graph` before `build_class_graph` for a
+"call graph" query where both files score nearly identically.
+
+File creation timestamps are fetched via `git log --diff-filter=A` once per
+unique file in the candidate set. If git is unavailable the tiebreaker is
+skipped and pure score order is preserved.
+
+### Improved — private-function noise filtering in `answer`
+
+The gate that suppresses low-confidence private functions now requires at
+least **two distinct query terms** to match the symbol name, up from one.
+The previous threshold (`name_score ≥ 3.0`) passed functions whose name
+contained any single query term — e.g. `health_graph_at_ref` matching
+"graph" for a "call graph" query would appear at position #6 from a
+high-BM25 file like `main.rs`. Single-term collisions from private helpers
+are now rejected.
+
+### Added — Go, C, and C++ call graph extraction
+
+`call_graph.rs` now resolves intra-file call edges for Go (`.go`), C
+(`.c`/`.h`), and C++ (`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hxx`) in addition to
+the existing Rust and Python support. All three use the tree-sitter parsers
+that were already compiled into the `default` feature set.
+
+- **Go**: free functions and pointer/value receiver methods. Receiver type
+  extracted from the `parameter_declaration` inside the `receiver` node,
+  stripping leading `*` for pointer receivers.
+- **C**: free functions only (standard C has no methods). Declarator chain
+  (`pointer_declarator` → `function_declarator` → `identifier`) handles
+  pointer-return signatures.
+- **C++**: free functions, inline class methods (scope stack via
+  `field_declaration_list`), and out-of-class method definitions
+  (`qualified_identifier` in the declarator). Method names inside class
+  bodies use `field_identifier` nodes — this distinction from `identifier`
+  is handled explicitly. Template wrappers are stripped; namespace bodies
+  are recursed without scope qualification.
+
+`reach find_callees` automatically benefits — it calls `build_file_call_graph`
+and returns precise callee lists for these languages instead of the
+"call graph unavailable" heuristic note.
+
 ### Added — cross-file sequence trace (PR #9, spike)
 
 `navigator diagram --entry FILE::FUNCTION --format sequence [--depth N]` traces
