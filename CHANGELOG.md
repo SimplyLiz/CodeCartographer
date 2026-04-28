@@ -4,6 +4,231 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Added — multi-symbol reach and answer --then
+
+**`navigator reach SYMBOL [SYMBOL ...]`** — passing two or more symbols
+produces a unified intersection view. Callers are merged and deduped by
+`(file, line)`. Callees appearing in more than one root are annotated
+`[shared]`. Depth-2 types present in multiple results are promoted to a
+"shared types" section above the ordinary depth-2 tail, rather than being
+buried at the end. Ambiguous or not-found symbols are reported per-symbol
+and skipped; the remaining results still render.
+
+**`navigator answer QUESTION --then N`** — after printing the evidence
+chain, drills into item #N via `reach` (using the item's file for
+disambiguation) and appends the context tree below. Reuses the scan
+already done by `answer`, so there is no second disk pass.
+
+### Added — companion ordering in `answer`
+
+When two functions from different files score within 10% of the top scorer,
+the one from the older file (earliest git first-commit timestamp) now ranks
+first. This surfaces the original implementation before companions added
+later — e.g. `build_file_call_graph` before `build_class_graph` for a
+"call graph" query where both files score nearly identically.
+
+File creation timestamps are fetched via `git log --diff-filter=A` once per
+unique file in the candidate set. If git is unavailable the tiebreaker is
+skipped and pure score order is preserved.
+
+### Improved — private-function noise filtering in `answer`
+
+The gate that suppresses low-confidence private functions now requires at
+least **two distinct query terms** to match the symbol name, up from one.
+The previous threshold (`name_score ≥ 3.0`) passed functions whose name
+contained any single query term — e.g. `health_graph_at_ref` matching
+"graph" for a "call graph" query would appear at position #6 from a
+high-BM25 file like `main.rs`. Single-term collisions from private helpers
+are now rejected.
+
+### Added — Go, C, and C++ call graph extraction
+
+`call_graph.rs` now resolves intra-file call edges for Go (`.go`), C
+(`.c`/`.h`), and C++ (`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hxx`) in addition to
+the existing Rust and Python support. All three use the tree-sitter parsers
+that were already compiled into the `default` feature set.
+
+- **Go**: free functions and pointer/value receiver methods. Receiver type
+  extracted from the `parameter_declaration` inside the `receiver` node,
+  stripping leading `*` for pointer receivers.
+- **C**: free functions only (standard C has no methods). Declarator chain
+  (`pointer_declarator` → `function_declarator` → `identifier`) handles
+  pointer-return signatures.
+- **C++**: free functions, inline class methods (scope stack via
+  `field_declaration_list`), and out-of-class method definitions
+  (`qualified_identifier` in the declarator). Method names inside class
+  bodies use `field_identifier` nodes — this distinction from `identifier`
+  is handled explicitly. Template wrappers are stripped; namespace bodies
+  are recursed without scope qualification.
+
+`reach find_callees` automatically benefits — it calls `build_file_call_graph`
+and returns precise callee lists for these languages instead of the
+"call graph unavailable" heuristic note.
+
+### Added — cross-file sequence trace (PR #9, spike)
+
+`navigator diagram --entry FILE::FUNCTION --format sequence [--depth N]` traces
+call edges across file boundaries rather than within a single file.
+
+Resolution is two-level: (1) direct-import match — callee name found in a module
+the current file explicitly imports; (2) heuristic match — callee name is unique
+across the whole project. Heuristic edges are annotated `(~)` in the diagram so
+reviewers can spot lower-confidence steps.
+
+**`src/call_graph.rs`** — `FileCallGraph` gains `unresolved_calls: Vec<(String,
+String)>` (caller, raw callee name). Previously the count was tracked but the
+names were discarded, making cross-file resolution impossible.
+
+**`src/cross_call.rs`** (new) — `trace_from_entry()` builds a symbol index from
+the project's `MappedFile` map and an import adjacency graph, then BFS-walks from
+the entry function up to `depth` cross-file hops. `CrossCallTrace` holds ordered
+`(module, fn)` steps and a list of unmatched calls for diagnostics.
+
+**`src/diagram.rs`** — `render_cross_sequence()` renders a `CrossCallTrace` as a
+Mermaid `sequenceDiagram` with one participant per module (not per function).
+
+**`src/extractor.rs`** — Rust `mod foo;` declarations (without a body) are now
+captured as imports so the adjacency builder can recognise them as direct
+dependencies. Previously only `use` declarations were recorded.
+
+**`src/main.rs`** — `--entry FILE::FUNCTION` flag on `navigator diagram`; triggers
+a full project scan to build the symbol index before tracing.
+
+Spike validated on `diagram_mode` (the target from charts.md): 13 modules,
+60 resolved edges in correct call order; direct-import edges unqualified,
+transitive edges correctly annotated `(~)`.
+
+### Added — quadrant chart and ER diagram formats (PR #8)
+
+Two new `--format` values for `navigator diagram`:
+
+**`--format quadrant`** — Mermaid `quadrantChart` plotting every file on a churn ×
+complexity plane. Top-right = danger zone (refactor now); top-left = risky debt;
+bottom-right = hotspots (add tests); bottom-left = stable. Coordinates are
+min-max normalised to `[0.01, 0.99]` within the included node set. Uses
+`signature_count` as a complexity proxy until tree-sitter cyclomatic complexity
+extraction lands. Automatically triggers git enrichment — no extra flags needed.
+
+**`--format er`** (with `--call-graph FILE`) — Mermaid `erDiagram` derived from
+the existing `ClassGraph` extractor. Entities come from struct/class definitions;
+relationships are inferred from field types: `Vec<T>` / `HashSet<T>` → one-to-many
+(`||--o{`), `Option<T>` → zero-or-one (`||--o|`), bare `T` / `Box<T>` / `Arc<T>`
+→ exactly-one (`||--||`). Nested wrappers are resolved one level deep; duplicate
+edges are deduplicated. Language coverage matches `--format class` (Rust, Python,
+TypeScript, Go).
+
+Both formats route through `export_mermaid()` — SVG/PNG export via `mmdc` works
+unchanged. `DiagramFormat` gains `Quadrant` and `Er` variants; `lib.rs` and
+`diagram_export.rs` updated to cover all arms.
+
+**Also fixes three pre-existing bugs:**
+- `enrich_with_git` was keying churn, co-change, and owner lookups on
+  `node.path` (absolute filesystem path) instead of `node.module_id`
+  (repo-relative path matching `git log --name-only` output). This silently
+  zeroed all git-backed overlays — hotspot sizing, co-change edges, and
+  colour-by-owner — for every diagram command.
+- `search_skeleton` `McpTool` was missing `title` and `annotations` fields,
+  causing a compile error introduced in PR #6.
+- `McpServerInfo::default()` name did not match the test expectation.
+
+### Added — sequence and UML class diagrams (PR #7)
+
+**`--format sequence`** (with `--call-graph FILE`) — Mermaid `sequenceDiagram`
+showing the call order among functions defined in a single file. Participants are
+emitted in source order; messages are call edges in AST order. Self-calls render
+as Mermaid loop arrows. A trailing note reports how many external calls were
+dropped so the reader knows the graph is file-local.
+
+**`--format class`** (with `--call-graph FILE`) — Mermaid `classDiagram` extracted
+from a single file's type structure. Coverage by language:
+
+- **Rust** — `struct` fields (name, type, `pub`/private), `enum` variants, `trait`
+  method signatures, `impl` methods attached to their type, `impl Trait for Type`
+  arrows (`..|>`).
+- **Python** — class declarations, base-class inheritance (`--|>`), instance fields
+  from `__init__` with type annotations, method signatures.
+- **TypeScript / TSX** — class fields with access modifiers, `extends` inheritance,
+  `implements` interface arrows, `interface` declarations.
+- **Go** — struct fields (uppercase = public), embedded struct inheritance, interface
+  method sets, methods attached to their receiver type.
+
+**`src/class_graph.rs`** (new) — `ClassGraph`, `ClassNode`, `FieldDef`, `MethodDef`
+structs; `build_class_graph()` dispatches to per-language extractors via tree-sitter.
+`ClassRelationship` covers `Inherits`, `Implements`, `Composes`, and `Depends`.
+
+**`src/diagram.rs`** — `render_sequence()` and `render_class()` alongside the
+existing `render()`; `DiagramFormat::Sequence` and `DiagramFormat::Class` variants.
+
+### Added — `search_skeleton` MCP tool (PR #6)
+
+New `search_skeleton` tool fills the gap between `focused_skeleton` (requires
+a known module ID) and `skeleton_map` (returns everything). Takes a
+case-insensitive `pattern` string, matches it against file paths first then
+symbol names, and returns enriched skeleton sections for hits — same shape as
+`focused_skeleton` with `heat`, `imports`, `signatures`, and churn labels.
+
+Parameters: `pattern` (required), `detail` (minimal/standard/extended, default
+standard), `budget` (token cap, 0 = unlimited). Path matches sort before symbol
+matches within results.
+
+Also fixes a latent panic in `compute_churn_labels` when called on a project
+with zero indexed files: the previous `.max(1)` guard prevented division-by-zero
+but still allowed an out-of-bounds index on the empty counts vec.
+
+### Added — MCP tool schema: title, annotations, and enum hints (PR #5)
+
+`McpTool` now carries two new optional fields that MCP clients and LLM planners
+can consume without calling the tool:
+
+- **`title`** — human-readable display name (e.g. `"Get Module Context"`).
+  All 38 tools have a title; `McpServerInfo` gains one too (`"Nyx Navigator"`).
+- **`annotations`** — `ToolAnnotations` struct with `readOnlyHint`,
+  `destructiveHint`, and `idempotentHint`. Every read-only tool advertises
+  `readOnlyHint: true` via the `read_only!()` macro; `replace_content` sets
+  `destructiveHint: true`; `set_compression_level` is `idempotentHint: true`.
+- **`enum` hints** on string parameters with a fixed value set:
+  `detail_level` (`minimal`/`standard`/`extended`), `level`
+  (`minimal`/`standard`/`aggressive`), `query_type` (`node`/`edge`), and
+  `model` (`claude`/`gpt4`/`llama`/`gpt35`) across `context_health`,
+  `query_context`, and `query_docs`.
+
+**Schema correctness fixes** (found during review):
+- `get_symbol_context`: `detail_level` was incorrectly required and lacked an
+  enum; it is now optional with `["minimal","standard","extended"]`.
+- `search_project`: `query_type` was required; now optional with
+  `["node","edge"]` enum.
+- `get_blast_radius`: `max_related` was required despite having a default.
+- `semidiff`: `commit1` and `commit2` were required despite both defaulting
+  to `HEAD~1` / `HEAD`.
+- `query_docs`: `model` enum was missing `"gpt35"` vs the other two scoring
+  tools.
+
+### Added — `focused_skeleton` and `diff_skeleton` MCP tools (PR #4)
+
+`focused_skeleton` — returns the enriched skeleton for a seed file and every
+file within N import-hops of it (importers + importees). BFS over the
+dependency graph, depth-controlled by the `depth` parameter (default 1).
+Cheaper than `skeleton_map`, more targeted than `ranked_skeleton`.
+
+`diff_skeleton` — returns the enriched skeleton for files changed between two
+commits plus their immediate importers. Defaults to `HEAD~1..HEAD`. Minimal
+context for understanding a diff's blast radius without reading the whole graph.
+
+Both tools enrich each file entry with `heat` (hot/stable from git churn),
+`imports`, and per-symbol `tested` markers derived from `#[test]` coverage.
+
+### Added — skeleton enrichment: type bodies, tested markers, churn labels (PR #3)
+
+Skeleton output now includes:
+- **Type bodies** — enum variants and struct fields are inlined into the
+  skeleton rather than collapsed to `// ...`, making type shapes readable
+  without jumping to source.
+- **Tested markers** — public functions that have a corresponding `#[test]`
+  (matched by stripped name) are annotated `// tested` in skeleton output.
+- **Churn labels** — files in the top quartile of git commit frequency are
+  marked `heat: "hot"`; bottom quartile marked `"stable"`. Derived from the
+  last 300 commits via `git_churn`.
+
 ### Added — function-level call graphs for Rust and Python
 
 `navigator diagram --call-graph PATH` now extracts a file-local call graph

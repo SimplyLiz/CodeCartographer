@@ -80,6 +80,12 @@ pub struct Signature {
     /// Doc comment extracted from lines immediately preceding this signature.
     #[serde(default)]
     pub doc_comment: Option<String>,
+    /// Compact field/variant list for Struct and Enum kinds, populated post-extraction.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// True when a test function whose name derives from this symbol's name exists.
+    #[serde(default)]
+    pub tested: bool,
 }
 
 impl Signature {
@@ -105,6 +111,8 @@ impl Signature {
             col_end: 0,
             confidence: 30,
             doc_comment,
+            body: None,
+            tested: false,
         }
     }
 }
@@ -221,6 +229,13 @@ pub struct MappedFile {
     pub docstrings: Option<Vec<String>>,
     pub parameters: Option<Vec<String>>,
     pub return_types: Option<Vec<String>>,
+    /// "hot" (top-quartile churn) or "stable" (bottom-quartile), None otherwise.
+    #[serde(default)]
+    pub churn_label: Option<String>,
+    /// Function names that carry `#[test]` (or are in `#[cfg(test)]`) in this file,
+    /// collected before tree-sitter override so annotate_tested() can use them.
+    #[serde(default)]
+    pub inline_test_fns: Vec<String>,
 }
 
 impl MappedFile {
@@ -233,6 +248,8 @@ impl MappedFile {
             docstrings: None,
             parameters: None,
             return_types: None,
+            churn_label: None,
+            inline_test_fns: Vec::new(),
         }
     }
 
@@ -245,6 +262,8 @@ impl MappedFile {
             docstrings: None,
             parameters: None,
             return_types: None,
+            churn_label: None,
+            inline_test_fns: Vec::new(),
         }
     }
 
@@ -283,8 +302,15 @@ impl MappedFile {
             out.push('\n');
         }
         for sig in &self.signatures {
-            out.push_str(&sig.raw);
-            out.push_str(" // ...\n");
+            if let Some(body) = &sig.body {
+                // Strip a bare trailing `{` that tree-sitter may include in `raw`.
+                let decl = sig.raw.trim_end_matches('{').trim_end();
+                out.push_str(&format!("{} {{ {} }}\n", decl, body));
+            } else if sig.tested {
+                out.push_str(&format!("{} // tested\n", sig.raw));
+            } else {
+                out.push_str(&format!("{} // ...\n", sig.raw));
+            }
         }
         out
     }
@@ -380,6 +406,64 @@ impl MappedFile {
 }
 
 // ---------------------------------------------------------------------------
+// Type body extractor — collects fields/variants for Struct and Enum sigs.
+// ---------------------------------------------------------------------------
+
+/// Scans forward from `start_line` and returns a compact, semicolon-separated
+/// list of field/variant lines found at brace-depth 1 (the body of the type).
+/// Capped at 40 lines of lookahead to keep output token-tight.
+fn extract_body_at_line(lines: &[&str], start_line: usize) -> Option<String> {
+    let mut depth: usize = 0;
+    let mut opened = false;
+    let mut fields: Vec<String> = Vec::new();
+
+    for line in lines.iter().skip(start_line).take(40) {
+        let opens = line.chars().filter(|&c| c == '{').count();
+        let closes = line.chars().filter(|&c| c == '}').count();
+
+        depth = depth.saturating_add(opens).saturating_sub(closes);
+
+        if !opened && opens > 0 {
+            opened = true;
+            // This is the declaration line (e.g. `pub struct Foo {`); skip it.
+            continue;
+        }
+
+        if opened && depth == 1 {
+            let t = line.trim();
+            // Skip empty lines, comments, attributes, and bare punctuation.
+            if !t.is_empty()
+                && !t.starts_with("//")
+                && !t.starts_with("#[")
+                && t != "{"
+                && t != ","
+            {
+                // Strip inline comments before storing; trim whitespace first so
+                // trailing spaces don't block comma removal (e.g. `field: T, // comment`).
+                let clean = if let Some(pos) = t.find("//") {
+                    t[..pos].trim().trim_end_matches(',').trim()
+                } else {
+                    t.trim_end_matches(',')
+                };
+                if !clean.is_empty() {
+                    fields.push(clean.to_string());
+                }
+            }
+        }
+
+        if opened && depth == 0 {
+            break;
+        }
+    }
+
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields.join("; "))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
 
@@ -419,6 +503,8 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
                 docstrings: None,
                 parameters: None,
                 return_types: None,
+                churn_label: None,
+                inline_test_fns: Vec::new(),
             }
         }
         _ => extract_generic(path.to_string_lossy().replace('\\', "/"), content),
@@ -430,6 +516,43 @@ pub fn extract_skeleton(path: &Path, content: &str) -> MappedFile {
         mapped.signatures = ts_out.signatures;
         if !ts_out.imports.is_empty() {
             mapped.imports = ts_out.imports;
+        }
+    }
+
+    // Feature 1: enrich struct/enum signatures with compact field/variant lists.
+    let all_lines: Vec<&str> = content.lines().collect();
+    for sig in &mut mapped.signatures {
+        if matches!(sig.kind, SymbolKind::Struct | SymbolKind::Enum) {
+            sig.body = extract_body_at_line(&all_lines, sig.line_start);
+        }
+    }
+
+    // Feature 2: collect inline #[test] function names (survives tree-sitter override).
+    // We scan the raw content rather than the (possibly overwritten) signatures.
+    {
+        let fn_name_re = Regex::new(r"^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)").unwrap();
+        let mut next_is_test = false;
+        let mut in_test_cfg = false;
+        for line in content.lines() {
+            let t = line.trim();
+            if t == "#[cfg(test)]" || t.starts_with("#[cfg(test)") {
+                in_test_cfg = true;
+                continue;
+            }
+            if t == "#[test]" || t.starts_with("#[test,") || t.starts_with("#[test]") {
+                next_is_test = true;
+                continue;
+            }
+            if t.starts_with("#[") {
+                // Other attribute — don't reset next_is_test so stacked attrs work.
+                continue;
+            }
+            if next_is_test || in_test_cfg {
+                if let Some(caps) = fn_name_re.captures(t) {
+                    mapped.inline_test_fns.push(caps.get(1).unwrap().as_str().to_string());
+                }
+                next_is_test = false;
+            }
         }
     }
 
@@ -501,6 +624,8 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
     let mut imports = Vec::new();
     let mut signatures = Vec::new();
     let mut doc_buf: Vec<String> = Vec::new();
+    let mut attr_has_test = false; // preceding line was #[test]
+    let mut in_test_mod = false;   // inside #[cfg(test)] mod
     let mut scope = ScopeTracker::new();
     let mut file_doc: Option<String> = None;
     let mut pre_code = true; // still in the file header comment zone
@@ -538,12 +663,25 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
             continue;
         }
 
+        // Attributes — track #[test] and #[cfg(test)]
+        if trimmed.starts_with("#[") {
+            if trimmed.contains("cfg(test)") {
+                in_test_mod = true;
+            }
+            if trimmed == "#[test]" || trimmed.starts_with("#[test]") {
+                attr_has_test = true;
+            }
+            scope.update(line, None);
+            continue;
+        }
+
         pre_code = false;
 
         // Imports
         if import_re.is_match(trimmed) {
             imports.push(trimmed.to_string());
             doc_buf.clear();
+            attr_has_test = false;
             scope.update(line, None);
             continue;
         }
@@ -561,6 +699,7 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
                 type_name.clone(),
                 doc,
             ));
+            attr_has_test = false;
             scope.update(line, Some(type_name));
             continue;
         }
@@ -578,7 +717,13 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
                     kind = SymbolKind::Method;
                 }
                 let doc = take_doc(&mut doc_buf);
-                signatures.push(Signature::new(raw, kind, line_idx, &path, qualified, doc));
+                let is_test_fn = attr_has_test || in_test_mod;
+                let mut sig = Signature::new(raw, kind, line_idx, &path, qualified, doc);
+                // Re-use `tested` field to tag test functions so annotate_tested() can
+                // harvest their names without needing to re-read source files.
+                sig.tested = is_test_fn;
+                signatures.push(sig);
+                attr_has_test = false;
                 if pat.scope {
                     scope.update(line, Some(name));
                 } else {
@@ -591,6 +736,7 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
 
         if !matched {
             doc_buf.clear();
+            attr_has_test = false;
             scope.update(line, None);
         }
     }
@@ -602,6 +748,8 @@ fn extract_rust(path: String, content: &str) -> MappedFile {
         docstrings: file_doc.map(|d| vec![d]),
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -796,6 +944,8 @@ fn extract_js_ts(path: String, content: &str) -> MappedFile {
         docstrings: file_docstring,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -943,6 +1093,8 @@ fn extract_python(path: String, content: &str) -> MappedFile {
         docstrings: module_docstring.map(|d| vec![d]),
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1067,6 +1219,8 @@ fn extract_go(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1223,6 +1377,8 @@ fn extract_java_like(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1426,6 +1582,8 @@ fn extract_c_cpp(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1545,6 +1703,8 @@ fn extract_ruby(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1686,6 +1846,8 @@ fn extract_php(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 
@@ -1781,7 +1943,7 @@ fn extract_csharp(path: String, content: &str) -> MappedFile {
         scope.update(line, None);
     }
 
-    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1906,7 +2068,7 @@ fn extract_swift(path: String, content: &str) -> MappedFile {
         scope.update(line, None);
     }
 
-    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1965,7 +2127,7 @@ fn extract_lua(path: String, content: &str) -> MappedFile {
         doc_buf.clear();
     }
 
-    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,7 +2171,7 @@ fn extract_shell(path: String, content: &str) -> MappedFile {
         doc_buf.clear();
     }
 
-    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -2062,7 +2224,7 @@ fn extract_sql(path: String, content: &str) -> MappedFile {
         doc_buf.clear();
     }
 
-    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -2179,7 +2341,7 @@ fn extract_markdown(path: String, content: &str) -> MappedFile {
         }
     }
 
-    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,7 +2411,7 @@ fn extract_yaml(path: String, content: &str) -> MappedFile {
         extract_yaml_openapi_paths(content, &path, &mut signatures);
     }
 
-    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 /// Extract OpenAPI endpoint paths from YAML content.
@@ -2323,7 +2485,7 @@ fn extract_toml(path: String, content: &str) -> MappedFile {
             }
         }
 
-        return MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None };
+        return MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() };
     }
 
     // Fallback: regex-only for malformed TOML
@@ -2351,7 +2513,7 @@ fn extract_toml(path: String, content: &str) -> MappedFile {
         }
     }
 
-    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports: Vec::new(), signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 /// Recursively walk a parsed TOML value tree, emitting signatures.
@@ -2424,7 +2586,8 @@ const JSON_MAX_SIZE: usize = 512 * 1024;
 fn extract_json(path: String, content: &str) -> MappedFile {
     let empty = MappedFile {
         path: path.clone(), imports: Vec::new(), signatures: Vec::new(),
-        docstrings: None, parameters: None, return_types: None,
+        docstrings: None, parameters: None, return_types: None, churn_label: None,
+        inline_test_fns: Vec::new(),
     };
 
     if content.len() > JSON_MAX_SIZE {
@@ -2461,7 +2624,7 @@ fn extract_json(path: String, content: &str) -> MappedFile {
         json_walk(obj, "", &path, &mut signatures, 0, 2);
     }
 
-    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None }
+    MappedFile { path, imports, signatures, docstrings: None, parameters: None, return_types: None, churn_label: None, inline_test_fns: Vec::new() }
 }
 
 fn json_walk(
@@ -2699,6 +2862,8 @@ fn extract_generic(path: String, content: &str) -> MappedFile {
         docstrings: None,
         parameters: None,
         return_types: None,
+        churn_label: None,
+        inline_test_fns: Vec::new(),
     }
 }
 

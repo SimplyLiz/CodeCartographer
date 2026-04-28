@@ -1,4 +1,4 @@
-//! File-local call-graph extraction for Rust and Python.
+//! File-local call-graph extraction for Rust, Python, Go, C, and C++.
 #![allow(dead_code)]
 //!
 //! Given one source file, produce (caller, callee) edges between functions
@@ -10,14 +10,21 @@
 //! Output is shaped as a `ProjectGraphResponse` so the existing diagram
 //! renderers (Mermaid/DOT/ASCII + focus/depth/max_nodes) work unchanged.
 //!
-//! Gated on `lang-rust` / `lang-python` Cargo features, matching the rest of
-//! the tree-sitter surface in `extractor.rs`.
+//! Gated on `lang-rust` / `lang-python` / `lang-go` / `lang-c` / `lang-cpp`
+//! Cargo features, matching the rest of the tree-sitter surface in
+//! `extractor.rs`.
 
 use std::path::Path;
 
 use crate::api::{GraphEdge, GraphMetadata, GraphNode, ProjectGraphResponse};
 
-#[cfg(any(feature = "lang-rust", feature = "lang-python"))]
+#[cfg(any(
+    feature = "lang-rust",
+    feature = "lang-python",
+    feature = "lang-go",
+    feature = "lang-c",
+    feature = "lang-cpp",
+))]
 use tree_sitter::{Node, Parser};
 
 /// Aggregated call graph for a single source file.
@@ -30,6 +37,10 @@ pub struct FileCallGraph {
     /// Number of call sites where the callee could not be matched to a
     /// function defined in this file (external, stdlib, or unresolved).
     pub unresolved_count: usize,
+    /// Raw callee names that were not resolved within this file — retained for
+    /// cross-file resolution in `cross_call.rs`. Parallel to `unresolved_count`.
+    /// Each entry is `(caller_qualified, raw_callee_name)`.
+    pub unresolved_calls: Vec<(String, String)>,
     /// Language tag ("rust" / "python") for the project graph we emit.
     pub language: &'static str,
 }
@@ -64,6 +75,12 @@ pub fn build_file_call_graph(path: &Path, source: &str) -> Result<Option<FileCal
         "rs" => Ok(Some(extract_rust(source)?)),
         #[cfg(feature = "lang-python")]
         "py" => Ok(Some(extract_python(source)?)),
+        #[cfg(feature = "lang-go")]
+        "go" => Ok(Some(extract_go(source)?)),
+        #[cfg(feature = "lang-c")]
+        "c" | "h" => Ok(Some(extract_c(source)?)),
+        #[cfg(feature = "lang-cpp")]
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Ok(Some(extract_cpp(source)?)),
         _ => Ok(None),
     }
 }
@@ -167,7 +184,7 @@ fn extract_rust(source: &str) -> Result<FileCallGraph, String> {
     // Pass 2 — for each function, walk its body and resolve call sites.
     let resolver = Resolver::new(&functions);
     let mut calls: Vec<(String, String)> = Vec::new();
-    let mut unresolved_count: usize = 0;
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
     collect_rust_calls(
         &tree.root_node(),
@@ -175,13 +192,15 @@ fn extract_rust(source: &str) -> Result<FileCallGraph, String> {
         &mut scope,
         &resolver,
         &mut calls,
-        &mut unresolved_count,
+        &mut unresolved_calls,
     );
 
+    let unresolved_count = unresolved_calls.len();
     Ok(FileCallGraph {
         functions,
         calls,
         unresolved_count,
+        unresolved_calls,
         language: "rust",
     })
 }
@@ -243,7 +262,7 @@ fn collect_rust_calls(
     scope: &mut Vec<String>,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     match node.kind() {
         "impl_item" => {
@@ -290,7 +309,7 @@ fn walk_rust_body(
     caller: &str,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     if node.kind() == "call_expression" {
         let callee_raw = node
@@ -304,7 +323,7 @@ fn walk_rust_body(
                         out.push((caller.to_string(), target));
                     }
                 }
-                None => *unresolved += 1,
+                None => unresolved.push((caller.to_string(), callee_raw)),
             }
         }
     }
@@ -366,7 +385,7 @@ fn extract_python(source: &str) -> Result<FileCallGraph, String> {
 
     let resolver = Resolver::new(&functions);
     let mut calls: Vec<(String, String)> = Vec::new();
-    let mut unresolved_count: usize = 0;
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
     collect_python_calls(
         &tree.root_node(),
@@ -374,13 +393,15 @@ fn extract_python(source: &str) -> Result<FileCallGraph, String> {
         &mut scope,
         &resolver,
         &mut calls,
-        &mut unresolved_count,
+        &mut unresolved_calls,
     );
 
+    let unresolved_count = unresolved_calls.len();
     Ok(FileCallGraph {
         functions,
         calls,
         unresolved_count,
+        unresolved_calls,
         language: "python",
     })
 }
@@ -448,7 +469,7 @@ fn collect_python_calls(
     scope: &mut Vec<String>,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     match node.kind() {
         "class_definition" => {
@@ -501,7 +522,7 @@ fn walk_python_body(
     caller: &str,
     resolver: &Resolver,
     out: &mut Vec<(String, String)>,
-    unresolved: &mut usize,
+    unresolved: &mut Vec<(String, String)>,
 ) {
     if node.kind() == "call" {
         let callee_raw = node
@@ -515,7 +536,7 @@ fn walk_python_body(
                         out.push((caller.to_string(), target));
                     }
                 }
-                None => *unresolved += 1,
+                None => unresolved.push((caller.to_string(), callee_raw)),
             }
         }
     }
@@ -539,10 +560,688 @@ fn python_callee_name(node: &Node, src: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Go
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lang-go")]
+fn extract_go(source: &str) -> Result<FileCallGraph, String> {
+    let mut parser = Parser::new();
+    let lang = tree_sitter_go::language();
+    parser
+        .set_language(&lang)
+        .map_err(|e| format!("tree-sitter go init failed: {e}"))?;
+    let tree = parser
+        .parse(source.as_bytes(), None)
+        .ok_or_else(|| "tree-sitter parse returned None".to_string())?;
+    let src = source.as_bytes();
+
+    let mut functions: Vec<FunctionInfo> = Vec::new();
+    collect_go_functions(&tree.root_node(), src, &mut functions);
+
+    let resolver = Resolver::new(&functions);
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
+    collect_go_calls(&tree.root_node(), src, &resolver, &mut calls, &mut unresolved_calls);
+
+    let unresolved_count = unresolved_calls.len();
+    Ok(FileCallGraph {
+        functions,
+        calls,
+        unresolved_count,
+        unresolved_calls,
+        language: "go",
+    })
+}
+
+/// Walk the source file's top-level declarations and collect function and
+/// method definitions. Go methods are at the top level (not nested inside
+/// a type body), so no scope stack is needed — the receiver carries the type.
+#[cfg(feature = "lang-go")]
+fn collect_go_functions(node: &Node, src: &[u8], out: &mut Vec<FunctionInfo>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "function_declaration" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, src).to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                out.push(FunctionInfo {
+                    qualified: name.clone(),
+                    simple: name,
+                    line: (child.start_position().row as u32) + 1,
+                    kind: "fn",
+                });
+            }
+            "method_declaration" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, src).to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let recv = go_receiver_type(&child, src);
+                let qualified = if recv.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}.{}", recv, name)
+                };
+                out.push(FunctionInfo {
+                    qualified,
+                    simple: name,
+                    line: (child.start_position().row as u32) + 1,
+                    kind: "method",
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract the base type name from a method receiver: `(r *Foo)` → `"Foo"`,
+/// `(r Foo)` → `"Foo"`. Returns empty string if parsing fails.
+#[cfg(feature = "lang-go")]
+fn go_receiver_type(method_node: &Node, src: &[u8]) -> String {
+    let receiver = match method_node.child_by_field_name("receiver") {
+        Some(r) => r,
+        None => return String::new(),
+    };
+    let mut cur = receiver.walk();
+    for child in receiver.children(&mut cur) {
+        if child.kind() == "parameter_declaration" {
+            if let Some(ty) = child.child_by_field_name("type") {
+                return go_base_type(&ty, src);
+            }
+        }
+    }
+    String::new()
+}
+
+/// Strip a leading `*` from a Go type node to get the bare type name.
+#[cfg(feature = "lang-go")]
+fn go_base_type(type_node: &Node, src: &[u8]) -> String {
+    match type_node.kind() {
+        "type_identifier" => node_text(type_node, src).to_string(),
+        "pointer_type" => {
+            let mut cur = type_node.walk();
+            for child in type_node.children(&mut cur) {
+                if child.kind() == "type_identifier" {
+                    return node_text(&child, src).to_string();
+                }
+            }
+            String::new()
+        }
+        _ => String::new(),
+    }
+}
+
+#[cfg(feature = "lang-go")]
+fn collect_go_calls(
+    node: &Node,
+    src: &[u8],
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "function_declaration" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, src).to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    walk_go_body(&body, src, &name, resolver, out, unresolved);
+                }
+            }
+            "method_declaration" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, src).to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let recv = go_receiver_type(&child, src);
+                let caller_qual = if recv.is_empty() {
+                    name
+                } else {
+                    format!("{}.{}", recv, name)
+                };
+                if let Some(body) = child.child_by_field_name("body") {
+                    walk_go_body(&body, src, &caller_qual, resolver, out, unresolved);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "lang-go")]
+fn walk_go_body(
+    node: &Node,
+    src: &[u8],
+    caller: &str,
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "call_expression" {
+        let callee_raw = node
+            .child_by_field_name("function")
+            .map(|n| go_callee_name(&n, src))
+            .unwrap_or_default();
+        if !callee_raw.is_empty() {
+            match resolver.resolve(&callee_raw) {
+                Some(target) => {
+                    if target != caller {
+                        out.push((caller.to_string(), target));
+                    }
+                }
+                None => unresolved.push((caller.to_string(), callee_raw)),
+            }
+        }
+    }
+
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        walk_go_body(&child, src, caller, resolver, out, unresolved);
+    }
+}
+
+/// Extract the short callee name from a Go `call_expression`'s function node:
+///   foo()        → "foo"
+///   x.Bar()      → "Bar"   (selector_expression)
+///   a.b().c()    → "c"     (chained — outer selector still gives us "c")
+#[cfg(feature = "lang-go")]
+fn go_callee_name(node: &Node, src: &[u8]) -> String {
+    match node.kind() {
+        "identifier" => node_text(node, src).to_string(),
+        "selector_expression" => node
+            .child_by_field_name("field")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lang-c")]
+fn extract_c(source: &str) -> Result<FileCallGraph, String> {
+    let mut parser = Parser::new();
+    let lang = tree_sitter_c::language();
+    parser
+        .set_language(&lang)
+        .map_err(|e| format!("tree-sitter c init failed: {e}"))?;
+    let tree = parser
+        .parse(source.as_bytes(), None)
+        .ok_or_else(|| "tree-sitter parse returned None".to_string())?;
+    let src = source.as_bytes();
+
+    let mut functions: Vec<FunctionInfo> = Vec::new();
+    collect_c_functions(&tree.root_node(), src, &mut functions);
+
+    let resolver = Resolver::new(&functions);
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
+    collect_c_calls(&tree.root_node(), src, &resolver, &mut calls, &mut unresolved_calls);
+
+    let unresolved_count = unresolved_calls.len();
+    Ok(FileCallGraph {
+        functions,
+        calls,
+        unresolved_count,
+        unresolved_calls,
+        language: "c",
+    })
+}
+
+/// Walk top-level declarations and collect function definitions. Standard C
+/// has no nested functions, so a single pass over `translation_unit` children
+/// is sufficient. GCC nested function extensions are ignored.
+#[cfg(feature = "lang-c")]
+fn collect_c_functions(node: &Node, src: &[u8], out: &mut Vec<FunctionInfo>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "function_definition" {
+            let name = c_fn_name(&child, src);
+            if name.is_empty() {
+                continue;
+            }
+            out.push(FunctionInfo {
+                qualified: name.clone(),
+                simple: name,
+                line: (child.start_position().row as u32) + 1,
+                kind: "fn",
+            });
+        }
+    }
+}
+
+#[cfg(feature = "lang-c")]
+fn collect_c_calls(
+    node: &Node,
+    src: &[u8],
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "function_definition" {
+            let name = c_fn_name(&child, src);
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(body) = child.child_by_field_name("body") {
+                walk_c_body(&body, src, &name, resolver, out, unresolved);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "lang-c")]
+fn walk_c_body(
+    node: &Node,
+    src: &[u8],
+    caller: &str,
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "call_expression" {
+        let callee_raw = node
+            .child_by_field_name("function")
+            .map(|n| c_callee_name(&n, src))
+            .unwrap_or_default();
+        if !callee_raw.is_empty() {
+            match resolver.resolve(&callee_raw) {
+                Some(target) => {
+                    if target != caller {
+                        out.push((caller.to_string(), target));
+                    }
+                }
+                None => unresolved.push((caller.to_string(), callee_raw)),
+            }
+        }
+    }
+
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        walk_c_body(&child, src, caller, resolver, out, unresolved);
+    }
+}
+
+/// Extract the function name from a `function_definition` by drilling through
+/// the declarator chain. Handles the common forms:
+///   `void foo(...)` → function_declarator → identifier "foo"
+///   `int *foo(...)` → pointer_declarator → function_declarator → identifier "foo"
+#[cfg(feature = "lang-c")]
+fn c_fn_name(fn_def: &Node, src: &[u8]) -> String {
+    fn_def
+        .child_by_field_name("declarator")
+        .map(|d| c_declarator_name(&d, src))
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "lang-c")]
+fn c_declarator_name(node: &Node, src: &[u8]) -> String {
+    match node.kind() {
+        "identifier" => node_text(node, src).to_string(),
+        "function_declarator" | "pointer_declarator" => node
+            .child_by_field_name("declarator")
+            .map(|n| c_declarator_name(&n, src))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Extract the callee name from a C `call_expression`'s function node:
+///   foo(...)        → "foo"
+///   obj.field(...)  → "field"   (struct member via `.`)
+///   ptr->field(...) → "field"   (struct member via `->`, also field_expression)
+/// Function-pointer calls through a variable are skipped — unresolvable.
+#[cfg(feature = "lang-c")]
+fn c_callee_name(node: &Node, src: &[u8]) -> String {
+    match node.kind() {
+        "identifier" => node_text(node, src).to_string(),
+        "field_expression" => node
+            .child_by_field_name("field")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C++
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lang-cpp")]
+fn extract_cpp(source: &str) -> Result<FileCallGraph, String> {
+    let mut parser = Parser::new();
+    let lang = tree_sitter_cpp::language();
+    parser
+        .set_language(&lang)
+        .map_err(|e| format!("tree-sitter cpp init failed: {e}"))?;
+    let tree = parser
+        .parse(source.as_bytes(), None)
+        .ok_or_else(|| "tree-sitter parse returned None".to_string())?;
+    let src = source.as_bytes();
+
+    let mut functions: Vec<FunctionInfo> = Vec::new();
+    let mut scope: Vec<String> = Vec::new();
+    collect_cpp_functions(&tree.root_node(), src, &mut scope, &mut functions);
+
+    let resolver = Resolver::new(&functions);
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut unresolved_calls: Vec<(String, String)> = Vec::new();
+    let mut scope: Vec<String> = Vec::new();
+    collect_cpp_calls(
+        &tree.root_node(),
+        src,
+        &mut scope,
+        &resolver,
+        &mut calls,
+        &mut unresolved_calls,
+    );
+
+    let unresolved_count = unresolved_calls.len();
+    Ok(FileCallGraph {
+        functions,
+        calls,
+        unresolved_count,
+        unresolved_calls,
+        language: "cpp",
+    })
+}
+
+/// Collect all function and method definitions. Uses a scope stack for class
+/// bodies (matching the Rust impl_item approach). Namespace bodies are
+/// recursed without adding to the scope — namespace-qualified names like
+/// `std::foo` would pollute the simple-name resolver for no benefit.
+/// Template wrappers are stripped; the inner definition is what matters.
+#[cfg(feature = "lang-cpp")]
+fn collect_cpp_functions(
+    node: &Node,
+    src: &[u8],
+    scope: &mut Vec<String>,
+    out: &mut Vec<FunctionInfo>,
+) {
+    match node.kind() {
+        "class_specifier" | "struct_specifier" => {
+            let class_name = node
+                .child_by_field_name("name")
+                .map(|n| cpp_type_name(&n, src))
+                .unwrap_or_default();
+            scope.push(class_name);
+            // The class body may not carry a named "body" field in all
+            // tree-sitter-cpp versions — locate it by node kind instead.
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "field_declaration_list" {
+                    let mut bcur = child.walk();
+                    for member in child.children(&mut bcur) {
+                        collect_cpp_functions(&member, src, scope, out);
+                    }
+                }
+            }
+            scope.pop();
+        }
+        "function_definition" => {
+            let raw_name = cpp_fn_name(node, src);
+            if raw_name.is_empty() {
+                return;
+            }
+            // Out-of-class method definition: `void Foo::bar() {}` — the
+            // declarator carries a qualified_identifier, so raw_name has "::".
+            let (qualified, simple) = if raw_name.contains("::") {
+                let simple = raw_name
+                    .split("::")
+                    .last()
+                    .unwrap_or(&raw_name)
+                    .split('<')
+                    .next()
+                    .unwrap_or(&raw_name)
+                    .trim()
+                    .to_string();
+                let qualified = raw_name.split('<').next().unwrap_or(&raw_name).trim().to_string();
+                (qualified, simple)
+            } else if scope.is_empty() {
+                (raw_name.clone(), raw_name)
+            } else {
+                let qualified = format!("{}::{}", scope.join("::"), raw_name);
+                (qualified, raw_name)
+            };
+            let kind = if qualified.contains("::") { "method" } else { "fn" };
+            out.push(FunctionInfo {
+                qualified,
+                simple,
+                line: (node.start_position().row as u32) + 1,
+                kind,
+            });
+        }
+        "namespace_definition" => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "declaration_list" {
+                    let mut bcur = child.walk();
+                    for member in child.children(&mut bcur) {
+                        collect_cpp_functions(&member, src, scope, out);
+                    }
+                }
+            }
+        }
+        "template_declaration" => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if matches!(child.kind(), "function_definition" | "class_specifier" | "struct_specifier") {
+                    collect_cpp_functions(&child, src, scope, out);
+                }
+            }
+        }
+        _ => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                collect_cpp_functions(&child, src, scope, out);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "lang-cpp")]
+fn collect_cpp_calls(
+    node: &Node,
+    src: &[u8],
+    scope: &mut Vec<String>,
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    match node.kind() {
+        "class_specifier" | "struct_specifier" => {
+            let class_name = node
+                .child_by_field_name("name")
+                .map(|n| cpp_type_name(&n, src))
+                .unwrap_or_default();
+            scope.push(class_name);
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "field_declaration_list" {
+                    let mut bcur = child.walk();
+                    for member in child.children(&mut bcur) {
+                        collect_cpp_calls(&member, src, scope, resolver, out, unresolved);
+                    }
+                }
+            }
+            scope.pop();
+        }
+        "function_definition" => {
+            let raw_name = cpp_fn_name(node, src);
+            if raw_name.is_empty() {
+                return;
+            }
+            let caller_qual = if raw_name.contains("::") {
+                raw_name.split('<').next().unwrap_or(&raw_name).trim().to_string()
+            } else if scope.is_empty() {
+                raw_name
+            } else {
+                format!("{}::{}", scope.join("::"), raw_name)
+            };
+            if let Some(body) = node.child_by_field_name("body") {
+                walk_cpp_body(&body, src, &caller_qual, resolver, out, unresolved);
+            }
+        }
+        "namespace_definition" => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "declaration_list" {
+                    let mut bcur = child.walk();
+                    for member in child.children(&mut bcur) {
+                        collect_cpp_calls(&member, src, scope, resolver, out, unresolved);
+                    }
+                }
+            }
+        }
+        "template_declaration" => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if matches!(child.kind(), "function_definition" | "class_specifier" | "struct_specifier") {
+                    collect_cpp_calls(&child, src, scope, resolver, out, unresolved);
+                }
+            }
+        }
+        _ => {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                collect_cpp_calls(&child, src, scope, resolver, out, unresolved);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "lang-cpp")]
+fn walk_cpp_body(
+    node: &Node,
+    src: &[u8],
+    caller: &str,
+    resolver: &Resolver,
+    out: &mut Vec<(String, String)>,
+    unresolved: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "call_expression" {
+        let callee_raw = node
+            .child_by_field_name("function")
+            .map(|n| cpp_callee_name(&n, src))
+            .unwrap_or_default();
+        if !callee_raw.is_empty() {
+            match resolver.resolve(&callee_raw) {
+                Some(target) => {
+                    if target != caller {
+                        out.push((caller.to_string(), target));
+                    }
+                }
+                None => unresolved.push((caller.to_string(), callee_raw)),
+            }
+        }
+    }
+
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        walk_cpp_body(&child, src, caller, resolver, out, unresolved);
+    }
+}
+
+/// Drill through the declarator chain of a `function_definition` to get the
+/// function's name. Handles the common C++ forms:
+///   `void foo()`           → function_declarator → identifier "foo"
+///   `int *foo()`           → pointer_declarator → function_declarator → identifier
+///   `void Foo::bar()`      → function_declarator → qualified_identifier "Foo::bar"
+///   `~Foo()`               → function_declarator → destructor_name "~Foo"
+///   `operator==()`         → function_declarator → operator_name "operator=="
+#[cfg(feature = "lang-cpp")]
+fn cpp_fn_name(fn_def: &Node, src: &[u8]) -> String {
+    fn_def
+        .child_by_field_name("declarator")
+        .map(|d| cpp_declarator_name(&d, src))
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "lang-cpp")]
+fn cpp_declarator_name(node: &Node, src: &[u8]) -> String {
+    match node.kind() {
+        // field_identifier is used for method names inside class bodies
+        "identifier" | "field_identifier" | "destructor_name" | "operator_name" => {
+            node_text(node, src).to_string()
+        }
+        "qualified_identifier" => {
+            // Return the full `Foo::bar` text; the caller splits on "::" as needed.
+            node_text(node, src).to_string()
+        }
+        "function_declarator" | "pointer_declarator" | "reference_declarator" => {
+            node.child_by_field_name("declarator")
+                .map(|n| cpp_declarator_name(&n, src))
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Strip template parameters from a C++ type node: `Foo<T>` → `"Foo"`.
+#[cfg(feature = "lang-cpp")]
+fn cpp_type_name(node: &Node, src: &[u8]) -> String {
+    let text = node_text(node, src);
+    text.split('<').next().unwrap_or(text).trim().to_string()
+}
+
+/// Extract the callee name from a C++ `call_expression`'s function node:
+///   foo()           → "foo"
+///   obj.method()    → "method"   (field_expression)
+///   ptr->method()   → "method"   (field_expression with -> operator)
+///   Foo::bar()      → "bar"      (qualified_identifier — last component)
+///   foo<int>()      → "foo"      (template_function)
+#[cfg(feature = "lang-cpp")]
+fn cpp_callee_name(node: &Node, src: &[u8]) -> String {
+    match node.kind() {
+        "identifier" => node_text(node, src).to_string(),
+        "field_expression" => node
+            .child_by_field_name("field")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default(),
+        "qualified_identifier" => node
+            .child_by_field_name("name")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default(),
+        "template_function" => node
+            .child_by_field_name("name")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(any(feature = "lang-rust", feature = "lang-python"))]
+#[cfg(any(
+    feature = "lang-rust",
+    feature = "lang-python",
+    feature = "lang-go",
+    feature = "lang-c",
+    feature = "lang-cpp",
+))]
 fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).unwrap_or("")
 }
@@ -703,6 +1402,120 @@ class S:
             cg.calls.contains(&("S.foo".into(), "S.bar".into())),
             "missing method edge: {:?}", cg.calls
         );
+    }
+
+    #[cfg(feature = "lang-go")]
+    #[test]
+    fn go_resolves_free_function_calls() {
+        let src = "package p\nfunc a() { b(); c() }\nfunc b() { c() }\nfunc c() {}\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.go"), src).unwrap().unwrap();
+        assert_eq!(cg.language, "go");
+        assert_eq!(cg.functions.len(), 3);
+        assert!(cg.calls.contains(&("a".into(), "b".into())));
+        assert!(cg.calls.contains(&("a".into(), "c".into())));
+        assert!(cg.calls.contains(&("b".into(), "c".into())));
+        assert_eq!(cg.unresolved_count, 0);
+    }
+
+    #[cfg(feature = "lang-go")]
+    #[test]
+    fn go_method_calls_resolve_via_simple_name() {
+        let src = "package p\ntype S struct{}\nfunc (s *S) Foo() { s.Bar() }\nfunc (s *S) Bar() {}\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.go"), src).unwrap().unwrap();
+        assert!(cg.functions.iter().any(|f| f.qualified == "S.Foo"), "{:?}", cg.functions);
+        assert!(cg.functions.iter().any(|f| f.qualified == "S.Bar"), "{:?}", cg.functions);
+        assert!(
+            cg.calls.contains(&("S.Foo".into(), "S.Bar".into())),
+            "missing method call edge in {:?}", cg.calls
+        );
+    }
+
+    #[cfg(feature = "lang-go")]
+    #[test]
+    fn go_external_calls_are_unresolved() {
+        let src = "package p\nfunc a() { fmt.Println(\"hi\"); unknown() }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.go"), src).unwrap().unwrap();
+        assert!(cg.unresolved_count >= 2, "expected 2+ unresolved, got {}", cg.unresolved_count);
+        assert!(cg.calls.is_empty());
+    }
+
+    #[cfg(feature = "lang-c")]
+    #[test]
+    fn c_resolves_free_function_calls() {
+        let src = "void c(void) {}\nvoid b(void) { c(); }\nvoid a(void) { b(); c(); }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.c"), src).unwrap().unwrap();
+        assert_eq!(cg.language, "c");
+        assert_eq!(cg.functions.len(), 3);
+        assert!(cg.calls.contains(&("a".into(), "b".into())));
+        assert!(cg.calls.contains(&("a".into(), "c".into())));
+        assert!(cg.calls.contains(&("b".into(), "c".into())));
+        assert_eq!(cg.unresolved_count, 0);
+    }
+
+    #[cfg(feature = "lang-c")]
+    #[test]
+    fn c_pointer_return_type_name_extracted() {
+        // `int *foo(void)` — pointer_declarator wrapping function_declarator
+        let src = "int *foo(void) { return 0; }\nvoid bar(void) { foo(); }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.c"), src).unwrap().unwrap();
+        assert!(cg.functions.iter().any(|f| f.qualified == "foo"), "{:?}", cg.functions);
+        assert!(cg.calls.contains(&("bar".into(), "foo".into())), "{:?}", cg.calls);
+    }
+
+    #[cfg(feature = "lang-c")]
+    #[test]
+    fn c_external_calls_are_unresolved() {
+        let src = "void a(void) { printf(\"hi\"); free(0); }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.c"), src).unwrap().unwrap();
+        assert!(cg.unresolved_count >= 2, "got {}", cg.unresolved_count);
+        assert!(cg.calls.is_empty());
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    #[test]
+    fn cpp_resolves_free_function_calls() {
+        let src = "void c() {}\nvoid b() { c(); }\nvoid a() { b(); c(); }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.cpp"), src).unwrap().unwrap();
+        assert_eq!(cg.language, "cpp");
+        assert!(cg.calls.contains(&("a".into(), "b".into())));
+        assert!(cg.calls.contains(&("a".into(), "c".into())));
+        assert!(cg.calls.contains(&("b".into(), "c".into())));
+        assert_eq!(cg.unresolved_count, 0);
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    #[test]
+    fn cpp_inline_class_methods_qualified() {
+        let src = "\
+class S {\npublic:\n    void foo() { bar(); }\n    void bar() {}\n};\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.cpp"), src).unwrap().unwrap();
+        assert!(cg.functions.iter().any(|f| f.qualified == "S::foo"), "{:?}", cg.functions);
+        assert!(cg.functions.iter().any(|f| f.qualified == "S::bar"), "{:?}", cg.functions);
+        assert!(
+            cg.calls.contains(&("S::foo".into(), "S::bar".into())),
+            "missing method call edge in {:?}", cg.calls
+        );
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    #[test]
+    fn cpp_out_of_class_definition_resolves() {
+        let src = "class S { void foo(); void bar(); };\nvoid S::foo() { bar(); }\nvoid S::bar() {}\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.cpp"), src).unwrap().unwrap();
+        assert!(cg.functions.iter().any(|f| f.qualified == "S::foo"), "{:?}", cg.functions);
+        assert!(
+            cg.calls.contains(&("S::foo".into(), "S::bar".into())),
+            "{:?}", cg.calls
+        );
+    }
+
+    #[cfg(feature = "lang-cpp")]
+    #[test]
+    fn cpp_external_calls_are_unresolved() {
+        let src = "void a() { printf(\"hi\"); free(nullptr); }\n";
+        let cg = build_file_call_graph(&PathBuf::from("x.cpp"), src).unwrap().unwrap();
+        assert!(cg.unresolved_count >= 2, "got {}", cg.unresolved_count);
+        assert!(cg.calls.is_empty());
     }
 
     #[test]

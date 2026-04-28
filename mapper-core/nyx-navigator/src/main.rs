@@ -1,5 +1,9 @@
+mod answer;
 mod api;
 mod call_graph;
+mod reach;
+mod class_graph;
+mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;
@@ -264,7 +268,7 @@ enum Commands {
     Diagram {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
-        /// Output format: mermaid, dot, or ascii (aliases: tree, text)
+        /// Output format: mermaid, dot, ascii, sequence, class, quadrant, er
         #[arg(long, default_value = "mermaid")]
         format: String,
         /// Write output to file instead of stdout
@@ -309,6 +313,12 @@ enum Commands {
         /// defined in the same file. External / stdlib calls are dropped.
         #[arg(long, value_name = "FILE")]
         call_graph: Option<PathBuf>,
+        /// Cross-file sequence trace entry point: FILE::FUNCTION
+        /// (e.g. `src/main.rs::diagram_mode`). Requires `--format sequence`.
+        /// Spike feature — resolution is heuristic; edges marked `(~)` are
+        /// lower-confidence matches.
+        #[arg(long, value_name = "FILE::FUNCTION")]
+        entry: Option<String>,
     },
     /// Generate llms.txt index for this project
     Llmstxt {
@@ -601,6 +611,54 @@ enum Commands {
         #[command(subcommand)]
         command: SnapshotCommands,
     },
+    /// Question-driven evidence chain — assembles minimum context to answer a question [EXPERIMENTAL]
+    Answer {
+        /// Natural language question about the codebase
+        #[arg(value_name = "QUESTION")]
+        question: String,
+        /// Maximum items in the evidence chain (default 6)
+        #[arg(long, default_value = "6")]
+        max_items: usize,
+        /// Token budget (default 8000)
+        #[arg(long, default_value = "8000")]
+        budget: usize,
+        /// Do not show the body of the top-scored item
+        #[arg(long)]
+        no_body: bool,
+        /// Drill into evidence item N with reach, appended below the answer chain
+        #[arg(long = "then", value_name = "N")]
+        then_item: Option<usize>,
+        /// Project path (defaults to current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
+    /// Semantic graph traversal — AI-optimized context tree from a symbol [EXPERIMENTAL]
+    Reach {
+        /// Symbol name(s) to start from. Provide two for intersection view.
+        #[arg(value_name = "SYMBOL", num_args = 1..)]
+        symbols: Vec<String>,
+        /// Disambiguate to a specific file (single-symbol mode only)
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
+        /// Graph traversal depth (default 2)
+        #[arg(long, default_value = "2")]
+        depth: usize,
+        /// Token budget — hard cap on output size (default 6000)
+        #[arg(long, default_value = "6000")]
+        budget: usize,
+        /// Include test call sites (default: collapse and count them)
+        #[arg(long)]
+        include_tests: bool,
+        /// Include the function body of the root symbol (up to 40 lines)
+        #[arg(long)]
+        show_body: bool,
+        /// Output format: compact (default) or json
+        #[arg(long, default_value = "compact")]
+        format: String,
+        /// Project path to scan (defaults to current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
     /// Re-run the install script to upgrade to the latest build
     Update,
 }
@@ -797,6 +855,7 @@ fn main() -> Result<()> {
             group_by_folder,
             color_by_owner,
             call_graph,
+            entry,
         }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
             diagram_mode(
@@ -812,6 +871,7 @@ fn main() -> Result<()> {
                 group_by_folder,
                 color_by_owner,
                 call_graph.as_deref(),
+                entry.as_deref(),
             )
         }
         Some(Commands::Llmstxt { path, output }) => {
@@ -902,6 +962,15 @@ fn main() -> Result<()> {
             let cwd2 = cwd.clone();
             snapshot_mode(&cwd2, command)
         }
+        Some(Commands::Answer { question, max_items, budget, no_body, then_item, path }) => {
+            let root = resolve_path(&cwd, path)?;
+            answer_mode(&root, &question, max_items, budget, !no_body, then_item)
+        }
+        Some(Commands::Reach { symbols, file, depth, budget, include_tests, show_body, format, path }) => {
+            let root = resolve_path(&cwd, path)?;
+            let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+            reach_mode(&root, &sym_refs, file.as_deref(), depth, budget, include_tests, show_body, &format)
+        }
         Some(Commands::Update) => {
             update_mode()
         }
@@ -945,7 +1014,9 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
     let mut extract_cache: HashMap<String, (u64, MappedFile)> = HashMap::new();
 
     // Initial skeleton map generation
-    let (mapped_files, ignored) = generate_skeleton_map_incremental(root, &mut extract_cache)?;
+    let (mut mapped_files, ignored) = generate_skeleton_map_incremental(root, &mut extract_cache)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
@@ -980,7 +1051,9 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                 if relevant {
                     // Regenerate skeleton map (incremental — skips unchanged files)
                     match generate_skeleton_map_incremental(root, &mut extract_cache) {
-                        Ok((files, _)) => {
+                        Ok((mut files, _)) => {
+                            annotate_tested(&mut files);
+                            annotate_churn(&mut files, root);
                             let output = format_map_output(&files, target);
                             let tokens = estimate_tokens(&output);
                             if fs::write(&map_path, &output).is_ok() {
@@ -1026,6 +1099,112 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Feature 2: test-coverage markers
+// ---------------------------------------------------------------------------
+
+/// Marks each non-test-function signature as `tested = true` when a test function
+/// whose name (after stripping a `test_` prefix) matches the symbol name exists.
+///
+/// Sources for test function names:
+/// 1. Separate test files (path matches `is_test_path`).
+/// 2. Inline `#[test]` functions detected during Rust extraction (sig.tested == true
+///    on the test function itself, used here as a two-pass sentinel then cleared).
+fn annotate_tested(files: &mut Vec<MappedFile>) {
+    use std::collections::HashSet;
+
+    // Collect candidate names from test files and inline #[test] functions.
+    let mut tested_names: HashSet<String> = HashSet::new();
+
+    let strip = |n: &str| -> String {
+        let base = n
+            .strip_prefix("test_")
+            .or_else(|| n.strip_prefix("tests_"))
+            .unwrap_or(n);
+        base.trim_end_matches("_works")
+            .trim_end_matches("_fails")
+            .trim_end_matches("_success")
+            .trim_end_matches("_error")
+            .trim_end_matches("_ok")
+            .trim_end_matches("_err")
+            .trim_end_matches("_test")
+            .to_string()
+    };
+
+    for file in files.iter() {
+        // Inline #[test] / #[cfg(test)] names preserved through tree-sitter override.
+        for name in &file.inline_test_fns {
+            let base = strip(name);
+            if !base.is_empty() {
+                tested_names.insert(base);
+            }
+        }
+        // Separate test-file signatures.
+        if crate::api::is_test_path(&file.path) {
+            for sig in &file.signatures {
+                if let Some(name) = &sig.symbol_name {
+                    let base = strip(name);
+                    if !base.is_empty() {
+                        tested_names.insert(base);
+                    }
+                }
+            }
+        }
+    }
+
+    // Mark matching non-test signatures.
+    for file in files.iter_mut() {
+        if crate::api::is_test_path(&file.path) {
+            continue;
+        }
+        for sig in &mut file.signatures {
+            sig.tested = sig
+                .symbol_name
+                .as_deref()
+                .map(|n| tested_names.contains(n))
+                .unwrap_or(false);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 3: churn annotations
+// ---------------------------------------------------------------------------
+
+/// Labels each MappedFile with "hot" (top-quartile commit count) or "stable"
+/// (bottom-quartile) based on git churn over the last 300 commits.
+fn annotate_churn(files: &mut Vec<MappedFile>, root: &Path) {
+    let churn = crate::git_analysis::git_churn(root, 300);
+    if churn.is_empty() {
+        return;
+    }
+
+    let mut counts: Vec<usize> = files
+        .iter()
+        .map(|f| *churn.get(&f.path).unwrap_or(&0))
+        .collect();
+    counts.sort_unstable();
+
+    let n = counts.len();
+    let hot_threshold = counts[n * 3 / 4]; // 75th percentile
+    let stable_threshold = counts[n / 4];   // 25th percentile
+    let max_count = *counts.last().unwrap_or(&0);
+
+    // Only label when there is real spread; flat distributions carry no signal.
+    if max_count == 0 || hot_threshold == stable_threshold {
+        return;
+    }
+
+    for file in files.iter_mut() {
+        let c = *churn.get(&file.path).unwrap_or(&0);
+        if c > hot_threshold {
+            file.churn_label = Some("hot".to_string());
+        } else if stable_threshold > 0 && c < stable_threshold {
+            file.churn_label = Some("stable".to_string());
+        }
+    }
 }
 
 fn generate_skeleton_map(root: &Path) -> Result<(Vec<MappedFile>, Vec<IgnoredFile>)> {
@@ -1153,7 +1332,9 @@ fn overview_mode(
     let project_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
 
     // Map estimate: skeleton extraction
-    let (mapped_files, _) = generate_skeleton_map(root)?;
+    let (mut mapped_files, _) = generate_skeleton_map(root)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let map_output = format_map_output(&mapped_files, target);
     let map_tokens = estimate_tokens(&map_output);
 
@@ -1191,8 +1372,7 @@ fn overview_mode(
         "source"  => source_mode(root, cwd, target, copy, ignore_set),
         "diagram" => {
             use crate::diagram;
-            let mut graph = {
-                use crate::api::ApiState;
+            let graph = {
                 use crate::scanner::is_source_file;
                 let scan = scan_files_with_noise_tracking(root)?;
                 let mapped: std::collections::HashMap<String, MappedFile> = scan.files.iter()
@@ -1234,7 +1414,9 @@ fn map_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) ->
     let project = root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
     println!("  Scanning {}...\n", project);
 
-    let (mapped_files, ignored) = generate_skeleton_map(root)?;
+    let (mut mapped_files, ignored) = generate_skeleton_map(root)?;
+    annotate_tested(&mut mapped_files);
+    annotate_churn(&mut mapped_files, root);
     let output = format_map_output(&mapped_files, target);
     let tokens = estimate_tokens(&output);
 
@@ -1323,7 +1505,11 @@ fn format_map_output(files: &[MappedFile], target: OutputTarget) -> String {
 fn format_map_xml(files: &[MappedFile]) -> String {
     let mut out = String::from("<context type=\"skeleton_map\">\n<project_map>\n");
     for file in files {
-        out.push_str(&format!("<file path=\"{}\">\n", escape_xml(&file.path)));
+        let heat_attr = match file.churn_label.as_deref() {
+            Some(label) => format!(" heat=\"{}\"", label),
+            None => String::new(),
+        };
+        out.push_str(&format!("<file path=\"{}\"{}>\n", escape_xml(&file.path), heat_attr));
         out.push_str(&escape_xml(&file.format()));
         out.push_str("</file>\n");
     }
@@ -1335,9 +1521,11 @@ fn format_map_markdown(files: &[MappedFile]) -> String {
     let mut out = String::from("# Project Skeleton Map\n\n");
     for file in files {
         let ext = file.path.rsplit('.').next().unwrap_or("txt");
+        let heat = file.churn_label.as_deref().map(|l| format!("  <!-- {} -->", l)).unwrap_or_default();
         out.push_str(&format!(
-            "## {}\n\n`{}\n{}\n`\n\n",
+            "## {}{}\n\n`{}\n{}\n`\n\n",
             file.path,
+            heat,
             ext,
             file.format()
         ));
@@ -1386,7 +1574,7 @@ fn print_navigator_report(included_count: usize, ignored: &[IgnoredFile], tokens
 // Token Budget Check
 // =============================================================================
 
-fn handle_token_budget_copy(content: &str, tokens: usize, auto_copy: bool) -> Result<()> {
+fn handle_token_budget_copy(content: &str, _tokens: usize, auto_copy: bool) -> Result<()> {
     if auto_copy {
         copy_to_clipboard(content)?;
     } else {
@@ -1932,7 +2120,10 @@ fn health_mode(root: &Path, compare: Option<&str>, json_out: bool) -> Result<()>
                 })
                 .unwrap_or_default();
 
-            let suggestion = if callers == 0 {
+            let is_entry = crate::api::is_entry_point_path(&node.path);
+            let suggestion = if callers == 0 && is_entry {
+                "no callers — entry point; this is expected".to_string()
+            } else if callers == 0 {
                 "no callers — likely dead bridge, consider removal".to_string()
             } else if caller_dirs.len() >= 2 {
                 let dirs: Vec<&str> = caller_dirs.iter().copied().take(3).collect();
@@ -2463,11 +2654,15 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
         return;
     }
 
+    // git_churn / git_cochange / git_ownership all return repo-relative paths
+    // (output of `git log --name-only`). node.module_id is also repo-relative
+    // (stripped from root), while node.path is the absolute filesystem path.
+    // Always key on module_id for git lookups.
     let max_raw = graph
         .nodes
         .iter()
         .map(|n| {
-            let c = *churn.get(&n.path).unwrap_or(&0);
+            let c = *churn.get(&n.module_id).unwrap_or(&0);
             c * n.signature_count
         })
         .max()
@@ -2476,7 +2671,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
 
     let mut hotspot_count = 0usize;
     for node in &mut graph.nodes {
-        let c = *churn.get(&node.path).unwrap_or(&0);
+        let c = *churn.get(&node.module_id).unwrap_or(&0);
         node.churn = Some(c);
         let score = ((c * node.signature_count) as f64 / max_raw * 100.0).round();
         node.hotspot_score = Some(score);
@@ -2487,7 +2682,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
     graph.metadata.hotspot_count = Some(hotspot_count);
 
     let known: std::collections::HashSet<&str> =
-        graph.nodes.iter().map(|n| n.path.as_str()).collect();
+        graph.nodes.iter().map(|n| n.module_id.as_str()).collect();
     graph.cochange_pairs = crate::git_analysis::git_cochange(root, 500)
         .into_iter()
         .filter(|p| known.contains(p.file_a.as_str()) && known.contains(p.file_b.as_str()))
@@ -2505,7 +2700,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
         let disp_map: std::collections::HashMap<&str, &crate::git_analysis::CoChangeDispersion> =
             dispersion.iter().map(|d| (d.file.as_str(), d)).collect();
         for node in &mut graph.nodes {
-            if let Some(d) = disp_map.get(node.path.as_str()) {
+            if let Some(d) = disp_map.get(node.module_id.as_str()) {
                 node.cochange_partners = Some(d.partner_count);
                 node.cochange_entropy = Some((d.entropy * 100.0).round() / 100.0);
             }
@@ -2517,7 +2712,7 @@ fn enrich_with_git(graph: &mut crate::api::ProjectGraphResponse, root: &Path) {
     let ownership = crate::git_analysis::git_ownership(root, 500);
     if !ownership.is_empty() {
         for node in &mut graph.nodes {
-            if let Some(owner) = ownership.get(&node.path) {
+            if let Some(owner) = ownership.get(&node.module_id) {
                 node.owner = Some(owner.clone());
             }
         }
@@ -2573,6 +2768,9 @@ fn cochange_mode(
 
     if filtered.is_empty() {
         println!("No co-change pairs found with count >= {}.", min_count);
+        if min_count > 2 {
+            println!("Tip: try a lower threshold — e.g. `navigator cochange --min-count 2`");
+        }
         return Ok(());
     }
 
@@ -2955,9 +3153,24 @@ fn hotspots_mode(
 // =============================================================================
 
 fn shotgun_mode(root: &Path, commits: usize, top: usize, min_partners: usize) -> Result<()> {
+    use crate::scanner::{IGNORED_FILES, NOISE_LOCK_FILES, NOISE_MAP_EXTENSIONS};
     let mut entries = crate::git_analysis::git_cochange_dispersion(root, commits);
 
-    entries.retain(|e| e.partner_count >= min_partners);
+    entries.retain(|e| {
+        if e.partner_count < min_partners {
+            return false;
+        }
+        let filename = e.file.rsplit('/').next().unwrap_or(&e.file);
+        if IGNORED_FILES.contains(&filename) || NOISE_LOCK_FILES.contains(&filename) {
+            return false;
+        }
+        if let Some(ext) = filename.rsplit('.').next() {
+            if NOISE_MAP_EXTENSIONS.contains(&ext) {
+                return false;
+            }
+        }
+        true
+    });
     entries.truncate(top);
 
     println!("╔═══════════════════════════════════════════════════════════╗");
@@ -3104,10 +3317,77 @@ fn diagram_mode(
     group_by_folder_depth: Option<usize>,
     color_by_owner: bool,
     call_graph_target: Option<&Path>,
+    entry: Option<&str>,
 ) -> Result<()> {
     use crate::api::ApiState;
     use crate::mapper::extract_skeleton;
     use crate::scanner::{is_ignored_path, is_source_file, scan_files_with_noise_tracking};
+
+    // ── Cross-file sequence trace (spike) ────────────────────────────────────
+    // `--entry FILE::FUNCTION --format sequence` traces call edges across files
+    // using simple-name + import-graph resolution. Requires a full project scan.
+    if let Some(entry_spec) = entry {
+        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+        if fmt != diagram::DiagramFormat::Sequence {
+            anyhow::bail!("--entry requires --format sequence");
+        }
+        let (entry_file, entry_fn) = entry_spec.split_once("::").ok_or_else(|| {
+            anyhow::anyhow!("--entry must be FILE::FUNCTION (e.g. src/main.rs::diagram_mode)")
+        })?;
+        let abs_entry = if Path::new(entry_file).is_absolute() {
+            Path::new(entry_file).to_path_buf()
+        } else {
+            root.join(entry_file)
+        };
+
+        // Build full mapped-file index for symbol resolution.
+        let result = scan_files_with_noise_tracking(root)?;
+        let mapped_files: std::collections::HashMap<String, crate::mapper::MappedFile> = result
+            .files
+            .iter()
+            .filter(|p| !is_ignored_path(p) && is_source_file(p))
+            .filter_map(|p| {
+                let content = std::fs::read_to_string(p).ok()?;
+                let mapped = extract_skeleton(p, &content);
+                let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+                Some((rel, mapped))
+            })
+            .collect();
+
+        let trace = crate::cross_call::trace_from_entry(
+            &abs_entry,
+            entry_fn,
+            &mapped_files,
+            root,
+            depth,
+        ).map_err(|e| anyhow::anyhow!(e))?;
+
+        let rendered = diagram::render_cross_sequence(&trace);
+
+        if let Some(out_path) = output {
+            let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let verb = match kind {
+                diagram_export::ExportKind::Source => "Cross-file sequence written to",
+                diagram_export::ExportKind::MermaidSvg => "Cross-file sequence SVG exported to",
+                diagram_export::ExportKind::MermaidPng => "Cross-file sequence PNG exported to",
+                _ => "Cross-file sequence exported to",
+            };
+            println!("{}: {}", verb, out_path.display());
+        } else {
+            println!("{}", rendered.diagram);
+        }
+        eprintln!(
+            "Cross-file trace: {} modules, {} resolved edges, {} unmatched calls",
+            rendered.node_count,
+            trace.steps.len(),
+            trace.unmatched.len(),
+        );
+        if !trace.unmatched.is_empty() {
+            eprintln!("Unmatched (first 5): {:?}", &trace.unmatched[..trace.unmatched.len().min(5)]);
+        }
+        return Ok(());
+    }
 
     // Call-graph mode is a completely separate code path: we parse a single
     // file, build the function-level graph, and hand it to the same renderer
@@ -3119,6 +3399,96 @@ fn diagram_mode(
         let abs = if file.is_absolute() { file.to_path_buf() } else { root.join(file) };
         let source = std::fs::read_to_string(&abs)
             .map_err(|e| anyhow::anyhow!("cannot read {}: {}", abs.display(), e))?;
+        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+        // Sequence diagrams render directly from the call graph without going
+        // through to_project_graph — they need call order, not a node set.
+        if fmt == diagram::DiagramFormat::Sequence {
+            let cg = call_graph::build_file_call_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "sequence diagram not supported for this file type (expected .rs / .py): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_sequence(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "Sequence diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "Sequence diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "Sequence diagram PNG exported to",
+                    _ => "Sequence diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "Sequence: {} participants, {} messages, {} unresolved external calls dropped",
+                cg.functions.len(), cg.calls.len(), cg.unresolved_count
+            );
+            return Ok(());
+        }
+
+        // Class diagrams render from a dedicated class extractor.
+        if fmt == diagram::DiagramFormat::Class {
+            let cg = class_graph::build_class_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "class diagram not supported for this file type (supported: .rs .py .ts .tsx .go): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_class(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "Class diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "Class diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "Class diagram PNG exported to",
+                    _ => "Class diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "Class diagram: {} classes, {} relationships",
+                cg.classes.len(), cg.relationships.len()
+            );
+            return Ok(());
+        }
+
+        // ER diagrams use the same class extractor as class diagrams.
+        if fmt == diagram::DiagramFormat::Er {
+            let cg = class_graph::build_class_graph(&abs, &source)
+                .map_err(|e| anyhow::anyhow!(e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "er diagram not supported for this file type (supported: .rs .py .ts .tsx .go): {}",
+                    abs.display()
+                ))?;
+            let rendered = diagram::render_er(&cg);
+            if let Some(out_path) = output {
+                let kind = diagram_export::export_diagram(&rendered.diagram, fmt, out_path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let verb = match kind {
+                    diagram_export::ExportKind::Source => "ER diagram written to",
+                    diagram_export::ExportKind::MermaidSvg => "ER diagram SVG exported to",
+                    diagram_export::ExportKind::MermaidPng => "ER diagram PNG exported to",
+                    _ => "ER diagram exported to",
+                };
+                println!("{}: {}", verb, out_path.display());
+            } else {
+                println!("{}", rendered.diagram);
+            }
+            eprintln!(
+                "ER diagram: {} entities, {} relationships",
+                cg.classes.len(), rendered.node_count
+            );
+            return Ok(());
+        }
+
         let cg = call_graph::build_file_call_graph(&abs, &source)
             .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!(
@@ -3126,7 +3496,6 @@ fn diagram_mode(
                 abs.display()
             ))?;
         let graph = call_graph::to_project_graph(&cg, &abs);
-        let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
         let opts = diagram::RenderOptions {
             format: fmt,
             focus,
@@ -3199,15 +3568,15 @@ fn diagram_mode(
 
     let mut graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
 
-    // Git-backed overlays (co-change, owner coloring, hotspot sizing) need
+    let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Git-backed overlays (co-change, owner coloring, hotspot sizing, churn) need
     // the enrichment pass. Skip it when nothing downstream consumes it — the
     // git calls run in ~100ms on a warm repo, but there's no reason to pay
     // the cost for a plain top-N diagram.
-    if cochange_threshold.is_some() || color_by_owner {
+    if cochange_threshold.is_some() || color_by_owner || fmt == diagram::DiagramFormat::Quadrant {
         enrich_with_git(&mut graph, root);
     }
-
-    let fmt = diagram::DiagramFormat::parse(format).map_err(|e| anyhow::anyhow!(e))?;
     let opts = diagram::RenderOptions {
         format: fmt,
         focus,
@@ -4823,6 +5192,7 @@ fn symbols_mode(root: &Path, unreferenced_only: bool) -> Result<()> {
     println!();
     println!("Note: Uses import-token heuristic. Does not account for dynamic dispatch,");
     println!("reflection, or external consumers of library crates.");
+    println!("      `pub extern \"C\"` / FFI exports are excluded automatically.");
 
     Ok(())
 }
@@ -5155,6 +5525,18 @@ fn context_health_mode(
 
     let content = if let Some(path) = file {
         fs::read_to_string(path).with_context(|| format!("Reading {}", path.display()))?
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // No file arg and stdin is a terminal — fall back to navigator_map.xml in cwd.
+        let map_path = std::path::Path::new("navigator_map.xml");
+        if map_path.exists() {
+            eprintln!("(reading navigator_map.xml)");
+            fs::read_to_string(map_path).context("Reading navigator_map.xml")?
+        } else {
+            anyhow::bail!(
+                "No input: pass a file (`navigator context-health FILE`) or pipe content, \
+                 or run `navigator map` first to generate navigator_map.xml"
+            );
+        }
     } else {
         use io::Read;
         let mut buf = String::new();
@@ -5445,6 +5827,214 @@ fn snapshot_list(root: &Path) -> Result<()> {
 // =============================================================================
 // UPDATE MODE — re-run install.sh to upgrade
 // =============================================================================
+
+fn answer_mode(
+    root: &Path,
+    question: &str,
+    max_items: usize,
+    budget: usize,
+    show_top_body: bool,
+    then_item: Option<usize>,
+) -> Result<()> {
+    use answer::{build_answer, render_answer, AnswerOptions};
+
+    let scan_result = scan_files_with_noise_tracking(root)?;
+    let mut mapped: Vec<MappedFile> = Vec::new();
+    for path in &scan_result.files {
+        if !is_source_file(path) {
+            continue;
+        }
+        if let Some(content) = read_text_file(path) {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let mf = extract_skeleton(rel, &content);
+            if !mf.imports.is_empty() || !mf.signatures.is_empty() {
+                mapped.push(mf);
+            }
+        }
+    }
+
+    let opts = AnswerOptions {
+        budget,
+        max_items,
+        show_top_body,
+    };
+
+    let result = build_answer(root, &mapped, question, &opts);
+
+    if result.items.is_empty() {
+        eprintln!("answer: no relevant symbols found for query \"{question}\"");
+        eprintln!("  ({} files searched)", result.files_searched);
+        return Ok(());
+    }
+
+    print!("{}", render_answer(&result));
+    eprintln!(
+        "\n[answer] {} tokens · {} item(s) · {} files searched{}",
+        result.tokens_used,
+        result.items.len(),
+        result.files_searched,
+        if result.budget_hit { " [budget hit]" } else { "" },
+    );
+
+    // --then N: drill into evidence item N via reach, appended below.
+    if let Some(n) = then_item {
+        if n == 0 || n > result.items.len() {
+            eprintln!(
+                "answer --then {n}: no item #{n} (chain has {} item{})",
+                result.items.len(),
+                if result.items.len() == 1 { "" } else { "s" }
+            );
+            return Ok(());
+        }
+        use reach::{build_reach, render_reach, ReachOptions};
+        let item = &result.items[n - 1];
+        eprintln!("\n── expanding item #{n}: {}", item.name);
+        let reach_opts = ReachOptions {
+            file_filter: Some(item.file.clone()),
+            ..Default::default()
+        };
+        match build_reach(root, &mapped, &item.name, &reach_opts) {
+            Ok(rr) => {
+                print!("{}", render_reach(&rr));
+                eprintln!(
+                    "[reach] {} tokens · {} caller(s) · {} callee(s)",
+                    rr.tokens_used, rr.callers.len(), rr.callees.len()
+                );
+            }
+            Err(e) => eprintln!("reach: {e}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn reach_mode(
+    root: &Path,
+    symbols: &[&str],
+    file_filter: Option<&str>,
+    depth: usize,
+    budget: usize,
+    include_tests: bool,
+    show_body: bool,
+    format: &str,
+) -> Result<()> {
+    use reach::{build_reach, render_reach, render_multi_reach, ReachOptions};
+
+    // Scan project files to build the mapped skeleton.
+    let scan_result = scan_files_with_noise_tracking(root)?;
+    let mut mapped: Vec<MappedFile> = Vec::new();
+    for path in &scan_result.files {
+        if !is_source_file(path) {
+            continue;
+        }
+        if let Some(content) = read_text_file(path) {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let mf = extract_skeleton(rel, &content);
+            if !mf.imports.is_empty() || !mf.signatures.is_empty() {
+                mapped.push(mf);
+            }
+        }
+    }
+
+    // Single-symbol: existing behaviour unchanged.
+    if symbols.len() == 1 {
+        let opts = ReachOptions {
+            depth,
+            budget,
+            file_filter: file_filter.map(|s| s.to_string()),
+            include_tests,
+            show_body,
+            ..Default::default()
+        };
+        match build_reach(root, &mapped, symbols[0], &opts) {
+            Ok(result) => {
+                match format {
+                    "json" => {
+                        let json = serde_json::json!({
+                            "root": {
+                                "name": result.root.name,
+                                "file": result.root.file,
+                                "line": result.root.line,
+                                "sig": result.root.sig,
+                                "kind": format!("{:?}", result.root.kind),
+                            },
+                            "callers": result.callers.iter().map(|c| serde_json::json!({
+                                "file": c.file,
+                                "line": c.line,
+                                "snippet": c.snippet,
+                                "tag": c.tag.as_ref().map(|t| t.label()),
+                                "is_test": c.is_test,
+                            })).collect::<Vec<_>>(),
+                            "test_callers_collapsed": result.test_callers_collapsed,
+                            "callees": result.callees.iter().map(|c| serde_json::json!({
+                                "name": c.name,
+                                "file": c.file,
+                                "line": c.line,
+                                "sig": c.sig,
+                            })).collect::<Vec<_>>(),
+                            "depth2": result.depth2.iter().map(|n| serde_json::json!({
+                                "name": n.name,
+                                "file": n.file,
+                                "line": n.line,
+                                "sig": n.sig,
+                            })).collect::<Vec<_>>(),
+                            "tokens_used": result.tokens_used,
+                            "budget_hit": result.budget_hit,
+                            "language_note": result.language_note,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                    }
+                    _ => {
+                        print!("{}", render_reach(&result));
+                        eprintln!(
+                            "\n[reach] {} tokens · depth {} · {} caller(s) · {} callee(s){}",
+                            result.tokens_used,
+                            depth,
+                            result.callers.len(),
+                            result.callees.len(),
+                            if result.budget_hit { " [budget hit]" } else { "" },
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("reach: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Multi-symbol: run build_reach for each, merge and render.
+        // --file and --format json are not supported in multi-symbol mode.
+        let mut results = Vec::new();
+        for &sym in symbols {
+            let opts = ReachOptions {
+                depth,
+                budget,
+                file_filter: None,
+                include_tests,
+                show_body,
+                ..Default::default()
+            };
+            match build_reach(root, &mapped, sym, &opts) {
+                Ok(r) => results.push(r),
+                Err(e) => eprintln!("reach: {sym}: {e}"),
+            }
+        }
+        if results.is_empty() {
+            eprintln!("reach: no symbols resolved");
+            std::process::exit(1);
+        }
+        print!("{}", render_multi_reach(&results));
+        let total: usize = results.iter().map(|r| r.tokens_used).sum();
+        let resolved = results.len();
+        eprintln!(
+            "\n[reach] {} tokens combined · {} of {} symbol(s) resolved",
+            total, resolved, symbols.len()
+        );
+        Ok(())
+    }
+}
 
 fn update_mode() -> Result<()> {
     // Find the install script relative to the binary's own location or from the

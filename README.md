@@ -67,7 +67,7 @@ navigator query "how does authentication work?"
 | `navigator shotgun` | Shotgun surgery candidates (high co-change dispersion) |
 | `navigator semidiff HEAD~1` | Function-level semantic diff between two commits |
 | `navigator evolution --days 30` | Architectural trends over time |
-| `navigator path <A> <B>` | Shortest import path between two modules |
+| `navigator path --from <A> --to <B>` | Shortest import path between two modules |
 | `navigator deps <MODULE>` | Dependencies of a module as JSON |
 | `navigator todo` | TODO/FIXME/HACK density across source files |
 | `navigator languages` | Languages detected and their file counts |
@@ -80,13 +80,19 @@ navigator query "how does authentication work?"
 | `navigator diagram --format dot\|ascii` | Graphviz DOT or ASCII tree |
 | `navigator diagram -o graph.html` | Interactive self-contained HTML explorer |
 | `navigator diagram -o graph.svg\|.png` | SVG/PNG via `mmdc` or `dot` |
-| `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python) |
+| `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python/Go/C/C++) |
+| `navigator diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
+| `navigator diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
+| `navigator diagram --format quadrant` | Mermaid `quadrantChart` — churn × complexity scatter (top-right = refactor now) |
+| `navigator diagram --call-graph FILE --format er` | Mermaid `erDiagram` — entity-relationship view inferred from struct fields and type annotations |
 | `navigator diagram --blast-radius MODULE` | Target + direct deps + direct dependents |
 | `navigator diagram --focus FILE [--depth N]` | BFS neighborhood around a module |
 | `navigator diagram --group-by-folder DEPTH` | Collapse graph to folder granularity |
 | `navigator diagram --color-by-owner` | Node fill by dominant git author |
 | `navigator diagram --cochange-threshold N` | Overlay co-change edges |
 | `navigator diagram --docs-only` | Doc-map: Markdown/YAML/TOML/JSON + referenced code |
+
+Sequence, class, quadrant, and ER formats all output Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline get diagrams without extra tooling.
 
 ### Examples — this repo
 
@@ -105,6 +111,163 @@ navigator query "how does authentication work?"
 **Function-level call graph for `diagram.rs`** (`navigator diagram --call-graph src/diagram.rs --format dot -o calls.svg`)
 
 ![Call graph for diagram.rs](docs/images/call-graph-diagram.svg)
+
+**Sequence diagram of `diagram.rs`** — function call order within the renderer (`navigator diagram --call-graph src/diagram.rs --format sequence`)
+
+```mermaid
+sequenceDiagram
+    participant render
+    participant collapse_by_folder
+    participant blast_radius_selection
+    participant bfs_from_anchor
+    participant docs_only_selection
+    participant top_by_degree
+    participant compute_overlays
+    participant render_mermaid
+    participant render_dot
+    participant render_ascii
+    participant ascii_walk
+    participant ascii_label
+    render->>collapse_by_folder: call
+    render->>blast_radius_selection: call
+    render->>bfs_from_anchor: call
+    render->>docs_only_selection: call
+    render->>top_by_degree: call
+    render->>compute_overlays: call
+    render->>render_mermaid: call
+    render->>render_dot: call
+    render->>render_ascii: call
+    render_ascii->>ascii_walk: call
+    ascii_walk->>ascii_label: call
+    ascii_walk->>ascii_walk: call
+    render_ascii->>ascii_label: call
+    render_mermaid->>role_class_suffix: call
+    render_dot->>role_color_dot: call
+```
+
+**Class diagram of `class_graph.rs`** — the UML extraction data model (`navigator diagram --call-graph src/class_graph.rs --format class`)
+
+```mermaid
+classDiagram
+    class ClassGraph {
+        +classes Vec~ClassNode~
+        +relationships Vec~ClassRelationship~
+        +language str
+    }
+    class ClassNode {
+        +name String
+        +kind ClassKind
+        +fields Vec~FieldDef~
+        +methods Vec~MethodDef~
+    }
+    class FieldDef {
+        +name String
+        +type_annotation String
+        +visibility Vis
+    }
+    class MethodDef {
+        +name String
+        +params String
+        +return_type String
+        +visibility Vis
+        +is_static bool
+        +is_constructor bool
+    }
+    class ClassKind {
+        <<enumeration>>
+        Struct
+        Class
+        Interface
+        Trait
+        Enum
+    }
+    class Vis {
+        <<enumeration>>
+        Public
+        Private
+        Protected
+    }
+    ClassGraph "1" --> "*" ClassNode : classes
+    ClassGraph "1" --> "*" ClassRelationship : relationships
+    ClassNode "1" --> "*" FieldDef : fields
+    ClassNode "1" --> "*" MethodDef : methods
+    ClassNode --> ClassKind : kind
+    FieldDef --> Vis : visibility
+    MethodDef --> Vis : visibility
+```
+
+**Quadrant chart — churn × complexity** (`navigator diagram --format quadrant`)
+
+> Bottom-left = stable (leave it). Top-right = danger zone (refactor now). Top-left = risky debt (complex but rarely touched — schedule a refactor). Bottom-right = hotspots (high churn but simple — add tests).
+
+```mermaid
+quadrantChart
+    title Churn vs Complexity
+    x-axis Low Churn --> High Churn
+    y-axis Low Complexity --> High Complexity
+    quadrant-1 Danger zone
+    quadrant-2 Risky debt
+    quadrant-3 Stable
+    quadrant-4 Hotspots
+    api.rs: [0.26, 0.82]
+    main.rs: [0.50, 0.34]
+    mapper.rs: [0.26, 0.49]
+    diagram.rs: [0.26, 0.99]
+    lib.rs: [0.26, 0.60]
+    mcp.rs: [0.99, 0.54]
+    search.rs: [0.01, 0.51]
+    webhooks.rs: [0.01, 0.37]
+```
+
+**ER diagram of `call_graph.rs`** — entity-relationship view of the call-graph data model (`navigator diagram --call-graph src/call_graph.rs --format er`)
+
+```mermaid
+erDiagram
+    FileCallGraph {
+        Vec functions
+        Vec calls
+        usize unresolved_count
+        str language
+    }
+    FunctionInfo {
+        String qualified
+        String simple
+        u32 line
+        str kind
+    }
+    Resolver {
+        HashMap by_qualified
+        HashMap by_simple
+    }
+    FileCallGraph ||--o{ FunctionInfo : "has"
+```
+
+## Semantic Traversal (experimental)
+
+Two commands for AI-optimised, symbol-level context — much tighter than a full skeleton.
+
+| Command | Description |
+|---------|-------------|
+| `navigator reach <SYMBOL>` | Context tree from a named symbol: callers with snippets, callees with sigs, depth-2 types. 135–500 tokens. |
+| `navigator reach <A> <B>` | Intersection view: merged callers, shared callees annotated, shared depth-2 types promoted. |
+| `navigator answer "<QUESTION>"` | Evidence chain: minimum symbols that answer the question, in reading order with inter-item connections. |
+| `navigator answer "<QUESTION>" --then N` | Drill into evidence item #N via `reach`, appended below the chain. |
+
+```bash
+# Single symbol — who calls it, what it calls, what types it touches
+navigator reach verify_token
+
+# Two symbols — shared context between them
+navigator reach verify_token decode_jwt
+
+# Question → ranked evidence chain
+navigator answer "how does rate limiting work?"
+
+# Drill into item #2 for more detail
+navigator answer "how does the call graph work?" --then 2
+```
+
+Callee resolution uses AST call graphs for Rust, Python, Go, C, and C++; other languages fall back to import-graph heuristics.
 
 ## Search & File Tools
 
@@ -137,7 +300,17 @@ navigator query "how does authentication work?"
 navigator serve   # stdio JSON-RPC 2.0 — connects to Claude Code, Cursor, etc.
 ```
 
-Exposes 30+ tools over Model Context Protocol including `get_blast_radius`, `renderArchitecture`, `search_content`, `hotspots`, `cochange`, `semidiff`, `doc_index`, and `query_context`.
+Exposes 40 tools over Model Context Protocol. Skeleton tools:
+
+| Tool | Description |
+|------|-------------|
+| `skeleton_map` | Full project skeleton (all files) |
+| `ranked_skeleton` | Token-budget skeleton ranked by PageRank, optionally personalised to focus files |
+| `focused_skeleton` | Seed file + N import-hops (importers + importees), enriched with churn and test markers |
+| `diff_skeleton` | Files changed between two commits + their immediate importers |
+| `search_skeleton` | Skeleton sections for files matching a keyword — path-first, then symbol names |
+
+Other highlights: `get_blast_radius`, `renderArchitecture`, `search_content`, `semidiff`, `doc_index`, `query_context`, `shotgun_surgery`, `context_health`.
 
 `renderArchitecture` returns Mermaid or DOT directly — IDEs that render Mermaid inline get paste-able diagrams without extra tooling.
 
@@ -180,7 +353,8 @@ graph LR
     end
 
     subgraph Rendering["Rendering"]
-        diagram["diagram\nMermaid · DOT · ASCII"]
+        diagram["diagram\nMermaid · DOT · ASCII\nsequence · class · quadrant · ER"]
+        class_graph["class_graph\nUML extraction · Rust/Py/TS/Go"]
         html_export["html_export\ninteractive HTML"]
         diagram_export["diagram_export\nSVG · PNG"]
     end
@@ -204,6 +378,8 @@ graph LR
     api --> html_export
     api --> call_graph
     api --> mcp
+    call_graph --> diagram
+    class_graph --> diagram
     diagram --> diagram_export
     memory --> formatter
     memory --> sync

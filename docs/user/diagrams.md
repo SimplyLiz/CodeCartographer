@@ -21,10 +21,16 @@ prints a Mermaid top-60-by-degree view of the current project to stdout.
 | `mermaid` *(default)* | Markdown, MDX, GitHub READMEs, Notion, IDE previews | Renders inline anywhere Mermaid is supported. No external tool needed to read the source. |
 | `dot` (alias: `graphviz`) | Poster-grade static images via Graphviz | Larger graphs render cleaner than Mermaid; lets you pipe to `dot` for SVG/PNG. |
 | `ascii` (aliases: `tree`, `text`) | Terminals, chat messages, log files | Box-drawing tree rooted at a single node. Cycles break with an `↑ seen` marker so output is bounded. |
+| `sequence` (alias: `seq`) | Understanding call order within a file | Mermaid `sequenceDiagram`. Requires `--call-graph FILE`. |
+| `class` (alias: `uml`) | Onboarding, code review, data-model docs | Mermaid `classDiagram` with typed fields, method signatures, and relationship arrows. Requires `--call-graph FILE`. |
+| `quadrant` | "Where should we refactor?" — visual risk map | Mermaid `quadrantChart` plotting every file on a churn × complexity plane. Automatically triggers git enrichment. No `--call-graph` needed. |
+| `er` (aliases: `entity`, `erd`) | Data-model docs, ORM schemas, API DTOs | Mermaid `erDiagram` with entities and relationships inferred from struct field types. Requires `--call-graph FILE`. |
 
 The format controls the **source** navigator emits. The destination
 (below) controls whether that source gets written as-is, rendered to an
 image, or wrapped in an interactive page.
+
+`sequence`, `class`, `quadrant`, and `er` all emit Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline show the diagram without extra tooling.
 
 ---
 
@@ -197,31 +203,194 @@ least-connected first.
 
 ---
 
-## Call graphs (`--call-graph FILE`)
+## File-level analysis (`--call-graph FILE`)
 
-Zooms from the module-level import graph down to a **function-level** call
-graph inside a single file. Supported languages: **Rust** and **Python**.
+The `--call-graph FILE` flag switches from the project-wide import graph to
+a **single-file analysis** mode. Four formats are available here, each
+giving a different view of the same file:
+
+| Format | Output | What it shows |
+|--------|--------|---------------|
+| `mermaid` / `dot` / `ascii` | Import-graph-style diagram | Function nodes + call edges in generic graph form |
+| `sequence` | Mermaid `sequenceDiagram` | Call order as a sequence — who calls whom and when |
+| `class` | Mermaid `classDiagram` | Structs, classes, interfaces — typed fields, method signatures, relationships |
+| `er` | Mermaid `erDiagram` | Entities and relationships inferred from struct field types |
+
+Supported languages for `--call-graph`:
+
+| Format | Rust | Python | Go | C | C++ | TypeScript |
+|--------|------|--------|----|---|-----|------------|
+| `mermaid` / `dot` / `ascii` | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `sequence` | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| `class` | ✓ | ✓ | ✓ | | ✓ | ✓ |
+| `er` | ✓ | ✓ | ✓ | | ✓ | ✓ |
+
+### Call graph (`--format mermaid|dot|ascii`)
 
 ```bash
 navigator diagram --call-graph src/parser.rs --format ascii
 ```
 
-- Nodes are functions / methods (qualified `Type::method` in Rust,
-  `Class.method` in Python).
+- Nodes are functions / methods. Qualified names follow language convention:
+  `Type::method` in Rust and C++, `Class.method` in Python and Go,
+  plain `name` in C.
 - Edges are caller → callee relations where the callee resolves to a
   function defined in the same file. Calls into the stdlib or other files
   are dropped.
-- A trailing line reports how many external calls were dropped, so you
-  can tell how much of the file's behaviour lives elsewhere:
+- A trailing line reports how many external calls were dropped:
 
   ```
   Call graph: 24 functions, 54 edges, 229 unresolved external calls
   ```
 
-Call-graph mode ignores the import-graph-only options
+### Sequence diagrams (`--format sequence`)
+
+Shows the call relationships within a file as a Mermaid `sequenceDiagram`.
+Participants are the functions defined in the file (in source order);
+messages are call edges in AST order — a good approximation of execution
+order for top-level flows. Self-calls render as loop arrows. Unresolved
+external calls appear as a note so you can tell how much behaviour lives
+outside the file.
+
+```bash
+navigator diagram --call-graph src/render.rs --format sequence
+navigator diagram --call-graph src/render.rs --format sequence -o calls.svg
+```
+
+```mermaid
+sequenceDiagram
+    participant render
+    participant compute_overlays
+    participant render_mermaid
+    participant render_dot
+    render->>compute_overlays: call
+    render->>render_mermaid: call
+    render->>render_dot: call
+```
+
+### Class diagrams (`--format class`)
+
+Extracts the type structure of a file and renders it as a Mermaid
+`classDiagram`. Useful for onboarding onto an unfamiliar data model, writing
+architecture docs, or reviewing a PR's structural changes at a glance.
+
+```bash
+navigator diagram --call-graph src/models.rs --format class
+navigator diagram --call-graph src/models.rs --format class -o models.svg
+```
+
+What's extracted per language:
+
+**Rust** — `struct` fields (name, type, `pub`/private visibility), `enum`
+variants, `trait` method signatures, `impl` methods attached to their type,
+`impl Trait for Type` arrows (`..|>`).
+
+**Python** — class declarations, base-class inheritance arrows (`--|>`),
+instance fields from `__init__` (including type annotations), method
+signatures (parameters, return type). Name-based visibility: `__` private,
+`_` protected, rest public.
+
+**TypeScript / TSX** — `class` fields with `public`/`private`/`protected`
+modifiers, `extends` inheritance, `implements` interface arrows,
+`interface` declarations with property and method signatures.
+
+**Go** — `struct` fields (uppercase = public, lowercase = private), embedded
+struct inheritance arrows, `interface` method sets, method declarations
+attached to their receiver type.
+
+```mermaid
+classDiagram
+    class Point {
+        +f64 x
+        +f64 y
+        +new(x f64, y f64) Self
+        +distance(other Point) f64
+    }
+    class Shape {
+        <<interface>>
+        +area() f64
+    }
+    Point ..|> Shape
+```
+
+Class-diagram mode ignores the import-graph-only options
 (`--cochange-threshold`, `--docs-only`, `--group-by-folder`,
-`--color-by-owner`) rather than erroring, so you can combine
-`--call-graph` with `--focus`, `--depth`, `--format`, and `-o` freely.
+`--color-by-owner`) rather than erroring.
+
+### Quadrant chart (`--format quadrant`)
+
+Plots every file in the project as a point on a churn × complexity plane.
+No `--call-graph` flag needed — this runs on the full project graph.
+
+```bash
+navigator diagram --format quadrant
+navigator diagram --format quadrant -o hotmap.svg
+```
+
+Quadrant key:
+
+| Quadrant | Churn | Complexity | Action |
+|----------|-------|------------|--------|
+| Top-right (Danger zone) | High | High | Refactor now |
+| Top-left (Risky debt) | Low | High | Schedule a refactor |
+| Bottom-right (Hotspots) | High | Low | Add tests |
+| Bottom-left (Stable) | Low | Low | Leave it |
+
+X axis = churn (commit frequency from git history). Y axis = cyclomatic
+complexity when available, falling back to signature count as a proxy.
+Coordinates are min-max normalised to `[0.01, 0.99]` within the included
+node set, so the axes are always fully used. Nodes with no git history are
+omitted with a count in a comment at the end of the output.
+
+The quadrant chart automatically triggers git enrichment, so `--color-by-owner`
+and `--cochange-threshold` can be combined freely.
+
+```bash
+navigator diagram --format quadrant --max-nodes 30 -o quadrant.svg
+```
+
+### ER diagrams (`--format er`)
+
+Produces a Mermaid `erDiagram` from the struct/class field definitions in a
+single file. Works on the same files as `--format class`.
+
+```bash
+navigator diagram --call-graph src/models.rs --format er
+navigator diagram --call-graph src/models.rs --format er -o models.svg
+```
+
+Relationship detection: for each field whose stripped base type matches
+another struct/class name in the same file, an edge is drawn. Cardinality
+is inferred from the wrapper:
+
+| Wrapper | Mermaid notation | Meaning |
+|---------|-----------------|---------|
+| `Vec<T>`, `HashSet<T>` | `\|\|--o{` | one to many |
+| `Option<T>` | `\|\|--o\|` | zero or one |
+| `Box<T>`, `Arc<T>`, `Rc<T>`, bare `T` | `\|\|--\|\|` | exactly one |
+
+Nested wrappers (`Option<Vec<T>>`) are resolved one level deep. Duplicate
+edges are deduplicated.
+
+```mermaid
+erDiagram
+    FileCallGraph {
+        Vec functions
+        Vec calls
+        usize unresolved_count
+        str language
+    }
+    FunctionInfo {
+        String qualified
+        String simple
+        u32 line
+        str kind
+    }
+    FileCallGraph ||--o{ FunctionInfo : "has"
+```
+
+ER mode ignores the import-graph-only options (`--cochange-threshold`,
+`--docs-only`, `--group-by-folder`, `--color-by-owner`).
 
 ---
 
@@ -251,6 +420,33 @@ navigator diagram --call-graph src/parser.rs --format mermaid -o calls.mmd
 
 # Temporal coupling overlay on a focused view
 navigator diagram --focus src/api --cochange-threshold 0.6 -o coupling.svg
+
+# Sequence diagram of a file's internal call flow (paste into a PR for reviewers)
+navigator diagram --call-graph src/handler.rs --format sequence
+
+# Sequence diagram rendered to SVG (requires mmdc)
+navigator diagram --call-graph src/handler.rs --format sequence -o flow.svg
+
+# Class diagram of a data-model file
+navigator diagram --call-graph src/models.rs --format class
+
+# Class diagram of a TypeScript service
+navigator diagram --call-graph src/services/auth.ts --format class -o auth.svg
+
+# Class diagram of a Go package
+navigator diagram --call-graph internal/storage/repo.go --format class
+
+# Quadrant chart — "where do we refactor?" overview
+navigator diagram --format quadrant
+
+# Quadrant chart as a shareable SVG
+navigator diagram --format quadrant --max-nodes 40 -o quadrant.svg
+
+# ER diagram of a data-model file
+navigator diagram --call-graph src/models.rs --format er
+
+# ER diagram of a TypeScript DTO file
+navigator diagram --call-graph src/types/api.ts --format er -o api-er.svg
 ```
 
 ---

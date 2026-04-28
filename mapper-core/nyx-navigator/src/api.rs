@@ -623,6 +623,10 @@ impl ApiState {
                     .signatures
                     .iter()
                     .filter(|sig| {
+                        // FFI exports are consumed by C callers; import-graph can't see them.
+                        if sig.raw.contains("extern \"C\"") {
+                            return false;
+                        }
                         let is_public = public_prefixes
                             .iter()
                             .any(|pfx| sig.raw.starts_with(pfx));
@@ -1020,6 +1024,7 @@ pub fn is_entry_point_path(path: &str) -> bool {
     matches!(
         name,
         "main.rs"
+            | "lib.rs"  // crate root — no Rust-side callers by design
             | "main.py"
             | "main.go"
             | "main.ts"
@@ -1038,7 +1043,7 @@ pub fn is_entry_point_path(path: &str) -> bool {
     )
 }
 
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.contains("_test.")
         || lower.contains(".test.")

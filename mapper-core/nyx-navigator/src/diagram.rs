@@ -29,6 +29,18 @@ pub enum DiagramFormat {
     /// Always rooted at a single node: `focus` if set, else the blast-radius
     /// epicenter, else the most-connected node in the graph.
     Ascii,
+    /// Mermaid `sequenceDiagram` — only valid when rendering a `FileCallGraph`
+    /// via `render_sequence()`. Not supported by the import-graph `render()`.
+    Sequence,
+    /// Mermaid `classDiagram` — only valid when rendering a `ClassGraph`
+    /// via `render_class()`. Not supported by the import-graph `render()`.
+    Class,
+    /// Mermaid `quadrantChart` — churn × complexity scatter over the project graph.
+    /// Requires git enrichment; nodes missing either metric are omitted.
+    Quadrant,
+    /// Mermaid `erDiagram` — entity-relationship view over struct/class fields.
+    /// Only valid with `render_er()` on a `ClassGraph`; not for `render()`.
+    Er,
 }
 
 impl DiagramFormat {
@@ -37,6 +49,10 @@ impl DiagramFormat {
             "mermaid" | "" => Ok(DiagramFormat::Mermaid),
             "dot" | "graphviz" => Ok(DiagramFormat::Dot),
             "ascii" | "tree" | "text" => Ok(DiagramFormat::Ascii),
+            "sequence" | "seq" => Ok(DiagramFormat::Sequence),
+            "class" | "uml" => Ok(DiagramFormat::Class),
+            "quadrant" => Ok(DiagramFormat::Quadrant),
+            "er" | "entity" | "erd" => Ok(DiagramFormat::Er),
             other => Err(format!("unknown diagram format: {other}")),
         }
     }
@@ -488,6 +504,10 @@ pub fn render(graph: &ProjectGraphResponse, opts: &RenderOptions) -> Result<Rend
             &included, &included_set, &node_by_id, graph, &overlays,
             opts.focus, opts.blast_radius, opts.depth,
         ),
+        DiagramFormat::Quadrant => render_quadrant(&included, &node_by_id),
+        DiagramFormat::Sequence | DiagramFormat::Class | DiagramFormat::Er => {
+            return Err("use render_sequence() / render_class() / render_er() for sequence, class, and ER diagrams — render() only handles import graphs".to_string());
+        }
     };
 
     let node_count = included.len();
@@ -760,7 +780,7 @@ fn render_mermaid(
     overlays: &Overlays,
     color_by_owner: bool,
 ) -> String {
-    let mut out = String::from("graph TD\n");
+    let mut out = String::from("flowchart TD\n");
     out.push_str("    classDef bridge fill:#f96,stroke:#333\n");
     out.push_str("    classDef core fill:#9cf,stroke:#333\n");
     out.push_str("    classDef dead fill:#ccc,stroke:#333\n");
@@ -1161,6 +1181,384 @@ fn ascii_label(
     format!("{}  ({} {}){}", name, node.signature_count, unit, tag_suffix)
 }
 
+/// Render a `ProjectGraphResponse` selection as a Mermaid `quadrantChart`.
+///
+/// Each node in `included` that has `churn` data becomes a point. The Y axis uses
+/// `complexity` when populated, falling back to `signature_count` until tree-sitter
+/// cyclomatic complexity extraction is implemented. Coordinates are min-max
+/// normalised to `[0.01, 0.99]`; nodes without churn (no git history) are omitted.
+fn render_quadrant(
+    included: &[String],
+    node_by_id: &HashMap<&str, &crate::api::GraphNode>,
+) -> String {
+    // Collect nodes that have churn data. Complexity falls back to
+    // signature_count when tree-sitter cyclomatic complexity isn't populated —
+    // that field is planned but not yet extracted.
+    let qualifying: Vec<(&crate::api::GraphNode, usize, u32)> = included
+        .iter()
+        .filter_map(|id| {
+            let node = *node_by_id.get(id.as_str())?;
+            let churn = node.churn?;
+            let complexity = node.complexity
+                .unwrap_or(node.signature_count as u32);
+            Some((node, churn, complexity))
+        })
+        .collect();
+
+    let omitted = included.len().saturating_sub(qualifying.len());
+
+    let mut out = String::from("quadrantChart\n");
+    out.push_str("    title Churn vs Complexity\n");
+    out.push_str("    x-axis Low Churn --> High Churn\n");
+    out.push_str("    y-axis Low Complexity --> High Complexity\n");
+    out.push_str("    quadrant-1 Danger zone\n");
+    out.push_str("    quadrant-2 Risky debt\n");
+    out.push_str("    quadrant-3 Stable\n");
+    out.push_str("    quadrant-4 Hotspots\n");
+
+    if qualifying.is_empty() {
+        if omitted > 0 {
+            out.push_str(&format!("%% {} nodes omitted (no churn data — run in a git repo)\n", omitted));
+        }
+        return out;
+    }
+
+    let min_churn = qualifying.iter().map(|(_, c, _)| *c).min().unwrap_or(0) as f64;
+    let max_churn = qualifying.iter().map(|(_, c, _)| *c).max().unwrap_or(1) as f64;
+    let min_cplx = qualifying.iter().map(|(_, _, k)| *k).min().unwrap_or(0) as f64;
+    let max_cplx = qualifying.iter().map(|(_, _, k)| *k).max().unwrap_or(1) as f64;
+
+    let norm = |v: f64, lo: f64, hi: f64| -> f64 {
+        if (hi - lo).abs() < f64::EPSILON {
+            0.5
+        } else {
+            0.01 + (v - lo) / (hi - lo) * 0.98
+        }
+    };
+
+    for (node, churn, complexity) in &qualifying {
+        let x = norm(*churn as f64, min_churn, max_churn);
+        let y = norm(*complexity as f64, min_cplx, max_cplx);
+        // Use the last path component as the label; strip chars that break the
+        // quadrantChart parser (colon is the key-value separator).
+        let label = node.module_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node.module_id)
+            .replace(':', "_");
+        out.push_str(&format!("    {}: [{:.2}, {:.2}]\n", label, x, y));
+    }
+
+    if omitted > 0 {
+        out.push_str(&format!("%% {} nodes omitted (no churn data — run in a git repo)\n", omitted));
+    }
+
+    out
+}
+
+// render_sequence / render_class / render_er are only called from the binary (main.rs);
+// the lib-only analysis treats them as unused. Same situation as diagram_export.rs.
+#[allow(dead_code)]
+/// Render a `FileCallGraph` as a Mermaid `sequenceDiagram`.
+///
+/// Participants are the functions defined in the file (in source order).
+/// Messages are the call edges in AST order — an approximation of execution
+/// order for top-level flows. Self-calls are kept (Mermaid renders them as a
+/// loop arrow). Unresolved external call count is surfaced as a note so the
+/// reader knows what's dropped.
+pub fn render_sequence(cg: &crate::call_graph::FileCallGraph) -> RenderedDiagram {
+    let mut out = String::from("sequenceDiagram\n");
+
+    // Stable participant ID: replace "::" and "." separators with "_" so Mermaid
+    // doesn't parse them as namespace syntax.
+    let participant_id = |q: &str| q.replace("::", "_").replace('.', "_");
+
+    for f in &cg.functions {
+        out.push_str(&format!(
+            "    participant {} as {}\n",
+            participant_id(&f.qualified),
+            f.simple,
+        ));
+    }
+
+    for (caller, callee) in &cg.calls {
+        out.push_str(&format!(
+            "    {}->>{}: call\n",
+            participant_id(caller),
+            participant_id(callee),
+        ));
+    }
+
+    if cg.unresolved_count > 0 {
+        // Attach the note to the first participant, or skip if the graph is empty.
+        if let Some(first) = cg.functions.first() {
+            out.push_str(&format!(
+                "    Note right of {}: {} unresolved external calls dropped\n",
+                participant_id(&first.qualified),
+                cg.unresolved_count,
+            ));
+        }
+    }
+
+    let node_count = cg.functions.len();
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count,
+        included: cg.functions.iter().map(|f| f.qualified.clone()).collect(),
+    }
+}
+
+#[allow(dead_code)]
+/// Render a `CrossCallTrace` as a Mermaid `sequenceDiagram`.
+///
+/// One participant per unique module. Messages show the callee function name.
+/// Heuristic-matched edges are annotated with `(~)` so reviewers can spot
+/// lower-confidence steps.
+pub fn render_cross_sequence(trace: &crate::cross_call::CrossCallTrace) -> RenderedDiagram {
+    use crate::cross_call::ResolutionKind;
+    use std::collections::LinkedList;
+
+    // Collect participants in first-seen order.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut participants: LinkedList<String> = LinkedList::new();
+    let add = |mid: &str, seen: &mut std::collections::HashSet<String>, p: &mut LinkedList<String>| {
+        if seen.insert(mid.to_string()) { p.push_back(mid.to_string()); }
+    };
+    add(&trace.entry_module, &mut seen, &mut participants);
+    for step in &trace.steps {
+        add(&step.from.0, &mut seen, &mut participants);
+        add(&step.to.0, &mut seen, &mut participants);
+    }
+
+    let mut out = String::from("sequenceDiagram\n");
+
+    // Participant aliases: use the file stem as the display label.
+    for mid in &participants {
+        let label = std::path::Path::new(mid)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(mid);
+        let id = label.replace(['-', '.'], "_");
+        out.push_str(&format!("    participant {} as {}\n", id, label));
+    }
+
+    for step in &trace.steps {
+        let from_label = std::path::Path::new(&step.from.0)
+            .file_stem().and_then(|s| s.to_str()).unwrap_or(&step.from.0);
+        let to_label = std::path::Path::new(&step.to.0)
+            .file_stem().and_then(|s| s.to_str()).unwrap_or(&step.to.0);
+        let from_id = from_label.replace(['-', '.'], "_");
+        let to_id = to_label.replace(['-', '.'], "_");
+        let callee_simple = step.to.1.split("::").last().unwrap_or(&step.to.1);
+        let suffix = if step.confidence == ResolutionKind::Heuristic { " (~)" } else { "" };
+        out.push_str(&format!("    {}->>{}:{}{}\n", from_id, to_id, callee_simple, suffix));
+    }
+
+    if !trace.unmatched.is_empty() {
+        if let Some(first) = participants.front() {
+            let first_label = std::path::Path::new(first)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or(first);
+            let first_id = first_label.replace(['-', '.'], "_");
+            out.push_str(&format!(
+                "    Note right of {}: {} calls unresolved (stdlib / external)\n",
+                first_id,
+                trace.unmatched.len()
+            ));
+        }
+    }
+
+    let module_count = seen.len();
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count: module_count,
+        included: seen.into_iter().collect(),
+    }
+}
+
+#[allow(dead_code)]
+/// Render a `ClassGraph` as a Mermaid `classDiagram`.
+///
+/// Each `ClassNode` becomes a Mermaid class block. Fields and methods carry
+/// Mermaid visibility prefixes (`+` public, `-` private, `#` protected).
+/// Trait/interface nodes get the `<<interface>>` annotation; enums get
+/// `<<enumeration>>`. Relationships (`Inherits`, `Implements`) are emitted
+/// as Mermaid arrows after all class blocks.
+pub fn render_class(graph: &crate::class_graph::ClassGraph) -> RenderedDiagram {
+    use crate::class_graph::{ClassKind, ClassRelationship, Vis};
+
+    let mut out = String::from("classDiagram\n");
+
+    let vis_char = |v: &Vis| match v {
+        Vis::Public => '+',
+        Vis::Private => '-',
+        Vis::Protected => '#',
+    };
+
+    // Sanitise a name for Mermaid: replace "::" / "." separators and strip
+    // generic angle-brackets which confuse the Mermaid parser.
+    let mmd_id = |s: &str| {
+        s.split('<').next().unwrap_or(s)
+            .replace("::", "_")
+            .replace('.', "_")
+    };
+
+    for cls in &graph.classes {
+        out.push_str(&format!("    class {} {{\n", mmd_id(&cls.name)));
+
+        match cls.kind {
+            ClassKind::Interface | ClassKind::Trait => {
+                out.push_str("        <<interface>>\n");
+            }
+            ClassKind::Enum => {
+                out.push_str("        <<enumeration>>\n");
+            }
+            _ => {}
+        }
+
+        for field in &cls.fields {
+            out.push_str(&format!(
+                "        {}{} {}\n",
+                vis_char(&field.visibility),
+                field.type_annotation,
+                field.name,
+            ));
+        }
+
+        for method in &cls.methods {
+            let ctor_marker = if method.is_constructor { " <<create>>" } else { "" };
+            let ret = if method.return_type.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", method.return_type)
+            };
+            out.push_str(&format!(
+                "        {}{}({}){}{}\n",
+                vis_char(&method.visibility),
+                method.name,
+                method.params,
+                ret,
+                ctor_marker,
+            ));
+        }
+
+        out.push_str("    }\n");
+    }
+
+    for rel in &graph.relationships {
+        match rel {
+            ClassRelationship::Inherits { child, parent } => {
+                out.push_str(&format!("    {} --|> {}\n", mmd_id(child), mmd_id(parent)));
+            }
+            ClassRelationship::Implements { class, interface } => {
+                out.push_str(&format!("    {} ..|> {}\n", mmd_id(class), mmd_id(interface)));
+            }
+        }
+    }
+
+    let node_count = graph.classes.len();
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count,
+        included: graph.classes.iter().map(|c| c.name.clone()).collect(),
+    }
+}
+
+#[allow(dead_code)]
+/// Render a `ClassGraph` as a Mermaid `erDiagram`.
+///
+/// Each `ClassNode` becomes an entity. Fields whose stripped type matches another
+/// known class name produce a relationship edge. Cardinality is inferred from the
+/// wrapper: `Vec<T>` → one-to-many, `Option<T>` → zero-or-one, bare `T` →
+/// exactly-one. `Box<T>`, `Arc<T>`, `Rc<T>`, and `&T` are treated as exactly-one.
+pub fn render_er(graph: &crate::class_graph::ClassGraph) -> RenderedDiagram {
+    let class_names: std::collections::HashSet<&str> =
+        graph.classes.iter().map(|c| c.name.as_str()).collect();
+
+    // Strip common single-type wrappers and return (inner_type, mermaid_cardinality).
+    fn strip_wrapper(ty: &str) -> (&str, &'static str) {
+        let ty = ty.trim();
+        for prefix in &["Vec<", "HashSet<", "BTreeSet<", "VecDeque<"] {
+            if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+                return (inner.trim(), "||--o{");
+            }
+        }
+        if let Some(inner) = ty.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+            return (inner.trim(), "||--o|");
+        }
+        for prefix in &["Box<", "Arc<", "Rc<", "Cell<", "RefCell<", "Mutex<"] {
+            if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+                return (inner.trim(), "||--||");
+            }
+        }
+        if let Some(inner) = ty.strip_prefix('&') {
+            return (inner.trim().trim_start_matches("mut "), "||--||");
+        }
+        (ty, "||--||")
+    }
+
+    // Sanitise a name for the erDiagram parser: no spaces, brackets, or colons.
+    let er_id = |s: &str| -> String {
+        s.split('<').next().unwrap_or(s)
+            .replace("::", "_")
+            .replace(['.', '-', ' '], "_")
+    };
+
+    // Sanitise a type annotation for display inside an entity block.
+    // Keep only the outermost type name (strip generics).
+    let er_type = |s: &str| -> String {
+        er_id(s.split('<').next().unwrap_or(s))
+    };
+
+    let mut out = String::from("erDiagram\n");
+
+    // Entity blocks.
+    for cls in &graph.classes {
+        out.push_str(&format!("    {} {{\n", er_id(&cls.name)));
+        for field in &cls.fields {
+            let display_type = er_type(&field.type_annotation);
+            out.push_str(&format!("        {} {}\n", display_type, field.name));
+        }
+        out.push_str("    }\n");
+    }
+
+    // Relationship edges — deduplicated via a HashSet.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rel_count = 0usize;
+    for cls in &graph.classes {
+        for field in &cls.fields {
+            let (bare, cardinality) = strip_wrapper(&field.type_annotation);
+            // One more strip for nested wrappers (e.g. Option<Vec<T>>).
+            let (bare, cardinality) = if cardinality == "||--o|" {
+                let (b2, c2) = strip_wrapper(bare);
+                if c2 == "||--o{" { (b2, c2) } else { (bare, cardinality) }
+            } else {
+                (bare, cardinality)
+            };
+            let bare_id = er_id(bare);
+            if class_names.contains(bare) && bare_id != er_id(&cls.name) {
+                let key = format!("{} {} {}", er_id(&cls.name), cardinality, bare_id);
+                if seen.insert(key) {
+                    out.push_str(&format!(
+                        "    {} {} {} : \"has\"\n",
+                        er_id(&cls.name), cardinality, bare_id
+                    ));
+                    rel_count += 1;
+                }
+            }
+        }
+    }
+
+    RenderedDiagram {
+        diagram: out,
+        truncated: false,
+        node_count: rel_count,
+        included: graph.classes.iter().map(|c| c.name.clone()).collect(),
+    }
+}
+
 fn role_color_dot(role: Option<&str>) -> &'static str {
     match role {
         Some("core") => "#9cf",
@@ -1463,7 +1861,7 @@ mod tests {
             group_by_folder_depth: None,
             color_by_owner: false,
         }).unwrap();
-        assert!(r.diagram.starts_with("graph TD\n"));
+        assert!(r.diagram.starts_with("flowchart TD\n"));
         assert!(r.diagram.contains("classDef core"));
         assert!(r.diagram.contains("classDef bridge"));
         // Role-tagged nodes carry their class suffix.
@@ -2404,5 +2802,68 @@ mod tests {
         // depth=1 selection via bfs_from_anchor only *includes* a and b, so
         // c.rs must not appear in the ascii tree either.
         assert!(!r.diagram.contains("c.rs"), "depth cap not respected:\n{}", r.diagram);
+    }
+
+    #[test]
+    fn render_sequence_produces_valid_mermaid() {
+        use crate::call_graph::{FileCallGraph, FunctionInfo};
+        let cg = FileCallGraph {
+            functions: vec![
+                FunctionInfo { qualified: "Foo::main".into(), simple: "main".into(), line: 1, kind: "fn" },
+                FunctionInfo { qualified: "Foo::helper".into(), simple: "helper".into(), line: 5, kind: "fn" },
+            ],
+            calls: vec![("Foo::main".into(), "Foo::helper".into())],
+            unresolved_count: 2,
+            unresolved_calls: vec![],
+            language: "rust",
+        };
+        let r = render_sequence(&cg);
+        assert!(r.diagram.starts_with("sequenceDiagram\n"));
+        assert!(r.diagram.contains("participant Foo_main as main"));
+        assert!(r.diagram.contains("participant Foo_helper as helper"));
+        assert!(r.diagram.contains("Foo_main->>Foo_helper: call"));
+        assert!(r.diagram.contains("unresolved"));
+        assert_eq!(r.node_count, 2);
+    }
+
+    #[test]
+    fn render_class_produces_valid_mermaid() {
+        use crate::class_graph::{ClassGraph, ClassKind, ClassNode, ClassRelationship, FieldDef, MethodDef, Vis};
+        let g = ClassGraph {
+            classes: vec![
+                ClassNode {
+                    name: "Point".into(),
+                    kind: ClassKind::Struct,
+                    fields: vec![
+                        FieldDef { name: "x".into(), type_annotation: "f64".into(), visibility: Vis::Public },
+                    ],
+                    methods: vec![
+                        MethodDef { name: "new".into(), params: "x: f64".into(), return_type: "Self".into(),
+                            visibility: Vis::Public, is_static: true, is_constructor: false },
+                    ],
+                },
+                ClassNode {
+                    name: "Shape".into(),
+                    kind: ClassKind::Trait,
+                    fields: vec![],
+                    methods: vec![
+                        MethodDef { name: "area".into(), params: String::new(), return_type: "f64".into(),
+                            visibility: Vis::Public, is_static: false, is_constructor: false },
+                    ],
+                },
+            ],
+            relationships: vec![
+                ClassRelationship::Implements { class: "Point".into(), interface: "Shape".into() },
+            ],
+            language: "rust",
+        };
+        let r = render_class(&g);
+        assert!(r.diagram.starts_with("classDiagram\n"));
+        assert!(r.diagram.contains("class Point {"));
+        assert!(r.diagram.contains("+f64 x"));
+        assert!(r.diagram.contains("class Shape {"));
+        assert!(r.diagram.contains("<<interface>>"));
+        assert!(r.diagram.contains("Point ..|> Shape"));
+        assert_eq!(r.node_count, 2);
     }
 }

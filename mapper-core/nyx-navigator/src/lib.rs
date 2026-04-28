@@ -17,6 +17,8 @@ use rayon::prelude::*;
 
 mod api;
 mod call_graph;
+mod class_graph;
+mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;
@@ -2371,6 +2373,10 @@ pub extern "C" fn navigator_render_architecture(
         diagram::DiagramFormat::Mermaid => "mermaid",
         diagram::DiagramFormat::Dot => "dot",
         diagram::DiagramFormat::Ascii => "ascii",
+        diagram::DiagramFormat::Sequence => "sequence",
+        diagram::DiagramFormat::Class => "class",
+        diagram::DiagramFormat::Quadrant => "quadrant",
+        diagram::DiagramFormat::Er => "er",
     };
 
     let data = serde_json::json!({
