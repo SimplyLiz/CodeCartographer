@@ -485,6 +485,16 @@ impl ApiState {
                 // map-taking helper directly. Calling `resolve_import_target` here
                 // would re-enter the non-reentrant Mutex and deadlock.
                 if let Some(target) = Self::resolve_import_target_in(&files, import, module_id) {
+                    // Reject cross-type edges: a source file importing "json" must not
+                    // resolve to a fixture like testdata/review/json.json (doc), and a
+                    // doc file like CHANGELOG.md must not appear as a dependent of a
+                    // source module just because it mentions a path in its prose.
+                    let target_is_doc = files.get(&target)
+                        .map(|f| is_doc_path(&f.path))
+                        .unwrap_or(false);
+                    if is_doc_path(&file.path) != target_is_doc {
+                        continue;
+                    }
                     edges.push(GraphEdge {
                         source: module_id.clone(),
                         target,
@@ -1798,6 +1808,47 @@ mod tests {
         let (module, sym) = parse_import_parts("use crate::mapper::MappedFile;");
         assert_eq!(module, "mapper");
         assert_eq!(sym.as_deref(), Some("MappedFile"));
+    }
+
+    // Regression: source files importing names like "json" must not produce edges
+    // to doc/fixture files that happen to share the stem (e.g. testdata/review/json.json),
+    // and doc files like CHANGELOG.md must not appear as dependents of source modules
+    // just because they mention a path in their prose.
+    #[test]
+    fn rebuild_graph_excludes_cross_type_edges() {
+        let state = ApiState::new(std::path::PathBuf::from("/test"));
+        {
+            let mut files = state.mapped_files.lock().unwrap();
+            // Source file that imports "json" (e.g. Go's encoding/json)
+            files.insert(
+                "bridge.go".to_string(),
+                MappedFile::from_minimal("bridge.go".to_string(), vec!["json".to_string()]),
+            );
+            // JSON fixture whose stem "json" would match the import stem
+            files.insert(
+                "testdata/review/json.json".to_string(),
+                MappedFile::from_minimal("testdata/review/json.json".to_string(), vec![]),
+            );
+            // Doc file that has picked up a path reference as an "import"
+            files.insert(
+                "CHANGELOG.md".to_string(),
+                MappedFile::from_minimal(
+                    "CHANGELOG.md".to_string(),
+                    vec!["bridge.go".to_string()],
+                ),
+            );
+        }
+        let graph = state.rebuild_graph().expect("rebuild_graph must not fail");
+
+        let has_source_to_doc = graph.edges.iter().any(|e| {
+            e.source == "bridge.go" && e.target == "testdata/review/json.json"
+        });
+        assert!(!has_source_to_doc, "source→doc edge must not exist: bridge.go → json.json");
+
+        let has_doc_to_source = graph.edges.iter().any(|e| {
+            e.source == "CHANGELOG.md" && e.target == "bridge.go"
+        });
+        assert!(!has_doc_to_source, "doc→source edge must not exist: CHANGELOG.md → bridge.go");
     }
 
     #[test]

@@ -1286,7 +1286,10 @@ pub extern "C" fn navigator_blast_radius(
         let graph = state.project_graph.lock().unwrap();
         graph.as_ref().and_then(|g| {
             g.nodes.iter().find(|n| {
-                n.module_id == target || n.path.contains(&*target)
+                n.module_id == target
+                    || n.path == target
+                    || n.path.starts_with(&format!("{}/", target))
+                    || n.module_id.starts_with(&format!("{}/", target))
             }).map(|n| n.module_id.clone())
         })
     };
