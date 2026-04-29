@@ -1669,15 +1669,18 @@ impl ApiState {
 
         // ── Filter to requested window ────────────────────────────────────────
         let since_epoch = now.saturating_sub(days as u64 * 86_400);
+        // Return snapshots newest-first so callers get snapshots[0] == current.
+        // Trend comparators are swapped accordingly (oldest = last, newest = first).
         let snapshots: Vec<ArchitectureSnapshot> = all_snapshots
             .into_iter()
             .filter(|s| s.timestamp >= since_epoch)
+            .rev()
             .collect();
 
-        // ── Compute trend from first vs last snapshot ─────────────────────────
+        // ── Compute trend from oldest vs newest snapshot ──────────────────────
         let health_trend = if snapshots.len() >= 2 {
-            let first = snapshots.first().unwrap().health_score;
-            let last = snapshots.last().unwrap().health_score;
+            let first = snapshots.last().unwrap().health_score;   // oldest (now at tail)
+            let last = snapshots.first().unwrap().health_score;   // newest = current (at head)
             let delta = last - first;
             if delta > 5.0 {
                 "Improving".to_string()
@@ -1872,5 +1875,53 @@ mod tests {
             "expected resolved a->b edge, got edges: {:?}",
             graph.edges
         );
+    }
+
+    // Regression: get_evolution must return snapshots newest-first so that
+    // snapshots[0] is always the current snapshot.  Before the fix the list was
+    // oldest-first and callers (CLI "Current Status", MCP clients) would read
+    // stale or zero-scored historical entries instead of the live score.
+    #[test]
+    fn get_evolution_snapshots_newest_first() {
+        use std::path::PathBuf;
+        let tmp = std::env::temp_dir().join(format!("nav_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let state = ApiState::new(tmp.clone());
+        {
+            let mut files = state.mapped_files.lock().unwrap();
+            files.insert(
+                "main.rs".to_string(),
+                MappedFile::from_minimal("main.rs".to_string(), vec![]),
+            );
+        }
+
+        let evolution = state.get_evolution(Some(30)).expect("get_evolution must succeed");
+
+        // Current snapshot is always first; it carries the live health score.
+        assert!(
+            !evolution.snapshots.is_empty(),
+            "snapshots must not be empty"
+        );
+        let current = evolution.snapshots.first().unwrap();
+        // Health score must be a valid value (calculate_health_score minimum is 5,
+        // maximum is 100; we only have one file so expect 100).
+        assert!(
+            current.health_score > 0.0,
+            "current snapshot health_score must be > 0, got {}",
+            current.health_score
+        );
+        // If there are multiple snapshots, each must be newer than the next.
+        for window in evolution.snapshots.windows(2) {
+            assert!(
+                window[0].timestamp >= window[1].timestamp,
+                "snapshots must be newest-first: {} < {}",
+                window[0].timestamp,
+                window[1].timestamp
+            );
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
