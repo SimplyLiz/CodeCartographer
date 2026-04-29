@@ -201,7 +201,9 @@ Shortest import path between two modules.
 navigator evolution [PATH] [--days DAYS]
 ```
 
-Architectural health trend over the last N days (default 30).
+Architectural health trend over the last N days (default 30). "Current Status"
+always reflects the live health score from the current scan, matching what
+`navigator health` reports for the same project state.
 
 ### layers
 
