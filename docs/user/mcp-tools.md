@@ -306,8 +306,18 @@ Parameters:
 
 Returns `snapshots` ordered **newest-first** — `snapshots[0]` is always the current
 reading and carries the same health score as `get_health`. Historical snapshots follow
-in descending timestamp order. `healthTrend` is `"Improving"`, `"Degrading"`, or
-`"Stable"` based on the delta from the oldest to the newest snapshot in the window.
+in descending timestamp order.
+
+`trendAvailable` (`bool`) — `false` when the window contains fewer than two snapshots
+from distinct git commits (or spans less than one hour for non-git repos). Do not
+render a directional trend arrow or label when this is `false`.
+
+`healthTrend` — `"Improving"`, `"Degrading"`, or `"Stable"` when `trendAvailable` is
+`true`; an absolute label (`"Healthy"`, `"Moderate"`, `"At Risk"`) otherwise.
+
+Calling `get_evolution` on every startup is safe — snapshots for the same git commit
+are updated in-place rather than appended, so the history stays proportional to the
+number of commits, not the number of invocations.
 
 ### `search_project`
 

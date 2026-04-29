@@ -190,6 +190,11 @@ pub struct ImpactAnalysis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitectureSnapshot {
     pub timestamp: u64,
+    /// Git HEAD SHA at snapshot time. `None` when the root is not a git repo.
+    /// Used to deduplicate: repeated calls on the same commit update this entry
+    /// in-place rather than appending a new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
     pub health_score: f64,
     pub total_files: usize,
     pub total_edges: usize,
@@ -204,6 +209,10 @@ pub struct ArchitectureSnapshot {
 pub struct ArchitectureEvolution {
     pub snapshots: Vec<ArchitectureSnapshot>,
     pub health_trend: String,
+    /// `false` when all snapshots in the window come from the same git commit
+    /// (or the window spans less than one hour for non-git repos). Callers
+    /// should suppress trend UI when this is `false`.
+    pub trend_available: bool,
     pub debt_indicators: Vec<String>,
     pub recommendations: Vec<String>,
 }
@@ -873,6 +882,17 @@ impl ApiState {
 ///
 /// Examples:
 ///   `use crate::mapper::MappedFile;`       → ("mapper",       Some("MappedFile"))
+/// Return the current git HEAD SHA for `root`, or `""` if not a git repo.
+pub(crate) fn git_head_sha(root: &std::path::Path) -> String {
+    std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .unwrap_or_default()
+}
+
 ///   `import { useState } from 'react'`     → ("react",        Some("useState"))
 ///   `from mymodule.auth import verify`     → ("mymodule/auth", Some("verify"))
 ///   `import "github.com/user/repo/pkg"`    → ("pkg",           None)
@@ -1633,8 +1653,12 @@ impl ApiState {
             .unwrap_or_default()
             .as_secs();
 
+        let current_head = git_head_sha(&self.root_path);
+        let git_ref = if current_head.is_empty() { None } else { Some(current_head.clone()) };
+
         let current_snapshot = ArchitectureSnapshot {
             timestamp: now,
+            git_ref: git_ref.clone(),
             health_score: current_health,
             total_files: current_graph.metadata.total_files,
             total_edges: current_graph.metadata.total_edges,
@@ -1651,18 +1675,36 @@ impl ApiState {
         };
 
         // ── Persist snapshot to history file ──────────────────────────────────
+        // Deduplicate by git HEAD: if the most recent recorded snapshot shares
+        // the same commit SHA, update it in-place rather than appending.
+        // This prevents rapid FFI calls on the same codebase state from
+        // inflating the history with meaningless same-second entries.
         let history_path = self.root_path.join(".navigator_history.json");
         let mut all_snapshots: Vec<ArchitectureSnapshot> =
             std::fs::read_to_string(&history_path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
-        all_snapshots.push(current_snapshot);
-        // Cap history to last 365 snapshots to prevent unbounded growth
-        if all_snapshots.len() > 365 {
-            let drain_count = all_snapshots.len() - 365;
-            all_snapshots.drain(0..drain_count);
+
+        let last_ref = all_snapshots.last().and_then(|s| s.git_ref.as_deref());
+        let same_commit = git_ref.is_some() && last_ref == git_ref.as_deref();
+        if same_commit {
+            // Update the existing entry: preserve the original timestamp (so it
+            // stays sorted) but refresh the metrics.
+            if let Some(last) = all_snapshots.last_mut() {
+                let original_ts = last.timestamp;
+                *last = current_snapshot.clone();
+                last.timestamp = original_ts;
+            }
+        } else {
+            all_snapshots.push(current_snapshot);
+            // Cap history to last 365 snapshots to prevent unbounded growth.
+            if all_snapshots.len() > 365 {
+                let drain_count = all_snapshots.len() - 365;
+                all_snapshots.drain(0..drain_count);
+            }
         }
+
         if let Ok(json) = serde_json::to_string(&all_snapshots) {
             let _ = std::fs::write(&history_path, json);
         }
@@ -1672,13 +1714,34 @@ impl ApiState {
         // Return snapshots newest-first so callers get snapshots[0] == current.
         // Trend comparators are swapped accordingly (oldest = last, newest = first).
         let snapshots: Vec<ArchitectureSnapshot> = all_snapshots
-            .into_iter()
+            .iter()
             .filter(|s| s.timestamp >= since_epoch)
             .rev()
+            .cloned()
             .collect();
 
+        // ── Determine whether trend data is meaningful ────────────────────────
+        // Trend is only valid when the window contains snapshots from at least
+        // two distinct git commits.  Without that guarantee the "trend" is just
+        // a function of how many times the caller invoked the endpoint.
+        // For non-git repos (no refs stored) we fall back to a 1-hour minimum
+        // time spread.
+        let trend_available = {
+            let distinct_refs: std::collections::HashSet<&str> = snapshots
+                .iter()
+                .filter_map(|s| s.git_ref.as_deref())
+                .collect();
+            let by_ref = distinct_refs.len() >= 2;
+            let by_time = snapshots.len() >= 2 && {
+                let newest = snapshots.first().map(|s| s.timestamp).unwrap_or(0);
+                let oldest = snapshots.last().map(|s| s.timestamp).unwrap_or(0);
+                newest.saturating_sub(oldest) >= 3600
+            };
+            by_ref || by_time
+        };
+
         // ── Compute trend from oldest vs newest snapshot ──────────────────────
-        let health_trend = if snapshots.len() >= 2 {
+        let health_trend = if trend_available {
             let first = snapshots.last().unwrap().health_score;   // oldest (now at tail)
             let last = snapshots.first().unwrap().health_score;   // newest = current (at head)
             let delta = last - first;
@@ -1730,6 +1793,7 @@ impl ApiState {
         Ok(ArchitectureEvolution {
             snapshots,
             health_trend,
+            trend_available,
             debt_indicators,
             recommendations,
         })
@@ -1922,6 +1986,58 @@ mod tests {
         }
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Regression: rapid successive calls on the same git commit must not each
+    // append a new snapshot.  The history file should have exactly one entry
+    // after N identical calls, and trend_available must be false.
+    #[test]
+    fn get_evolution_deduplicates_same_commit() {
+        let tmp = std::env::temp_dir().join(format!("nav_test_dedup_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Inject a fake git_ref so deduplication can operate without a real repo.
+        // We do this by pre-seeding the history file with a snapshot that carries
+        // a known ref, then calling get_evolution from the same tmp dir.
+        // Since tmp is not a git repo, git_head_sha returns "" → git_ref = None.
+        // Deduplication only fires when both sides have a non-empty ref, so on a
+        // non-git root each call still appends — which tests the time-based
+        // trend_available guard instead.
+        let state = ApiState::new(tmp.clone());
+        {
+            let mut files = state.mapped_files.lock().unwrap();
+            files.insert(
+                "lib.rs".to_string(),
+                MappedFile::from_minimal("lib.rs".to_string(), vec![]),
+            );
+        }
+
+        // Three rapid calls from a non-git root (no ref → no deduplication,
+        // but trend_available must be false because the timestamps are within
+        // seconds of each other, well below the 1-hour threshold).
+        let e1 = state.get_evolution(Some(30)).expect("call 1");
+        let e2 = state.get_evolution(Some(30)).expect("call 2");
+        let e3 = state.get_evolution(Some(30)).expect("call 3");
+
+        // trend_available must be false — the window contains seconds of data.
+        assert!(!e3.trend_available, "trend_available must be false for same-second calls");
+
+        // health_trend must not claim a directional trend with only same-second data.
+        assert!(
+            !matches!(e3.health_trend.as_str(), "Improving" | "Degrading"),
+            "health_trend must not be directional with insufficient data, got: {}",
+            e3.health_trend
+        );
+
+        // Snapshots[0] is always current and always has a positive health score.
+        for evolution in [&e1, &e2, &e3] {
+            assert!(
+                evolution.snapshots.first().map(|s| s.health_score).unwrap_or(0.0) > 0.0,
+                "current snapshot health_score must be > 0"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

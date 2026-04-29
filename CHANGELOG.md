@@ -4,6 +4,28 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `get_evolution` unusable on fresh repos
+
+Each FFI call previously appended one snapshot unconditionally, so three
+calls 15 seconds apart produced three "snapshots" labelled with current
+timestamps and presented as a trend. The output was a function of call count,
+not project history.
+
+**Deduplication by git HEAD** — if the most recent history entry carries the
+same commit SHA as the current call, the entry is updated in-place rather than
+a new snapshot being appended. Callers can invoke `get_evolution`/`navigator_evolution`
+on every startup without polluting the history.
+
+**`trendAvailable` flag** — `ArchitectureEvolution` gains a `trend_available`
+(`trendAvailable` in JSON) boolean. It is `false` when the look-back window
+contains fewer than two snapshots from distinct git commits (or, for non-git
+roots, when the window spans less than one hour). Callers must suppress
+directional trend UI when this field is `false`.
+
+**`gitRef` in snapshots** — `ArchitectureSnapshot` gains an optional `git_ref`
+field (serialised as `gitRef`) holding the HEAD SHA at snapshot time. Omitted
+when the root is not a git repository.
+
 ### Fixed — `get_blast_radius` edge quality
 
 Two sources of false edges in the dependency graph have been eliminated:
