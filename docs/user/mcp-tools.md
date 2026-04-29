@@ -232,11 +232,15 @@ Files and symbols affected by changing a module.
 
 ```
 Parameters:
-  target       string  — file path or module id (required)
-  max_related  number  — limit on related items (required)
+  target       string  — file path, module id, or directory prefix (required)
+  max_related  number  — limit on related items (default: 10)
 ```
 
-Returns the target module, its direct dependencies, and its direct dependents. Also returns `lip_uris` — CKB deep-link URIs for drill-down into compiler-accurate symbol analysis.
+Returns the target module, its direct dependencies, and its direct dependents.
+Only edges between source files are included — fixture files and documentation
+are excluded from the dependency graph regardless of filename overlap.
+Also returns `lip_uris` — CKB deep-link URIs for drill-down into compiler-accurate
+symbol analysis.
 
 ### `get_health`
 
@@ -299,6 +303,11 @@ Architectural health trend over time.
 Parameters:
   days?  number  — look-back window (default: 30)
 ```
+
+Returns `snapshots` ordered **newest-first** — `snapshots[0]` is always the current
+reading and carries the same health score as `get_health`. Historical snapshots follow
+in descending timestamp order. `healthTrend` is `"Improving"`, `"Degrading"`, or
+`"Stable"` based on the delta from the oldest to the newest snapshot in the window.
 
 ### `search_project`
 

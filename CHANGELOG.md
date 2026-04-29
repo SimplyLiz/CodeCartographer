@@ -4,6 +4,35 @@ All notable changes to Nyx.Navigator will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `get_blast_radius` edge quality
+
+Two sources of false edges in the dependency graph have been eliminated:
+
+**Cross-type edges** — `rebuild_graph` no longer creates edges between source files
+and doc/fixture files. A Go source file importing `"encoding/json"` would previously
+resolve to any file whose stem matched `"json"` (e.g. `testdata/review/json.json`),
+causing JSON fixtures to appear as dependencies. Markdown files like `CHANGELOG.md`
+were appearing as dependents of source modules because `extract_markdown` treats
+prose path mentions as imports. Edges are now only created between files of the same
+type (source↔source or doc↔doc).
+
+**Substring target match** — `get_blast_radius` resolved the query target using
+`path.contains(target)`, which matched any path containing the target string as an
+arbitrary substring. The lookup now requires an exact path match or a path-component
+prefix boundary (`internal/navigator` matches `internal/navigator/bridge.go` but not
+`internal/navigator_extra/foo.go`).
+
+### Fixed — `get_evolution` snapshot ordering
+
+`get_evolution` was appending the current snapshot to the end of the persisted history
+list, so `snapshots[0]` was the **oldest** entry in the look-back window rather than
+the live reading. The CLI "Current Status" display and MCP clients that inspect
+`snapshots[0]` were showing stale or zero-scored historical data instead of the
+current health score.
+
+Snapshots are now returned newest-first (`snapshots[0]` = current). The `healthTrend`
+delta comparators are updated accordingly.
+
 ### Added — multi-symbol reach and answer --then
 
 **`navigator reach SYMBOL [SYMBOL ...]`** — passing two or more symbols
