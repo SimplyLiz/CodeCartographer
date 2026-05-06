@@ -419,24 +419,40 @@ char *navigator_find_files(const char *path,
 char *navigator_blast_radius(const char *path, const char *target, uint32_t max_related);
 
 /**
- * Return architecture health and debt indicators for a project.
+ * Return architecture health trend over time for a project.
  *
  * Inputs:
  *   `path` — project root (C string)
  *   `days` — look-back window in days (0 → default 30)
+ *
+ * Snapshot deduplication: if the current git HEAD matches the most recently
+ * recorded snapshot, that entry is updated in-place rather than a new one
+ * being appended.  Callers may invoke this function on every startup without
+ * inflating the history.
  *
  * Response shape:
  * ```json
  * {
  *   "ok": true,
  *   "data": {
- *     "snapshots": [{ "timestamp": ..., "healthScore": 72.5, ... }],
- *     "healthTrend": "At Risk",
+ *     "snapshots": [
+ *       { "timestamp": 1777507200, "gitRef": "abc123", "healthScore": 72.5, ... }
+ *     ],
+ *     "healthTrend": "Stable",
+ *     "trendAvailable": false,
  *     "debtIndicators": ["2 dependency cycles detected"],
  *     "recommendations": ["Resolve dependency cycles to improve health score"]
  *   }
  * }
  * ```
+ *
+ * `snapshots` is ordered newest-first; `snapshots[0]` is always the current
+ * reading and carries the same health score as `navigator_health`.
+ *
+ * `trendAvailable` is `false` when the window contains fewer than two
+ * snapshots from distinct git commits (or, for non-git roots, when the
+ * window spans less than one hour).  Callers should suppress directional
+ * trend UI when this field is `false`.
  */
 char *navigator_evolution(const char *path, uint32_t days);
 
