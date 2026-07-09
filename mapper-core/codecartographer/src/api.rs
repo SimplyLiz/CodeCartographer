@@ -985,10 +985,41 @@ impl ApiState {
                 }
             }
         }
+        // Composite orientation score: an agent seeing the first N tokens should land on
+        // the code that ORCHESTRATES the repo (entry points, coordinators, domain core),
+        // not the ubiquitous sink headers. Both PageRank-of-imports and fan-in reward
+        // sinks (everything imports typedefs.h), which is the opposite of useful
+        // orientation — so this is role-primary, uses fan-OUT (orchestration), and keeps
+        // PageRank only as a mild centrality signal. All inputs are on the node (no I/O;
+        // churn would need a git subprocess and this path is hot).
+        let max_rank = rank.iter().cloned().fold(0.0_f64, f64::max).max(1e-9);
+        let max_fanout = nodes
+            .iter()
+            .filter_map(|nd| nd.fan_out)
+            .max()
+            .unwrap_or(0)
+            .max(1) as f64;
+        let role_weight = |role: &Option<String>| -> f64 {
+            match role.as_deref() {
+                Some("entry") => 1.0,
+                Some("core") => 0.85,
+                Some("bridge") => 0.7,
+                Some("utility") => 0.2,
+                Some("leaf") => 0.15,
+                Some("dead") => 0.0,
+                _ => 0.5, // standard
+            }
+        };
+        let orientation = |i: usize| -> f64 {
+            let nd = &nodes[i];
+            let r = rank[i] / max_rank;
+            let fo = nd.fan_out.unwrap_or(0) as f64 / max_fanout;
+            0.45 * role_weight(&nd.role) + 0.30 * fo + 0.25 * r
+        };
         let mut rest: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
         rest.sort_by(|&a, &b| {
-            rank[b]
-                .partial_cmp(&rank[a])
+            orientation(b)
+                .partial_cmp(&orientation(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         ranked_idx.extend(rest);
