@@ -24,6 +24,12 @@ use crate::api::{GraphEdge, GraphMetadata, GraphNode, ProjectGraphResponse};
     feature = "lang-go",
     feature = "lang-c",
     feature = "lang-cpp",
+    feature = "lang-java",
+    feature = "lang-csharp",
+    feature = "lang-ruby",
+    feature = "lang-kotlin",
+    feature = "lang-swift",
+    feature = "lang-php",
 ))]
 use tree_sitter::{Node, Parser};
 
@@ -81,6 +87,18 @@ pub fn build_file_call_graph(path: &Path, source: &str) -> Result<Option<FileCal
         "c" | "h" => Ok(Some(extract_c(source)?)),
         #[cfg(feature = "lang-cpp")]
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" => Ok(Some(extract_cpp(source)?)),
+        #[cfg(feature = "lang-java")]
+        "java" => Ok(Some(extract_oo_cg(source, tree_sitter_java::language(), "java")?)),
+        #[cfg(feature = "lang-csharp")]
+        "cs" => Ok(Some(extract_oo_cg(source, tree_sitter_c_sharp::language(), "csharp")?)),
+        #[cfg(feature = "lang-kotlin")]
+        "kt" | "kts" => Ok(Some(extract_oo_cg(source, tree_sitter_kotlin::language(), "kotlin")?)),
+        #[cfg(feature = "lang-swift")]
+        "swift" => Ok(Some(extract_oo_cg(source, tree_sitter_swift::language(), "swift")?)),
+        #[cfg(feature = "lang-php")]
+        "php" => Ok(Some(extract_oo_cg(source, tree_sitter_php::language_php(), "php")?)),
+        #[cfg(feature = "lang-ruby")]
+        "rb" => Ok(Some(extract_oo_cg(source, tree_sitter_ruby::language(), "ruby")?)),
         _ => Ok(None),
     }
 }
@@ -1241,6 +1259,12 @@ fn cpp_callee_name(node: &Node, src: &[u8]) -> String {
     feature = "lang-go",
     feature = "lang-c",
     feature = "lang-cpp",
+    feature = "lang-java",
+    feature = "lang-csharp",
+    feature = "lang-ruby",
+    feature = "lang-kotlin",
+    feature = "lang-swift",
+    feature = "lang-php",
 ))]
 fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).unwrap_or("")
@@ -1295,6 +1319,261 @@ impl<'a> Resolver<'a> {
         }
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Generic OO call graph: Java, C#, Kotlin, Swift, PHP, Ruby
+// One two-pass extractor over the union of declaration and call node kinds.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift", feature = "lang-php",
+))]
+mod oo_cg {
+    use super::{node_text, FileCallGraph, FunctionInfo, Resolver};
+    use tree_sitter::{Language, Node, Parser};
+
+    fn is_type(kind: &str) -> bool {
+        matches!(
+            kind,
+            "class_declaration" | "object_declaration" | "trait_declaration"
+                | "interface_declaration" | "protocol_declaration" | "struct_declaration"
+                | "enum_declaration" | "namespace_declaration" | "namespace_definition"
+                | "class" | "module"
+        )
+    }
+
+    fn is_fn(kind: &str) -> bool {
+        matches!(
+            kind,
+            "method_declaration" | "constructor_declaration" | "protocol_function_declaration"
+                | "function_declaration" | "function_definition" | "method" | "singleton_method"
+        )
+    }
+
+    fn is_call(kind: &str) -> bool {
+        matches!(
+            kind,
+            "method_invocation" | "object_creation_expression" | "invocation_expression"
+                | "call_expression" | "function_call_expression" | "member_call_expression"
+                | "scoped_call_expression" | "call"
+        )
+    }
+
+    fn name_of(node: &Node, src: &[u8]) -> Option<String> {
+        if let Some(n) = node.child_by_field_name("name") {
+            let t = node_text(&n, src);
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            if matches!(
+                ch.kind(),
+                "identifier" | "type_identifier" | "simple_identifier" | "name" | "constant"
+            ) {
+                let t = node_text(&ch, src);
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Last identifier run in a (possibly qualified) expression: `a.b.c` → `c`,
+    /// `$this->bar` → `bar`, `C::baz` → `baz`.
+    fn last_ident(text: &str) -> Option<String> {
+        let mut last = None;
+        let mut cur = String::new();
+        for c in text.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                cur.push(c);
+            } else if !cur.is_empty() {
+                last = Some(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            last = Some(cur);
+        }
+        last.filter(|s| s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false))
+    }
+
+    fn callee_name(call: &Node, src: &[u8]) -> Option<String> {
+        for f in ["name", "method", "function", "type", "constructor"] {
+            if let Some(n) = call.child_by_field_name(f) {
+                if let Some(id) = last_ident(node_text(&n, src)) {
+                    return Some(id);
+                }
+            }
+        }
+        // Kotlin/Swift call_expression have no callee field — take the first named,
+        // non-argument child (the callee expression).
+        let mut cur = call.walk();
+        for ch in call.children(&mut cur) {
+            let k = ch.kind();
+            if ch.is_named() && k != "call_suffix" && !k.contains("argument") {
+                if let Some(id) = last_ident(node_text(&ch, src)) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    fn qualify(scope: &[String], name: &str) -> String {
+        match scope.last() {
+            Some(s) if !s.is_empty() => format!("{}.{}", s, name),
+            _ => name.to_string(),
+        }
+    }
+
+    fn collect_functions(node: &Node, src: &[u8], scope: &mut Vec<String>, out: &mut Vec<FunctionInfo>) {
+        let kind = node.kind();
+        if is_type(kind) {
+            let name = name_of(node, src).unwrap_or_default();
+            scope.push(name);
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                collect_functions(&ch, src, scope, out);
+            }
+            scope.pop();
+        } else if is_fn(kind) {
+            if let Some(name) = name_of(node, src) {
+                if !name.is_empty() {
+                    out.push(FunctionInfo {
+                        qualified: qualify(scope, &name),
+                        simple: name,
+                        line: node.start_position().row as u32 + 1,
+                        kind: if scope.is_empty() { "fn" } else { "method" },
+                    });
+                }
+            }
+            // Do not descend into a function body enumerating locals as functions.
+        } else {
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                collect_functions(&ch, src, scope, out);
+            }
+        }
+    }
+
+    fn walk_calls(
+        node: &Node,
+        src: &[u8],
+        caller: &str,
+        resolver: &Resolver,
+        bare: bool,
+        calls: &mut Vec<(String, String)>,
+        unresolved: &mut Vec<(String, String)>,
+    ) {
+        if is_call(node.kind()) {
+            if let Some(callee) = callee_name(node, src) {
+                match resolver.resolve(&callee) {
+                    Some(q) => calls.push((caller.to_string(), q)),
+                    None => unresolved.push((caller.to_string(), callee)),
+                }
+            }
+        } else if bare && node.kind() == "identifier" {
+            // Ruby paren-less calls (`step_one`) parse as bare identifiers. Treat one as a
+            // call only when it uniquely resolves to a known method and isn't the def's own
+            // name — conservative, so a local variable named like a method adds no edge.
+            let is_def_name = node
+                .parent()
+                .and_then(|p| p.child_by_field_name("name"))
+                .map(|n| n.id() == node.id())
+                .unwrap_or(false);
+            if !is_def_name {
+                let txt = node_text(node, src);
+                if let Some(q) = resolver.resolve(txt) {
+                    calls.push((caller.to_string(), q));
+                }
+            }
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            walk_calls(&ch, src, caller, resolver, bare, calls, unresolved);
+        }
+    }
+
+    fn collect_calls(
+        node: &Node,
+        src: &[u8],
+        scope: &mut Vec<String>,
+        resolver: &Resolver,
+        bare: bool,
+        calls: &mut Vec<(String, String)>,
+        unresolved: &mut Vec<(String, String)>,
+    ) {
+        let kind = node.kind();
+        if is_type(kind) {
+            let name = name_of(node, src).unwrap_or_default();
+            scope.push(name);
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                collect_calls(&ch, src, scope, resolver, bare, calls, unresolved);
+            }
+            scope.pop();
+        } else if is_fn(kind) {
+            let name = name_of(node, src).unwrap_or_default();
+            let caller = qualify(scope, &name);
+            walk_calls(node, src, &caller, resolver, bare, calls, unresolved);
+        } else {
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                collect_calls(&ch, src, scope, resolver, bare, calls, unresolved);
+            }
+        }
+    }
+
+    pub(super) fn extract(
+        source: &str,
+        lang: Language,
+        language: &'static str,
+    ) -> Result<FileCallGraph, String> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&lang)
+            .map_err(|e| format!("tree-sitter {language} init failed: {e}"))?;
+        let tree = parser
+            .parse(source.as_bytes(), None)
+            .ok_or_else(|| "tree-sitter parse returned None".to_string())?;
+        let src = source.as_bytes();
+
+        let mut functions: Vec<FunctionInfo> = Vec::new();
+        let mut scope: Vec<String> = Vec::new();
+        collect_functions(&tree.root_node(), src, &mut scope, &mut functions);
+
+        let resolver = Resolver::new(&functions);
+        let mut calls: Vec<(String, String)> = Vec::new();
+        let mut unresolved: Vec<(String, String)> = Vec::new();
+        let mut scope: Vec<String> = Vec::new();
+        let bare = language == "ruby";
+        collect_calls(&tree.root_node(), src, &mut scope, &resolver, bare, &mut calls, &mut unresolved);
+
+        let unresolved_count = unresolved.len();
+        Ok(FileCallGraph {
+            functions,
+            calls,
+            unresolved_count,
+            unresolved_calls: unresolved,
+            language,
+        })
+    }
+}
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift", feature = "lang-php",
+))]
+fn extract_oo_cg(
+    source: &str,
+    lang: tree_sitter::Language,
+    language: &'static str,
+) -> Result<FileCallGraph, String> {
+    oo_cg::extract(source, lang, language)
 }
 
 // ---------------------------------------------------------------------------

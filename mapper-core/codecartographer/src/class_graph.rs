@@ -16,6 +16,12 @@ use std::path::Path;
     feature = "lang-python",
     feature = "lang-typescript",
     feature = "lang-go",
+    feature = "lang-java",
+    feature = "lang-csharp",
+    feature = "lang-ruby",
+    feature = "lang-kotlin",
+    feature = "lang-swift",
+    feature = "lang-php",
 ))]
 use tree_sitter::{Node, Parser};
 
@@ -107,6 +113,19 @@ pub fn build_class_graph(path: &Path, source: &str) -> Result<Option<ClassGraph>
         #[cfg(feature = "lang-go")]
         "go" => extract_go(source).map(Some),
 
+        #[cfg(feature = "lang-java")]
+        "java" => oo_cls::extract(source, tree_sitter_java::language(), "java").map(Some),
+        #[cfg(feature = "lang-csharp")]
+        "cs" => oo_cls::extract(source, tree_sitter_c_sharp::language(), "csharp").map(Some),
+        #[cfg(feature = "lang-kotlin")]
+        "kt" | "kts" => oo_cls::extract(source, tree_sitter_kotlin::language(), "kotlin").map(Some),
+        #[cfg(feature = "lang-swift")]
+        "swift" => oo_cls::extract(source, tree_sitter_swift::language(), "swift").map(Some),
+        #[cfg(feature = "lang-php")]
+        "php" => oo_cls::extract(source, tree_sitter_php::language_php(), "php").map(Some),
+        #[cfg(feature = "lang-ruby")]
+        "rb" => oo_cls::extract(source, tree_sitter_ruby::language(), "ruby").map(Some),
+
         _ => Ok(None),
     }
 }
@@ -120,6 +139,12 @@ pub fn build_class_graph(path: &Path, source: &str) -> Result<Option<ClassGraph>
     feature = "lang-python",
     feature = "lang-typescript",
     feature = "lang-go",
+    feature = "lang-java",
+    feature = "lang-csharp",
+    feature = "lang-ruby",
+    feature = "lang-kotlin",
+    feature = "lang-swift",
+    feature = "lang-php",
 ))]
 fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.start_byte()..node.end_byte()]).unwrap_or("")
@@ -132,6 +157,12 @@ fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     feature = "lang-python",
     feature = "lang-typescript",
     feature = "lang-go",
+    feature = "lang-java",
+    feature = "lang-csharp",
+    feature = "lang-ruby",
+    feature = "lang-kotlin",
+    feature = "lang-swift",
+    feature = "lang-php",
 ))]
 fn normalise(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1173,6 +1204,242 @@ fn go_result(node: &Node, src: &[u8]) -> String {
     node.child_by_field_name("result")
         .map(|n| normalise(node_text(&n, src)))
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Generic OO class graph: Java, C#, Kotlin, Swift, PHP, Ruby
+// ---------------------------------------------------------------------------
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift", feature = "lang-php",
+))]
+mod oo_cls {
+    use super::{
+        node_text, ClassGraph, ClassKind, ClassNode, ClassRelationship, FieldDef, MethodDef, Vis,
+    };
+    use tree_sitter::{Language, Node, Parser};
+
+    fn name_of(node: &Node, src: &[u8]) -> Option<String> {
+        if let Some(n) = node.child_by_field_name("name") {
+            let t = node_text(&n, src);
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            if matches!(
+                ch.kind(),
+                "identifier" | "type_identifier" | "simple_identifier" | "name" | "constant"
+            ) {
+                let t = node_text(&ch, src);
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn kind_of(k: &str) -> Option<ClassKind> {
+        match k {
+            "class_declaration" | "object_declaration" | "class" => Some(ClassKind::Class),
+            "interface_declaration" | "protocol_declaration" => Some(ClassKind::Interface),
+            "trait_declaration" => Some(ClassKind::Trait),
+            "struct_declaration" => Some(ClassKind::Struct),
+            "enum_declaration" => Some(ClassKind::Enum),
+            _ => None,
+        }
+    }
+
+    fn head(node: &Node, src: &[u8]) -> String {
+        let t = node_text(node, src);
+        t.split(|c| c == '{' || c == '(').next().unwrap_or("").to_string()
+    }
+
+    fn vis_of(node: &Node, src: &[u8]) -> Vis {
+        let h = head(node, src);
+        if h.contains("private") {
+            Vis::Private
+        } else if h.contains("protected") {
+            Vis::Protected
+        } else {
+            Vis::Public
+        }
+    }
+
+    fn params_text(node: &Node, src: &[u8]) -> String {
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            if matches!(
+                ch.kind(),
+                "formal_parameters" | "parameter_list" | "function_value_parameters"
+                    | "parameters" | "method_parameters"
+            ) {
+                let t = node_text(&ch, src);
+                let inner = t.trim().trim_start_matches('(').trim_end_matches(')').trim();
+                return inner.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+        }
+        String::new()
+    }
+
+    fn method_def(node: &Node, src: &[u8]) -> Option<MethodDef> {
+        let name = name_of(node, src)?;
+        if name.is_empty() {
+            return None;
+        }
+        Some(MethodDef {
+            name,
+            params: params_text(node, src),
+            return_type: String::new(),
+            visibility: vis_of(node, src),
+            is_static: head(node, src).contains("static"),
+            is_constructor: node.kind() == "constructor_declaration",
+        })
+    }
+
+    fn field_defs(node: &Node, src: &[u8]) -> Vec<FieldDef> {
+        let vis = vis_of(node, src);
+        let mut out = Vec::new();
+        if let Some(n) = node.child_by_field_name("name") {
+            out.push(FieldDef {
+                name: node_text(&n, src).to_string(),
+                type_annotation: String::new(),
+                visibility: vis,
+            });
+            return out;
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            if ch.kind() == "variable_declarator" {
+                if let Some(nm) = ch.child_by_field_name("name") {
+                    out.push(FieldDef {
+                        name: node_text(&nm, src).to_string(),
+                        type_annotation: String::new(),
+                        visibility: vis.clone(),
+                    });
+                }
+            }
+        }
+        if out.is_empty() {
+            if let Some(nm) = name_of(node, src) {
+                out.push(FieldDef { name: nm, type_annotation: String::new(), visibility: vis });
+            }
+        }
+        out
+    }
+
+    fn body_of<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+        let mut cur = node.walk();
+        let children: Vec<Node<'a>> = node.children(&mut cur).collect();
+        children.into_iter().find(|c| {
+            matches!(
+                c.kind(),
+                "class_body" | "declaration_list" | "enum_body" | "interface_body"
+                    | "enum_class_body" | "protocol_body" | "body_statement"
+            )
+        })
+    }
+
+    fn collect_members(node: &Node, src: &[u8], fields: &mut Vec<FieldDef>, methods: &mut Vec<MethodDef>) {
+        if let Some(body) = body_of(node) {
+            let mut cur = body.walk();
+            for ch in body.children(&mut cur) {
+                match ch.kind() {
+                    "method_declaration" | "constructor_declaration" | "function_declaration"
+                    | "function_definition" | "method" | "singleton_method" => {
+                        if let Some(m) = method_def(&ch, src) {
+                            methods.push(m);
+                        }
+                    }
+                    "field_declaration" | "property_declaration" | "property_definition" => {
+                        fields.extend(field_defs(&ch, src));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn type_names(node: &Node, src: &[u8], out: &mut Vec<String>) {
+        if matches!(
+            node.kind(),
+            "type_identifier" | "identifier" | "name" | "user_type" | "constant"
+                | "qualified_name" | "scoped_type_identifier" | "simple_identifier"
+        ) {
+            let t = node_text(node, src).trim();
+            if t.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                out.push(t.rsplit(|c| c == '.' || c == '\\' || c == ':').next().unwrap_or(t).to_string());
+            }
+            return;
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            type_names(&ch, src, out);
+        }
+    }
+
+    fn collect_rels(node: &Node, src: &[u8], name: &str, rels: &mut Vec<ClassRelationship>) {
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            let k = ch.kind();
+            let mut names = Vec::new();
+            if k == "superclass" || k == "base_clause" {
+                type_names(&ch, src, &mut names);
+                for p in names {
+                    rels.push(ClassRelationship::Inherits { child: name.to_string(), parent: p });
+                }
+            } else if matches!(
+                k,
+                "super_interfaces" | "class_interface_clause" | "type_inheritance_clause"
+                    | "delegation_specifier"
+            ) {
+                type_names(&ch, src, &mut names);
+                for i in names {
+                    rels.push(ClassRelationship::Implements { class: name.to_string(), interface: i });
+                }
+            }
+        }
+    }
+
+    fn walk(node: &Node, src: &[u8], classes: &mut Vec<ClassNode>, rels: &mut Vec<ClassRelationship>) {
+        if let Some(kind) = kind_of(node.kind()) {
+            if let Some(name) = name_of(node, src) {
+                if !name.is_empty() {
+                    let mut fields = Vec::new();
+                    let mut methods = Vec::new();
+                    collect_members(node, src, &mut fields, &mut methods);
+                    collect_rels(node, src, &name, rels);
+                    classes.push(ClassNode { name, kind, fields, methods });
+                }
+            }
+        }
+        let mut cur = node.walk();
+        for ch in node.children(&mut cur) {
+            walk(&ch, src, classes, rels);
+        }
+    }
+
+    pub(super) fn extract(
+        source: &str,
+        lang: Language,
+        language: &'static str,
+    ) -> Result<ClassGraph, String> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&lang)
+            .map_err(|e| format!("tree-sitter {language} init failed: {e}"))?;
+        let tree = parser
+            .parse(source.as_bytes(), None)
+            .ok_or_else(|| "tree-sitter parse returned None".to_string())?;
+        let src = source.as_bytes();
+        let mut classes = Vec::new();
+        let mut relationships = Vec::new();
+        walk(&tree.root_node(), src, &mut classes, &mut relationships);
+        Ok(ClassGraph { classes, relationships, language })
+    }
 }
 
 // ---------------------------------------------------------------------------
