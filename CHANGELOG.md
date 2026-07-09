@@ -4,6 +4,27 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-09
+
+### Fixed — graph build was O(N²) and hung on large C/C++ trees
+
+`rebuild_graph` resolved each file's imports by scanning every other file, so
+construction was O(N² × includes). On a 14k-file / 1.3M-LOC C++ repo (Godot) the
+initial build ran for minutes and effectively hung. Import resolution now uses a
+one-shot `ImportIndex` (basename / stem / segment / symbol maps) built once per
+rebuild, making it O(N + edges). The resolver also prefers a **path-suffix** match
+over a bare filename-stem match, so a project-root-relative `#include
+"core/object/object.h"` resolves to `object.h` (not `object.cpp`). Combined
+effect on Godot: `get_dependents` of `object.h` went from 1 to 66 (ground truth:
+63 includers), and cold start went from >2 min (hang) to ~12 s.
+
+### Fixed — betweenness centrality was O(V²) on large graphs
+
+Bridge analysis re-initialized per-node maps for every source, ~100 s at 14k
+nodes. For graphs above 1500 nodes it now estimates betweenness from a strided
+sample of source nodes and scales the result (exact below the threshold). Cold
+start on Godot dropped from ~104 s to ~12 s.
+
 ## [1.2.0] - 2026-07-09
 
 ### Fixed — MCP server was unusable with spec-compliant clients
