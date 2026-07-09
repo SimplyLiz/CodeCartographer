@@ -4,6 +4,53 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-09
+
+### Fixed — MCP server was unusable with spec-compliant clients
+
+`codecartographer serve` emitted `input_schema` (not `inputSchema`), content
+blocks without a `type` field, and `is_error` (not `isError`). Spec-compliant
+clients such as Claude Code rejected `tools/list` ("tools fetch failed"). The
+`McpTool`, `McpContent`, and `McpToolResult` serializations now match the MCP
+spec, so the server connects and its tools are callable.
+
+### Fixed — natural-language retrieval returned the same files for every query
+
+`query_context` passed the whole question to a raw-regex line search, which
+almost never matched, so personalized PageRank had no anchor and fell back to
+the graph's most central files regardless of the question. It now ranks via
+`bm25_search` and biases toward code over docs. The tokenizer splits
+camelCase/snake_case identifiers, so `churn` matches `git_churn` and `user`
+matches `getUserById`. `ranked_skeleton` now places focus files first so a
+relevant but low-centrality file survives the token-budget cut. `answer_question`
+compared repo-relative BM25 paths against absolute `MappedFile.path` (dropping
+every BM25 candidate); it now normalizes paths and seeds symbol-name matches.
+
+### Added — `serve` incremental refresh (live sessions stay fresh)
+
+A persistent `serve` scanned once at startup and went stale until restart.
+`refresh_if_stale` runs a debounced (750 ms), mtime-based incremental sync on
+each tool call: only changed files are re-parsed, deleted files are dropped, and
+the graph cache is invalidated when anything changes. Uncommitted working-tree
+edits are picked up mid-session; a burst of calls triggers at most one rescan.
+
+### Added — `serve --preset=core`
+
+Exposes a 12-tool discovery subset (also via `CARTOGRAPHER_PRESET`); the full
+41-tool surface remains the default. Keeps the tool surface small so a model
+picks the right tool.
+
+### Changed — tool contract and output
+
+- `target` is now a universal, backward-compatible alias for each tool's primary
+  identifier (`module_id` / `file` / `focus` / `symbol` / `doc_path`).
+- `reach_symbol` returns the candidate list on an ambiguous name instead of an
+  error, and is documented as the primary symbol-discovery entry point.
+- Response paths are repo-relative (were absolute), JSON is compact, and the
+  `ranked_skeleton` budget now accounts for the serialized envelope (a 6000-token
+  budget returns ≈6k, was ≈8.6k).
+- The project graph is cached within a session instead of recomputed per call.
+
 ### Fixed — `get_evolution` unusable on fresh repos
 
 Each FFI call previously appended one snapshot unconditionally, so three
