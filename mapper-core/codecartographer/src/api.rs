@@ -255,7 +255,16 @@ pub struct ApiState {
     pub project_graph: Mutex<Option<ProjectGraphResponse>>,
     #[allow(dead_code)]
     pub compression_level: Mutex<CompressionLevel>,
+    /// Per-file modification time (repo-relative path → mtime secs), the baseline for
+    /// incremental refresh. Empty until primed on the first refresh.
+    file_mtimes: Mutex<HashMap<String, u64>>,
+    /// Timestamp of the last incremental refresh, used to debounce filesystem scans.
+    last_refresh: Mutex<Option<std::time::Instant>>,
 }
+
+/// Minimum interval between incremental filesystem re-scans. Bounds the cost of keeping
+/// a long-lived `serve` session fresh: a burst of tool calls triggers at most one scan.
+const REFRESH_DEBOUNCE_MS: u128 = 750;
 
 impl ApiState {
     pub fn new(root_path: std::path::PathBuf) -> Self {
@@ -264,7 +273,109 @@ impl ApiState {
             mapped_files: Mutex::new(HashMap::new()),
             project_graph: Mutex::new(None),
             compression_level: Mutex::new(CompressionLevel::Standard),
+            file_mtimes: Mutex::new(HashMap::new()),
+            last_refresh: Mutex::new(None),
         }
+    }
+
+    /// Keep a long-lived `serve` session fresh without a full rescan. Debounced; on each
+    /// call it stats the working tree, re-parses only files whose mtime advanced (and drops
+    /// deleted ones), patches `mapped_files`, and invalidates the graph cache when anything
+    /// changed. This is what makes the persistent MCP model strictly better than a one-shot
+    /// CLI: startup cost is paid once, yet edits (including uncommitted ones) are picked up.
+    pub fn refresh_if_stale(&self) {
+        // Debounce: skip if we scanned within the window. Also claims the slot up front so
+        // concurrent callers don't all scan.
+        {
+            let mut last = match self.last_refresh.lock() {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            if let Some(t) = *last {
+                if t.elapsed().as_millis() < REFRESH_DEBOUNCE_MS {
+                    return;
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+
+        // Enumerate current files with the SAME filter as the initial scan (includes docs,
+        // excludes noise) so the refresh set matches what mapped_files holds.
+        let scan = match crate::scanner::scan_files_with_noise_tracking(&self.root_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let current: Vec<(std::path::PathBuf, String, u64)> = scan
+            .files
+            .into_iter()
+            .filter(|p| !crate::scanner::is_ignored_path(p))
+            .filter_map(|p| {
+                let mtime = std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                let rel = p
+                    .strip_prefix(&self.root_path)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some((p, rel, mtime))
+            })
+            .collect();
+
+        let mut mtimes = match self.file_mtimes.lock() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        // First run: prime the baseline without re-parsing — mapped_files is already current
+        // from the startup scan.
+        if mtimes.is_empty() {
+            for (_, rel, mt) in &current {
+                mtimes.insert(rel.clone(), *mt);
+            }
+            return;
+        }
+
+        let current_set: std::collections::HashSet<&str> =
+            current.iter().map(|(_, r, _)| r.as_str()).collect();
+        let dirty: Vec<&(std::path::PathBuf, String, u64)> = current
+            .iter()
+            .filter(|(_, rel, mt)| !matches!(mtimes.get(rel), Some(prev) if prev >= mt))
+            .collect();
+        let deleted: Vec<String> = mtimes
+            .keys()
+            .filter(|k| !current_set.contains(k.as_str()))
+            .cloned()
+            .collect();
+
+        if dirty.is_empty() && deleted.is_empty() {
+            return;
+        }
+
+        {
+            let mut files = match self.mapped_files.lock() {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            for (p, rel, mt) in &dirty {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    let mapped = crate::mapper::extract_skeleton(p, &content);
+                    files.insert(rel.clone(), mapped);
+                    mtimes.insert(rel.clone(), *mt);
+                }
+            }
+            for rel in &deleted {
+                files.remove(rel);
+                mtimes.remove(rel);
+            }
+        }
+        drop(mtimes);
+
+        // Next rebuild_graph recomputes from the patched files.
+        self.invalidate_graph();
     }
 
     /// Convert an absolute file path (as stored in `MappedFile.path`) to a repo-relative
@@ -453,10 +564,8 @@ impl ApiState {
         }
     }
 
-    /// Drop the cached project graph so the next `rebuild_graph` recomputes it. Call
-    /// after any mutation of `mapped_files`. (No runtime path mutates it today — the scan
-    /// happens once at startup — but this keeps the cache correct if that changes.)
-    #[allow(dead_code)]
+    /// Drop the cached project graph so the next `rebuild_graph` recomputes it. Called by
+    /// `refresh_if_stale` whenever the working tree changed under a live session.
     pub(crate) fn invalidate_graph(&self) {
         if let Ok(mut g) = self.project_graph.lock() {
             *g = None;

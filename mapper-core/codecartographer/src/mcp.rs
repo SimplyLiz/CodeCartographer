@@ -1340,6 +1340,10 @@ impl McpServer {
     }
 
     pub fn call_tool(&self, mut call: McpToolCall) -> Result<McpToolResult, String> {
+        // Keep the session fresh: pick up edits/deletes since the last call (debounced,
+        // incremental — only changed files are re-parsed). No-op within the debounce window.
+        self.api_state.refresh_if_stale();
+
         // Enforce preset filtering: a tool hidden from tools/list is not callable either.
         if let Some(enabled) = &self.enabled {
             if !enabled.contains(&call.name) {

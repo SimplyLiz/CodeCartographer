@@ -4065,6 +4065,8 @@ fn mcp_serve_mode(root: &Path, preset: Option<&str>) -> Result<()> {
 
     // Pre-populate graph so dependency tools work from first call
     state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
+    // Prime the mtime baseline so the first tool call can already detect changes.
+    state.refresh_if_stale();
 
     let server = McpServer::with_preset(state, preset);
     server.serve();
