@@ -2586,22 +2586,22 @@ impl McpServer {
 
                 let mut report = crate::token_metrics::analyze(&content, &opts);
 
-                // Populate NYX.md [commands] preset names
-                let nyx = crate::token_metrics::parse_nyx_commands(&self.api_state.root_path);
-                if !nyx.is_empty() {
-                    let preset_names: Vec<String> = nyx.into_keys().collect();
-                    report.nyx_commands = Some(preset_names);
+                // Populate CARTOGRAPHER.md [commands] preset names
+                let cmds = crate::token_metrics::parse_cartographer_commands(&self.api_state.root_path);
+                if !cmds.is_empty() {
+                    let preset_names: Vec<String> = cmds.into_keys().collect();
+                    report.commands = Some(preset_names);
                 }
 
                 // Warn if any preset command references a file in a detected cycle
-                if let Some(ref preset_names_ref) = report.nyx_commands.clone() {
+                if let Some(ref preset_names_ref) = report.commands.clone() {
                     if let Ok(graph) = self.api_state.rebuild_graph() {
                         let cycle_files: std::collections::HashSet<String> = graph.cycles.iter()
                             .flat_map(|c| c.nodes.iter().cloned())
                             .collect();
-                        let nyx_map = crate::token_metrics::parse_nyx_commands(&self.api_state.root_path);
+                        let cmd_map = crate::token_metrics::parse_cartographer_commands(&self.api_state.root_path);
                         for preset_name in preset_names_ref {
-                            if let Some(cmd) = nyx_map.get(preset_name) {
+                            if let Some(cmd) = cmd_map.get(preset_name) {
                                 let references_cycle = cycle_files.iter().any(|f| cmd.contains(f.as_str()));
                                 if references_cycle {
                                     report.warnings.push(format!(

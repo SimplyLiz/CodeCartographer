@@ -4,6 +4,14 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-07-09
+
+### Changed — `context_health` project preset file
+
+`context_health` reads an optional `CARTOGRAPHER.md` at the project root for its
+`[commands]` section and surfaces the preset names in the health report under the
+`commands` field. Helper: `parse_cartographer_commands`.
+
 ## [1.3.2] - 2026-07-09
 
 ### Removed — the two MCP resources (`project-graph`, `module-index`)
@@ -703,7 +711,7 @@ where a single file can exceed 6000 lines with complex state-machine dispatch.
 
 ## [2.4.2] - 2026-04-11
 
-### Added — `watch_graph` MCP tool + NYX.md preset awareness
+### Added — `watch_graph` MCP tool + CARTOGRAPHER.md preset awareness
 
 **`src/mcp.rs`** — `watch_graph` tool (#30):
 - Watches a directory recursively for source file changes (`.rs`, `.go`, `.py`, `.ts`, `.js`, `.dart`) using the `notify` crate
@@ -711,14 +719,14 @@ where a single file can exceed 6000 lines with complex state-machine dispatch.
 - `kind` values: `file_reindexed` | `graph_updated`
 - `timeout_secs` argument (default 30, max 300); returns event count summary on completion
 
-**`src/mcp.rs` + `src/token_metrics.rs`** — NYX.md `[commands]` preset integration:
-- `context_health` now reads the `[commands]` section from `NYX.md` at the project root
-- Preset names are included in the health report as `nyx_commands: [...]`
+**`src/mcp.rs` + `src/token_metrics.rs`** — CARTOGRAPHER.md `[commands]` preset integration:
+- `context_health` now reads the `[commands]` section from `CARTOGRAPHER.md` at the project root
+- Preset names are included in the health report as `commands: [...]`
 - Warns if any preset command string references a file that participates in a detected dependency cycle
 
 **`src/token_metrics.rs`**:
-- `ContextHealthReport.nyx_commands: Option<Vec<String>>` field
-- `parse_nyx_commands(root) -> HashMap<String, String>` — parses `[commands]` key=value pairs from `NYX.md`
+- `ContextHealthReport.commands: Option<Vec<String>>` field
+- `parse_cartographer_commands(root) -> HashMap<String, String>` — parses `[commands]` key=value pairs from `CARTOGRAPHER.md`
 
 ---
 

@@ -150,8 +150,8 @@ pub struct ContextHealthReport {
     pub warnings:        Vec<String>,
     pub recommendations: Vec<String>,
 
-    // NYX.md [commands] preset names (populated when root path is known)
-    pub nyx_commands: Option<Vec<String>>,
+    // CARTOGRAPHER.md [commands] preset names (populated when root path is known)
+    pub commands: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -422,19 +422,19 @@ pub fn analyze(content: &str, opts: &HealthOpts) -> ContextHealthReport {
         metrics:         m,
         warnings,
         recommendations,
-        nyx_commands:    None,
+        commands:        None,
     }
 }
 
-/// Parse the `[commands]` section from `NYX.md` at `root/NYX.md`.
+/// Parse the `[commands]` section from `CARTOGRAPHER.md` at `root/CARTOGRAPHER.md`.
 ///
 /// Scans for a `[commands]` section header, then reads `key = "value"` lines
 /// until the next `[section]` header or EOF. Returns a map of preset name → command string.
 #[allow(dead_code)]
-pub fn parse_nyx_commands(root: &std::path::Path) -> std::collections::HashMap<String, String> {
+pub fn parse_cartographer_commands(root: &std::path::Path) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let nyx_path = root.join("NYX.md");
-    let text = match std::fs::read_to_string(&nyx_path) {
+    let path = root.join("CARTOGRAPHER.md");
+    let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => return map,
     };
