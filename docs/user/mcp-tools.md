@@ -34,6 +34,41 @@ To point the server at a specific project directory:
 }
 ```
 
+> **Requires v1.2.0+ for MCP-spec-compliant clients.** Earlier builds emitted
+> `input_schema`/`is_error` and untyped content blocks, which spec-compliant clients
+> (e.g. Claude Code) reject with "tools fetch failed". 1.2.0 emits `inputSchema`,
+> `isError`, and `type`-tagged content.
+
+### Lean toolset: `--preset=core`
+
+The full server exposes 40+ tools. On large or unfamiliar codebases a smaller surface
+helps the model pick the right tool. `--preset=core` exposes the 12 highest-value
+discovery tools — `reach_symbol`, `get_dependents`, `get_blast_radius`, `skeleton_map`,
+`ranked_skeleton`, `focused_skeleton`, `search_content`, `query_context`, `git_cochange`,
+`semidiff`, `get_health`, `simulate_change`:
+
+```json
+{ "command": "codecartographer", "args": ["serve", "--preset=core"] }
+```
+
+The `CARTOGRAPHER_PRESET=core` environment variable does the same. Omit both for the full
+toolset (the default).
+
+### Argument convention: `target`
+
+Every tool that takes a file, module, or symbol accepts a canonical **`target`** argument
+(a file path, module id, or symbol name). The tool's original argument name
+(`module_id` / `file` / `focus` / `symbol` / `doc_path`) still works as an alias, so you
+never have to remember which tool uses which name. Prefer `target`.
+
+### Staying fresh
+
+`serve` is a long-lived process: it scans and builds the graph once at startup, then keeps
+everything in memory. It also **refreshes incrementally** — on each tool call (debounced)
+it re-parses only files whose modification time changed and drops deleted ones, so edits
+(including uncommitted working-tree changes) are reflected mid-session without a restart or
+a full rescan. A burst of calls triggers at most one rescan.
+
 ## MCP resources
 
 In addition to tools, the server exposes two readable resources:
@@ -52,9 +87,63 @@ In addition to tools, the server exposes two readable resources:
 
 ---
 
-## Semantic traversal tools (experimental)
+## Working with large codebases & C/C++
 
-These tools provide AI-optimized context at 1–3% of the token cost of skeleton tools. They trade breadth for precision: instead of the full project skeleton, they return exactly the context needed for a specific symbol or question.
+CodeCartographer has been exercised on repositories up to ~14k files / ~1.3M LOC of C++
+(the Godot engine). It works well at that scale from v1.2.1 on, but the effective workflow
+is different from a small project, and some tools are much stronger than others on C/C++.
+
+### Recommended workflow (token-cheap discovery)
+
+Do **not** try to load the whole map — the full skeleton of a 14k-file repo is millions of
+tokens. Instead, pull targeted slices:
+
+1. **`reach_symbol`** with a bare symbol name → definition, all callers (`file:line`), and
+   callees. ~90–350 tokens; the primary "how does X work / what calls this" tool.
+2. **`get_dependents`** / **`get_blast_radius`** on a file → "what breaks if I change this".
+3. **`focused_skeleton`** / **`ranked_skeleton`** with a `target` and a `budget` → the
+   neighbourhood around a file, capped to a token budget.
+4. **`search_content`** → precise, structured ripgrep across the tree.
+
+Pass a `budget` to the skeleton/reach tools: a hot symbol or a heavily-included header can
+otherwise return 10k+ tokens.
+
+### What works well on C/C++
+
+- **Symbol- and text-level tools** (`reach_symbol`, `search_content`, `get_symbol_context`)
+  — language-agnostic, deterministic, cheap, and accurate. These are the core value.
+- **The `#include` dependency graph** (`get_dependents`, `get_blast_radius`) is resolved by
+  a path-suffix match, so project-root-relative includes like
+  `#include "core/object/object.h"` resolve to the right header.
+
+### Known limitations on C/C++
+
+- **`#include` resolution is a heuristic, not a preprocessor.** It does not follow `-I`
+  include paths, macros, `#ifdef` conditional compilation, or generated headers. Treat
+  blast-radius as a navigation aid, not safety-critical proof.
+- **The natural-language tools (`query_context`, `answer_question`) are weaker on C++.**
+  BM25 over macro/operator-heavy C++ is noisy and rarely matches natural-language phrasing.
+  Prefer `reach_symbol`/`search_content` for C++; keep the NL tools for higher-level languages.
+- **Templates and macro-generated APIs parse imperfectly** — tree-sitter handles most
+  declarations, but heavy metaprogramming will have gaps in extracted signatures.
+
+### Scale characteristics
+
+| Metric | ~14k files / 1.3M LOC (Godot) |
+|--------|-------------------------------|
+| Cold start (first session) | ~12 s (≈7 s with the on-disk cache warm) |
+| Per-call latency (live session) | < 0.5 s |
+| Skeleton cache on disk | ~145 MB |
+
+Cold start is a one-time, per-session cost (the graph is then held in memory and refreshed
+incrementally). Startup scales with file count; benchmark it on your actual repo before an
+engagement, and use `--preset=core` to keep the tool surface focused.
+
+---
+
+## Semantic traversal tools
+
+These tools provide AI-optimized context at 1–3% of the token cost of skeleton tools. They trade breadth for precision: instead of the full project skeleton, they return exactly the context needed for a specific symbol or question. **`reach_symbol` is the recommended entry point for symbol discovery** — it needs only a name, no file.
 
 ### `reach_symbol`
 
@@ -74,7 +163,7 @@ Parameters:
 
 **Token cost:** 135–500 tokens per symbol vs ~18,000 for `ranked_skeleton` on the same files.
 
-**Disambiguation:** if the symbol name appears in multiple files, the tool returns an error listing all candidates — pass `file` to select one.
+**Disambiguation:** if the symbol name appears in multiple files, the tool returns the candidate list (each with `file:line`) as a normal result — re-run with `file` (or `target`) set to one of them. This is common in C++, where overrides and overloads share a name across files.
 
 ### `answer_question`
 

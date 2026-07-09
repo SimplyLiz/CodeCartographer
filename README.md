@@ -242,9 +242,11 @@ erDiagram
     FileCallGraph ||--o{ FunctionInfo : "has"
 ```
 
-## Semantic Traversal (experimental)
+## Semantic Traversal
 
 Two commands for AI-optimised, symbol-level context — much tighter than a full skeleton.
+`reach` is the recommended starting point for symbol discovery: give it a bare name and it
+returns the definition, callers, and callees.
 
 | Command | Description |
 |---------|-------------|
@@ -297,10 +299,17 @@ Callee resolution uses AST call graphs for Rust, Python, Go, C, and C++; other l
 ## MCP Server
 
 ```bash
-codecartographer serve   # stdio JSON-RPC 2.0 — connects to Claude Code, Cursor, etc.
+codecartographer serve                 # full toolset — stdio JSON-RPC 2.0 (Claude Code, Cursor, …)
+codecartographer serve --preset=core   # lean 12-tool discovery surface (also CARTOGRAPHER_PRESET=core)
 ```
 
-Exposes 40 tools over Model Context Protocol. Skeleton tools:
+Exposes 40+ tools over Model Context Protocol. The server is long-lived: it scans once at
+startup, then **refreshes incrementally** so mid-session edits (including uncommitted ones)
+are reflected without a restart. Every tool that takes a file/module/symbol accepts a
+canonical **`target`** argument (the tool's original argument name still works). For huge
+repos and C/C++ specifics, see [Working with large codebases & C/C++](docs/user/mcp-tools.md#working-with-large-codebases--cc).
+
+Skeleton tools:
 
 | Tool | Description |
 |------|-------------|

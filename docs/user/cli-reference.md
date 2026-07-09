@@ -495,10 +495,16 @@ codecartographer answer "how does the call graph work?" --then 2
 ### serve
 
 ```bash
-codecartographer serve [PATH]
+codecartographer serve [PATH] [--preset=core]
 ```
 
-Start the MCP server on stdio (JSON-RPC 2.0). See [MCP Tools](mcp-tools.md).
+Start the MCP server on stdio (JSON-RPC 2.0). Long-lived: scans once at startup and refreshes
+incrementally as files change. See [MCP Tools](mcp-tools.md).
+
+| Flag | Description |
+|------|-------------|
+| `PATH` | Project directory to serve (defaults to the current directory). |
+| `--preset=core` | Expose only the 12 highest-value discovery tools instead of the full set. Also settable via `CARTOGRAPHER_PRESET=core`. |
 
 ### config
 

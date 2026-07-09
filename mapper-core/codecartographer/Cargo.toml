@@ -1,6 +1,6 @@
 [package]
 name = "CodeCartographer"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "CodeCartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]

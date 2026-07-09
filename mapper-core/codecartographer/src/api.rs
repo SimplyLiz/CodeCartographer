@@ -587,6 +587,10 @@ impl ApiState {
 
         let files = self.mapped_files.lock().map_err(|e| e.to_string())?;
 
+        // Build the import-resolution index ONCE for the whole rebuild (O(N)); each import
+        // then resolves via hash lookups instead of scanning every file (was O(N²)).
+        let import_index = ImportIndex::build(&files);
+
         let mut nodes: Vec<GraphNode> = Vec::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
         let mut languages: HashMap<String, usize> = HashMap::new();
@@ -631,10 +635,9 @@ impl ApiState {
             };
 
             for import in &file.imports {
-                // `rebuild_graph` already holds the `mapped_files` lock; call the
-                // map-taking helper directly. Calling `resolve_import_target` here
-                // would re-enter the non-reentrant Mutex and deadlock.
-                if let Some(target) = Self::resolve_import_target_in(&files, import, module_id) {
+                // Resolve against the prebuilt index (O(1) per import) — building it once
+                // is what makes graph construction O(N) instead of O(N²) on large trees.
+                if let Some(target) = import_index.resolve(import, module_id) {
                     // Reject cross-type edges: a source file importing "json" must not
                     // resolve to a fixture like testdata/review/json.json (doc), and a
                     // doc file like CHANGELOG.md must not appear as a dependent of a
@@ -1211,6 +1214,167 @@ fn derive_module_stem(module_path: &str) -> String {
         .to_string()
 }
 
+/// Precomputed lookup tables for import resolution. Built once per `rebuild_graph`
+/// so resolving every file's imports is O(N + edges) instead of O(N²): the previous
+/// resolver scanned every file for every import, which made large C/C++ trees
+/// (project-root-relative `#include`s across thousands of files) effectively hang.
+struct ImportIndex<'a> {
+    /// Every module_id present, for exact-path matches.
+    ids: std::collections::HashSet<&'a str>,
+    /// file basename WITH extension ("object.h") → module_ids.
+    by_basename: HashMap<String, Vec<&'a str>>,
+    /// file basename stem, no extension ("object") → module_ids.
+    by_stem: HashMap<String, Vec<&'a str>>,
+    /// lowercased path-component stem → module_ids (loose segment fallback).
+    by_segment: HashMap<String, Vec<&'a str>>,
+    /// public symbol name → module_ids that define it (symbol-hint fallback).
+    by_symbol: HashMap<String, Vec<&'a str>>,
+}
+
+impl<'a> ImportIndex<'a> {
+    fn build(files: &'a HashMap<String, MappedFile>) -> Self {
+        let mut ids = std::collections::HashSet::new();
+        let mut by_basename: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut by_stem: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut by_segment: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut by_symbol: HashMap<String, Vec<&'a str>> = HashMap::new();
+
+        for (module_id, file) in files.iter() {
+            let id = module_id.as_str();
+            ids.insert(id);
+            let p = Path::new(&file.path);
+            if let Some(bn) = p.file_name().and_then(|s| s.to_str()) {
+                by_basename.entry(bn.to_string()).or_default().push(id);
+            }
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                by_stem.entry(stem.to_string()).or_default().push(id);
+            }
+            for seg in file.path.split('/') {
+                let seg_stem = Path::new(seg)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(seg);
+                if seg_stem.len() >= 3 {
+                    by_segment
+                        .entry(seg_stem.to_lowercase())
+                        .or_default()
+                        .push(id);
+                }
+            }
+            for sig in &file.signatures {
+                if let Some(name) = sig.symbol_name.as_deref() {
+                    if name.len() >= 4 {
+                        by_symbol.entry(name.to_string()).or_default().push(id);
+                    }
+                }
+            }
+        }
+        Self { ids, by_basename, by_stem, by_segment, by_symbol }
+    }
+
+    /// Pick the candidate whose module_id best matches the import path, preferring a
+    /// path-suffix relationship ("core/object/object.h" → "object/object.h") and, among
+    /// ties, the shortest (closest) path. Deterministic — never HashMap iteration order.
+    fn best_suffix(cands: &[&'a str], norm: &str, source: &str) -> Option<String> {
+        let mut best: Option<(usize, &'a str)> = None;
+        for &m in cands {
+            if m == source {
+                continue;
+            }
+            // How strongly `m` matches `norm`: exact, or one is a path-suffix of the other.
+            let score = if m == norm {
+                norm.len() + 1
+            } else if norm.ends_with(&format!("/{m}")) {
+                m.len()
+            } else if m.ends_with(&format!("/{norm}")) {
+                norm.len()
+            } else {
+                continue;
+            };
+            match best {
+                Some((bs, bm)) if bs > score || (bs == score && bm.len() <= m.len()) => {}
+                _ => best = Some((score, m)),
+            }
+        }
+        best.map(|(_, m)| m.to_string())
+    }
+
+    fn pick_deterministic(cands: &[&'a str], source: &str) -> Option<String> {
+        cands
+            .iter()
+            .filter(|m| **m != source)
+            .min_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)))
+            .map(|m| m.to_string())
+    }
+
+    fn resolve(&self, import: &str, source: &str) -> Option<String> {
+        let (module_path, symbol_hint) = parse_import_parts(import);
+        let norm = module_path
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        let has_ext = Path::new(&norm).extension().is_some();
+        let basename = Path::new(&norm)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+        let stem = derive_module_stem(&module_path);
+
+        // 1. Exact module_id match.
+        if norm != source && self.ids.contains(norm.as_str()) {
+            return Some(norm);
+        }
+
+        // 2. Extension-bearing import (C/C++ #include, JS/TS with ext): match by basename,
+        //    then disambiguate by path suffix. This is what keeps `object.h` from resolving
+        //    to `object.cpp` and fixes systematically-misrouted include edges.
+        if let Some(bn) = &basename {
+            if let Some(cands) = self.by_basename.get(bn) {
+                if let Some(hit) = Self::best_suffix(cands, &norm, source) {
+                    return Some(hit);
+                }
+                if has_ext {
+                    let non_self: Vec<&str> = cands.iter().copied().filter(|m| *m != source).collect();
+                    if non_self.len() == 1 {
+                        return Some(non_self[0].to_string());
+                    }
+                }
+            }
+        }
+
+        // 3. Extensionless import (Rust `mod`, Python `import`, Go package): match by stem.
+        if !has_ext {
+            if let Some(cands) = self.by_stem.get(&stem) {
+                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                    return Some(hit);
+                }
+            }
+        }
+
+        // 4. Loose segment fallback: stem appears as a path component.
+        if stem.len() >= 3 {
+            if let Some(cands) = self.by_segment.get(&stem.to_lowercase()) {
+                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                    return Some(hit);
+                }
+            }
+        }
+
+        // 5. Symbol-hint fallback: a file that defines the imported symbol name.
+        if let Some(sym) = &symbol_hint {
+            if sym.len() >= 4 {
+                if let Some(cands) = self.by_symbol.get(sym) {
+                    if let Some(hit) = Self::pick_deterministic(cands, source) {
+                        return Some(hit);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
 pub fn is_entry_point_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     matches!(
@@ -1389,7 +1553,23 @@ impl ApiState {
             betweenness.insert(*node, 0.0);
         }
 
-        for src in &nodes {
+        // Exact Brandes is O(V·E) but re-inits O(V) maps per source → O(V²) in practice,
+        // which is ~100s at 14k nodes. For large graphs, estimate from a strided sample of
+        // source nodes and scale up (standard betweenness approximation); exact below the
+        // threshold so small projects and tests are unaffected.
+        const BC_EXACT_MAX_NODES: usize = 1500;
+        const BC_SAMPLE_SOURCES: usize = 800;
+        let n_nodes = nodes.len();
+        let (sources, scale): (Vec<&str>, f64) = if n_nodes <= BC_EXACT_MAX_NODES {
+            (nodes.clone(), 1.0)
+        } else {
+            let stride = n_nodes / BC_SAMPLE_SOURCES;
+            let sampled: Vec<&str> = nodes.iter().step_by(stride.max(1)).copied().collect();
+            let scale = n_nodes as f64 / sampled.len() as f64;
+            (sampled, scale)
+        };
+
+        for src in &sources {
             let mut stack: Vec<&str> = Vec::new();
             let mut predecessors: HashMap<&str, Vec<&str>> = HashMap::new();
             let mut sigma: HashMap<&str, f64> = HashMap::new();
@@ -1452,6 +1632,13 @@ impl ApiState {
             }
         }
 
+        // Scale sampled sums up to full-graph estimates, then normalize as usual.
+        if scale != 1.0 {
+            for (_, bc) in betweenness.iter_mut() {
+                *bc *= scale;
+            }
+        }
+
         let n = nodes.len();
         if n > 2 {
             let divisor = ((n - 1) * (n - 2)) as f64;
@@ -1466,80 +1653,22 @@ impl ApiState {
     #[allow(dead_code)]
     fn resolve_import_target(&self, import: &str, source: &str) -> Option<String> {
         let files = self.mapped_files.lock().ok()?;
-        Self::resolve_import_target_in(&files, import, source)
+        let index = ImportIndex::build(&files);
+        index.resolve(import, source)
     }
 
     // Same lookup as `resolve_import_target` but takes the already-locked map.
     // Used by `rebuild_graph` (which holds the lock for the whole rebuild) to
     // avoid re-entering the non-reentrant Mutex and deadlocking.
+    //
+    // For a single lookup this builds a throwaway index; `rebuild_graph` builds one
+    // `ImportIndex` for the whole graph so resolution is O(N) total, not O(N²).
     fn resolve_import_target_in(
         files: &HashMap<String, MappedFile>,
         import: &str,
         source: &str,
     ) -> Option<String> {
-        let (module_path, symbol_hint) = parse_import_parts(import);
-        let stem = derive_module_stem(&module_path);
-
-        let mut segment_match: Option<String> = None;
-        let mut symbol_match: Option<String> = None;
-
-        for (module_id, file) in files.iter() {
-            if module_id == source {
-                continue;
-            }
-
-            let file_stem = Path::new(&file.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-
-            // 1. Exact stem or full path match
-            let norm_path = module_path.trim_start_matches("./");
-            if file_stem == stem
-                || file.path.trim_start_matches("./") == norm_path
-                || file_stem == norm_path
-            {
-                return Some(module_id.clone());
-            }
-
-            // 1b. Path-suffix match for relative doc links ("api/search.md" → "docs/api/search.md").
-            // Checked before the loose segment match to return an unambiguous result.
-            if norm_path.contains('/') || norm_path.contains('.') {
-                let suffix = format!("/{}", norm_path.trim_start_matches('/'));
-                if file.path.ends_with(&suffix) {
-                    return Some(module_id.clone());
-                }
-            }
-
-            // 2. Path segment: file path contains the module stem as a component
-            if segment_match.is_none() && stem.len() >= 3 {
-                let file_lower = file.path.to_lowercase();
-                let stem_lower = stem.to_lowercase();
-                if file_lower
-                    .split('/')
-                    .any(|seg| Path::new(seg).file_stem().and_then(|s| s.to_str()).unwrap_or(seg) == stem_lower)
-                {
-                    segment_match = Some(module_id.clone());
-                }
-            }
-
-            // 3. Symbol-level: a file that defines the imported symbol name
-            if symbol_match.is_none() {
-                if let Some(sym) = &symbol_hint {
-                    if sym.len() >= 4 {
-                        let defines = file.signatures.iter().any(|sig| {
-                            sig.symbol_name.as_deref() == Some(sym.as_str())
-                        });
-                        if defines {
-                            symbol_match = Some(module_id.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Prefer path-segment match (fewer false positives) over symbol match
-        segment_match.or(symbol_match)
+        ImportIndex::build(files).resolve(import, source)
     }
 
     #[allow(dead_code)]
