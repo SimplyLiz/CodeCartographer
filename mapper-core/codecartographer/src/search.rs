@@ -378,16 +378,59 @@ pub fn bm25_search(root: &Path, query: &str, opts: &BM25Options) -> Result<BM25R
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    // Split on non-alphanumeric runs; lowercase; drop single-char tokens and stop words
+    // Split on non-alphanumeric runs (this already splits snake_case on `_`), then
+    // further split each token on camelCase / PascalCase / letter-digit boundaries.
+    // Emit BOTH the whole token and its subwords so a query term like `churn` matches
+    // `git_churn` and `user` matches `getUserById`. Lowercased; drop 1-char + stop words.
     const STOP: &[&str] = &[
         "the","a","an","is","in","on","at","to","of","and","or","for",
         "with","this","that","it","be","as","by","from","are","was","were",
     ];
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.len() > 1)
-        .map(|s| s.to_lowercase())
-        .filter(|s| !STOP.contains(&s.as_str()))
-        .collect()
+    let mut out = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() <= 1 {
+            continue;
+        }
+        let whole = raw.to_lowercase();
+        let keep = |s: &str| s.len() > 1 && !STOP.contains(&s);
+        if keep(&whole) {
+            out.push(whole.clone());
+        }
+        for sub in split_identifier(raw) {
+            if sub != whole && keep(&sub) {
+                out.push(sub);
+            }
+        }
+    }
+    out
+}
+
+/// Split a single identifier token into lowercased subwords on camelCase,
+/// PascalCase, acronym, and letter↔digit boundaries.
+/// `getUserById` → [get, user, by, id]; `HTMLParser` → [html, parser].
+pub(crate) fn split_identifier(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && !cur.is_empty() {
+            let prev = chars[i - 1];
+            let boundary = (prev.is_lowercase() && c.is_uppercase())            // aB
+                || (prev.is_ascii_digit() != c.is_ascii_digit())               // a1 / 1a
+                || (prev.is_uppercase()
+                    && c.is_uppercase()
+                    && chars.get(i + 1).is_some_and(|n| n.is_lowercase()));     // HTMLParser → HTML|Parser
+            if boundary {
+                parts.push(cur.to_lowercase());
+                cur.clear();
+            }
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        parts.push(cur.to_lowercase());
+    }
+    parts
 }
 
 fn enumerate_files_bm25(root: &Path, opts: &BM25Options) -> Result<Vec<std::path::PathBuf>, String> {

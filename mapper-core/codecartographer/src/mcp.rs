@@ -82,6 +82,7 @@ pub struct McpTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub description: String,
+    #[serde(rename = "inputSchema")]
     pub input_schema: McpInputSchema,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
@@ -190,15 +191,33 @@ pub struct McpToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// The canonical identifier argument for a tool, so `target` can serve as a universal
+/// alias for it. Returns `None` for tools that take no single file/module/symbol target.
+fn primary_key(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "get_module_context" | "get_dependencies" | "get_dependents" | "get_symbol_context"
+        | "get_semantic_impact" | "simulate_change" | "analyze_module" | "plan_refactoring" => {
+            "module_id"
+        }
+        "focused_skeleton" => "focus",
+        "reach_symbol" => "symbol",
+        "search_in_symbol" | "extract_content" | "list_key_handlers" | "map_state_machine" => "file",
+        "doc_context" => "doc_path",
+        "get_blast_radius" => "target",
+        _ => return None,
+    })
+}
+
 /// MCP Tool Call response
 #[derive(Debug, Serialize)]
 pub struct McpToolResult {
     pub content: Vec<McpContent>,
+    #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpContent {
     Text { text: String },
     #[allow(dead_code)]
@@ -214,29 +233,74 @@ impl McpContent {
 }
 
 /// MCP Server implementation
+/// The "core" preset: the highest-value discovery tools for large-codebase work.
+/// Keeps the surface small so an LLM picks the right tool. `serve --preset=core`.
+const CORE_PRESET: &[&str] = &[
+    "reach_symbol",
+    "get_dependents",
+    "get_blast_radius",
+    "skeleton_map",
+    "ranked_skeleton",
+    "focused_skeleton",
+    "search_content",
+    "query_context",
+    "git_cochange",
+    "semidiff",
+    "get_health",
+    "simulate_change",
+];
+
 pub struct McpServer {
     api_state: std::sync::Arc<ApiState>,
     tools: Vec<McpTool>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
+    /// When set, only these tool names are exposed and callable (preset filtering).
+    enabled: Option<std::collections::HashSet<String>>,
 }
 
 impl McpServer {
+    #[allow(dead_code)] // convenience constructor; used by tests and as public API
     pub fn new(api_state: std::sync::Arc<ApiState>) -> Self {
-        let tools = Self::create_tools();
+        Self::with_preset(api_state, None)
+    }
+
+    /// Build a server exposing only the named preset's tools, or all tools when `preset`
+    /// is `None`. Unknown preset names fall back to all tools (logged to stderr).
+    pub fn with_preset(api_state: std::sync::Arc<ApiState>, preset: Option<&str>) -> Self {
+        let all = Self::create_tools();
         let resources = Self::create_resources();
         let prompts = Self::create_prompts();
+
+        let (tools, enabled) = match preset.map(|p| p.trim().to_lowercase()) {
+            None => (all, None),
+            Some(p) if p.is_empty() || p == "all" || p == "full" => (all, None),
+            Some(p) if p == "core" => {
+                let set: std::collections::HashSet<String> =
+                    CORE_PRESET.iter().map(|s| s.to_string()).collect();
+                let filtered: Vec<McpTool> =
+                    all.into_iter().filter(|t| set.contains(&t.name)).collect();
+                (filtered, Some(set))
+            }
+            Some(other) => {
+                eprintln!(
+                    "cartographer: unknown preset '{other}' — exposing all tools (valid: core)"
+                );
+                (all, None)
+            }
+        };
 
         Self {
             api_state,
             tools,
             resources,
             prompts,
+            enabled,
         }
     }
 
     fn create_tools() -> Vec<McpTool> {
-        vec![
+        let mut tools = vec![
             McpTool {
                 name: "get_module_context".to_string(),
                 title: Some("Get Module Context".to_string()),
@@ -1095,14 +1159,17 @@ impl McpServer {
             McpTool {
                 name: "reach_symbol".to_string(),
                 title: Some("Reach — Semantic Graph Traversal".to_string()),
-                description: "EXPERIMENTAL. Starts from a named symbol and walks the call graph + \
-                              import graph outward, returning a compact context tree in AI-native \
-                              format. Detail level is distance-proportional: depth-0 is the root \
-                              symbol with full signature; depth-1 callers include a one-line call \
-                              context; depth-2 neighbors show signature only. Test callers are \
-                              collapsed and counted. Roughly 40% of the token cost of equivalent \
-                              JSON for the same semantic information. Language support for call graph: \
-                              Rust and Python. Other languages fall back to heuristic text search."
+                description: "START HERE for symbol discovery. Give it a bare symbol name (no file \
+                              needed) and it walks the call graph + import graph outward, returning a \
+                              compact context tree in AI-native format: the definition, all callers \
+                              with call-site context, and callees. Detail is distance-proportional: \
+                              depth-0 is the root symbol with full signature; depth-1 callers include \
+                              a one-line call context; depth-2 neighbors show signature only. If the \
+                              name is defined in several files it returns the candidate list so you \
+                              can re-run with `file` set. Test callers are collapsed and counted. \
+                              Roughly 40% of the token cost of equivalent JSON for the same semantic \
+                              information. Call-graph support: Rust and Python; other languages fall \
+                              back to heuristic text search."
                     .to_string(),
                 input_schema: {
                     let mut props = HashMap::new();
@@ -1179,7 +1246,26 @@ impl McpServer {
                 },
                 annotations: read_only!(),
             },
-        ]
+        ];
+        // Advertise `target` as the universal identifier alias on every tool that has a
+        // primary file/module/symbol arg, and relax the old arg's `required` flag so a
+        // caller can use either name. The handler maps `target` → the primary at dispatch.
+        for t in &mut tools {
+            if let Some(pk) = primary_key(&t.name) {
+                t.input_schema.properties.entry("target".to_string()).or_insert_with(|| {
+                    mcprop!(
+                        "string",
+                        "Canonical target: a file path, module id, or symbol name. The tool's \
+                         original argument name still works as an alias."
+                    )
+                });
+                // Keep `target` required only where it was already the canonical arg.
+                if pk != "target" {
+                    t.input_schema.required.retain(|k| k != pk);
+                }
+            }
+        }
+        tools
     }
 
     fn create_resources() -> Vec<McpResource> {
@@ -1253,7 +1339,35 @@ impl McpServer {
         self.prompts.clone()
     }
 
-    pub fn call_tool(&self, call: McpToolCall) -> Result<McpToolResult, String> {
+    pub fn call_tool(&self, mut call: McpToolCall) -> Result<McpToolResult, String> {
+        // Enforce preset filtering: a tool hidden from tools/list is not callable either.
+        if let Some(enabled) = &self.enabled {
+            if !enabled.contains(&call.name) {
+                return Err(format!(
+                    "Tool '{}' is not available in this preset. Restart `serve` without --preset for the full toolset.",
+                    call.name
+                ));
+            }
+        }
+        // Universal `target` alias: if the tool's primary arg is absent, populate it from
+        // `target` (or another accepted alias). Secondary args (e.g. reach_symbol's `file`
+        // filter, get_symbol_context's `symbol_name`) are never overwritten.
+        if let Some(pk) = primary_key(&call.name) {
+            if let Some(obj) = call.arguments.as_object_mut() {
+                let has_primary = obj.get(pk).and_then(|v| v.as_str()).is_some();
+                if !has_primary {
+                    for alias in ["target", "module_id", "focus", "file", "doc_path", "symbol"] {
+                        if alias == pk {
+                            continue;
+                        }
+                        if let Some(v) = obj.get(alias).filter(|v| v.is_string()).cloned() {
+                            obj.insert(pk.to_string(), v);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         match call.name.as_str() {
             "get_module_context" => {
                 let args = call.arguments;
@@ -1275,7 +1389,7 @@ impl McpServer {
                 let response = self.api_state.get_module_context(&request)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&response).unwrap_or_default(),
+                        serde_json::to_string(&response).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1285,7 +1399,7 @@ impl McpServer {
                 let graph = self.api_state.rebuild_graph()?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&graph).unwrap_or_default(),
+                        serde_json::to_string(&graph).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1306,7 +1420,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&deps).unwrap_or_default(),
+                        serde_json::to_string(&deps).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1323,7 +1437,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&dependents).unwrap_or_default(),
+                        serde_json::to_string(&dependents).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1341,7 +1455,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&results).unwrap_or_default(),
+                        serde_json::to_string(&results).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1573,7 +1687,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&response).unwrap_or_default(),
+                        serde_json::to_string(&response).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1655,7 +1769,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1678,7 +1792,7 @@ impl McpServer {
                         .map_err(|e| e)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1721,7 +1835,7 @@ impl McpServer {
                 let result = self.api_state.search_content(&pattern, &opts)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1735,7 +1849,7 @@ impl McpServer {
                 let result = self.api_state.get_evolution(days)?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -1770,7 +1884,7 @@ impl McpServer {
                     "layerViolationCount": m.layer_violation_count,
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1778,7 +1892,7 @@ impl McpServer {
             "get_cycles" => {
                 let graph = self.api_state.rebuild_graph()?;
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&graph.cycles).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&graph.cycles).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1790,7 +1904,7 @@ impl McpServer {
                     "violationCount": graph.layer_violations.len(),
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1809,7 +1923,7 @@ impl McpServer {
                     .sum();
                 let result = serde_json::json!({ "totalCount": total, "files": files });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1823,7 +1937,7 @@ impl McpServer {
                 let _ = self.api_state.rebuild_graph()?;
                 let result = self.api_state.simulate_change(&module_id, new_sig.as_deref(), rem_sig.as_deref())?;
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1911,7 +2025,7 @@ impl McpServer {
                         .collect();
                     let heat = churn_labels.get(&mf.path).copied().unwrap_or("");
                     serde_json::json!({
-                        "path":       mf.path,
+                        "path":       self.api_state.rel(&mf.path),
                         "heat":       heat,
                         "imports":    mf.imports,
                         "signatures": sigs,
@@ -1928,7 +2042,7 @@ impl McpServer {
                     "estimatedTokens":   est_tokens,
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1942,7 +2056,7 @@ impl McpServer {
                 let _ = self.api_state.rebuild_graph()?;
                 let result = self.api_state.ranked_skeleton(&focus, budget)?;
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -1977,7 +2091,7 @@ impl McpServer {
                 let max_sigs = match detail { "minimal" => 5, "extended" => usize::MAX, _ => 20 };
                 let result_files: Vec<serde_json::Value> = neighborhood.iter()
                     .filter_map(|(module_id, role)| {
-                        files.get(module_id).map(|mf| render_mf(mf, role, max_sigs, &churn_labels, &tested_names))
+                        files.get(module_id).map(|mf| render_mf(mf, role, max_sigs, &churn_labels, &tested_names, &self.api_state.root_path))
                     })
                     .collect();
 
@@ -1986,7 +2100,7 @@ impl McpServer {
                     .sum();
 
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                    content: vec![McpContent::text(serde_json::to_string(&serde_json::json!({
                         "focus": seed,
                         "depth": depth,
                         "files": result_files,
@@ -2011,7 +2125,7 @@ impl McpServer {
                 let changed = crate::git_analysis::git_diff_files(&self.api_state.root_path, from, to);
                 if changed.is_empty() {
                     return Ok(McpToolResult {
-                        content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                        content: vec![McpContent::text(serde_json::to_string(&serde_json::json!({
                             "from": from, "to": to,
                             "changedFiles": [],
                             "files": [],
@@ -2063,7 +2177,7 @@ impl McpServer {
 
                 let result_files: Vec<serde_json::Value> = neighborhood.iter()
                     .filter_map(|(module_id, role)| {
-                        files.get(module_id).map(|mf| render_mf(mf, role, 20, &churn_labels, &tested_names))
+                        files.get(module_id).map(|mf| render_mf(mf, role, 20, &churn_labels, &tested_names, &self.api_state.root_path))
                     })
                     .collect();
 
@@ -2076,7 +2190,7 @@ impl McpServer {
                     .collect();
 
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                    content: vec![McpContent::text(serde_json::to_string(&serde_json::json!({
                         "from": from,
                         "to": to,
                         "changedFiles": changed_list,
@@ -2123,7 +2237,7 @@ impl McpServer {
                 let mut tokens_used: usize = 0;
 
                 for (mf, role) in &matched {
-                    let rendered = render_mf(mf, role, max_sigs, &churn_labels, &tested_names);
+                    let rendered = render_mf(mf, role, max_sigs, &churn_labels, &tested_names, &self.api_state.root_path);
                     let est = serde_json::to_string(&rendered).unwrap_or_default().len() / 4;
                     if budget > 0 && tokens_used + est > budget {
                         break;
@@ -2133,7 +2247,7 @@ impl McpServer {
                 }
 
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&serde_json::json!({
+                    content: vec![McpContent::text(serde_json::to_string(&serde_json::json!({
                         "pattern": pattern,
                         "matched": total_matched,
                         "returned": result_files.len(),
@@ -2152,7 +2266,7 @@ impl McpServer {
                 let limit = call.arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let churn = crate::git_analysis::git_churn(&self.api_state.root_path, limit);
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&churn).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&churn).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2170,7 +2284,7 @@ impl McpServer {
                     }))
                     .collect();
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&pairs).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&pairs).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2197,7 +2311,7 @@ impl McpServer {
                     }))
                     .collect();
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&pairs).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&pairs).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2235,7 +2349,7 @@ impl McpServer {
                     }));
                 }
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2266,7 +2380,7 @@ impl McpServer {
                     .collect();
                 let result = serde_json::json!({ "changedFiles": changed, "checkedAtMs": now_ms });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2294,7 +2408,7 @@ impl McpServer {
                 let result = crate::search::replace_content(&self.api_state.root_path, &pattern, &replacement, &opts)
                     .map_err(|e| e)?;
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2320,7 +2434,7 @@ impl McpServer {
                 let result = crate::search::extract_content(&self.api_state.root_path, &pattern, &opts)
                     .map_err(|e| e)?;
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2336,24 +2450,33 @@ impl McpServer {
                 let max_search = args.get("maxSearchResults").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                 let model_str = args.get("model").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
 
-                // Step 1: search for files matching the query
-                let search_opts = crate::search::SearchOptions {
-                    case_sensitive: false,
+                // Step 1: rank files by BM25 relevance to the query. Uses the tokenizer
+                // (identifier subword splitting) so a natural-language question actually
+                // matches code — unlike a raw-regex line search, which almost never does.
+                let bm25_opts = crate::search::BM25Options {
                     max_results: max_search,
                     ..Default::default()
                 };
-                let focus_files: Vec<String> = match crate::search::search_content(
+                let focus_files: Vec<String> = match crate::search::bm25_search(
                     &self.api_state.root_path,
                     &query,
-                    &search_opts,
+                    &bm25_opts,
                 ) {
                     Ok(sr) => {
-                        let mut seen = std::collections::HashSet::new();
-                        sr.matches.into_iter()
-                            .filter_map(|m| if seen.insert(m.path.clone()) { Some(m.path) } else { None })
-                            .collect()
+                        // Already relevance-ordered and one entry per file.
+                        sr.matches.into_iter().map(|m| m.path).collect()
                     }
                     Err(_) => vec![],
+                };
+                // query_context injects CODE context — bias toward source files and drop
+                // docs (which win BM25 on conceptual terms). Use query_docs for doc context.
+                let focus_files: Vec<String> = {
+                    let code: Vec<String> = focus_files
+                        .iter()
+                        .filter(|p| !crate::api::is_doc_path(p))
+                        .cloned()
+                        .collect();
+                    if code.is_empty() { focus_files } else { code }
                 };
 
                 // Step 2: ranked skeleton personalised to those files
@@ -2402,7 +2525,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -2423,7 +2546,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&entries).unwrap_or_default(),
+                        serde_json::to_string(&entries).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -2635,7 +2758,7 @@ impl McpServer {
                     "matches": in_range,
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2696,7 +2819,7 @@ impl McpServer {
                     "handlers":      handlers,
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2821,7 +2944,7 @@ impl McpServer {
                     "state_handlers": state_handlers,
                 });
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string_pretty(&result).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&result).unwrap_or_default())],
                     is_error: None,
                 })
             }
@@ -2833,7 +2956,7 @@ impl McpServer {
                 let docs = self.api_state.doc_nodes()?;
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&docs).unwrap_or_default(),
+                        serde_json::to_string(&docs).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -2900,7 +3023,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -3030,7 +3153,7 @@ impl McpServer {
 
                 Ok(McpToolResult {
                     content: vec![McpContent::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                        serde_json::to_string(&result).unwrap_or_default(),
                     )],
                     is_error: None,
                 })
@@ -3048,7 +3171,17 @@ impl McpServer {
                     return Err(e);
                 }
                 let files_lock = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
-                let mapped: Vec<crate::mapper::MappedFile> = files_lock.values().cloned().collect();
+                // The answer pipeline is built around repo-relative paths (git lookups,
+                // root.join(file) reads, BM25 paths). MappedFile.path is absolute, but the
+                // map key IS the repo-relative module_id — use it so BM25 candidates match.
+                let mapped: Vec<crate::mapper::MappedFile> = files_lock
+                    .iter()
+                    .map(|(id, mf)| {
+                        let mut m = mf.clone();
+                        m.path = id.clone();
+                        m
+                    })
+                    .collect();
                 drop(files_lock);
 
                 let opts = crate::answer::AnswerOptions {
@@ -3126,6 +3259,22 @@ impl McpServer {
                             is_error: None,
                         })
                     }
+                    // Ambiguity is not a failure — return the candidate list so the
+                    // caller can pick one by passing `file` (or `target`), no retry-as-error.
+                    Err(crate::reach::ReachError::Ambiguous(candidates)) => {
+                        let mut text = format!(
+                            "Symbol '{}' is defined in {} places. Re-run with `file` (or `target`) set to one of:\n",
+                            symbol,
+                            candidates.len()
+                        );
+                        for c in &candidates {
+                            text.push_str(&format!("  {}:{} — {}\n", c.file, c.line, c.sig));
+                        }
+                        Ok(McpToolResult {
+                            content: vec![McpContent::text(text)],
+                            is_error: None,
+                        })
+                    }
                     Err(e) => Ok(McpToolResult {
                         content: vec![McpContent::text(e.to_string())],
                         is_error: Some(true),
@@ -3141,7 +3290,7 @@ impl McpServer {
         match uri {
             "codecartographer://project-graph" => {
                 let graph = self.api_state.rebuild_graph()?;
-                Ok(serde_json::to_string_pretty(&graph).unwrap_or_default())
+                Ok(serde_json::to_string(&graph).unwrap_or_default())
             }
             "codecartographer://module-index" => {
                 let files = self
@@ -3149,7 +3298,7 @@ impl McpServer {
                     .mapped_files
                     .lock()
                     .map_err(|e| e.to_string())?;
-                Ok(serde_json::to_string_pretty(&*files).unwrap_or_default())
+                Ok(serde_json::to_string(&*files).unwrap_or_default())
             }
             _ => Err(format!("Unknown resource: {}", uri)),
         }
@@ -3509,7 +3658,12 @@ fn render_mf(
     max_sigs: usize,
     churn_labels: &std::collections::HashMap<String, &'static str>,
     tested_names: &std::collections::HashSet<String>,
+    root: &std::path::Path,
 ) -> serde_json::Value {
+    let rel_path = std::path::Path::new(&mf.path)
+        .strip_prefix(root)
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| mf.path.clone());
     let is_test = crate::api::is_test_path(&mf.path);
     let sigs: Vec<String> = mf.signatures.iter().take(max_sigs).map(|s| {
         if let Some(body) = &s.body {
@@ -3522,7 +3676,7 @@ fn render_mf(
         }
     }).collect();
     serde_json::json!({
-        "path":       mf.path,
+        "path":       rel_path,
         "role":       role,
         "heat":       churn_labels.get(&mf.path).copied().unwrap_or(""),
         "imports":    mf.imports,

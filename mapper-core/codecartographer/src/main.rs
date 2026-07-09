@@ -173,6 +173,10 @@ enum Commands {
     Serve {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+        /// Expose only a preset toolset ("core" = the ~12 highest-value discovery tools).
+        /// Defaults to all tools. Falls back to the CARTOGRAPHER_PRESET env var.
+        #[arg(long, value_name = "PRESET")]
+        preset: Option<String>,
     },
     /// Show project status
     Status {
@@ -803,9 +807,10 @@ fn main() -> Result<()> {
             let root = resolve_path(&cwd, cli.path)?;
             deps_mode(&root, &target, &format)
         }
-        Some(Commands::Serve { path }) => {
+        Some(Commands::Serve { path, preset }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
-            mcp_serve_mode(&root)
+            let preset = preset.or_else(|| std::env::var("CARTOGRAPHER_PRESET").ok());
+            mcp_serve_mode(&root, preset.as_deref())
         }
         Some(Commands::Status { path }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
@@ -4045,7 +4050,7 @@ fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, Mapp
 // MCP SERVE MODE - Start MCP server with stdio JSON-RPC transport
 // =============================================================================
 
-fn mcp_serve_mode(root: &Path) -> Result<()> {
+fn mcp_serve_mode(root: &Path, preset: Option<&str>) -> Result<()> {
     use crate::api::ApiState;
     use crate::mcp::McpServer;
     use std::sync::Arc;
@@ -4061,7 +4066,7 @@ fn mcp_serve_mode(root: &Path) -> Result<()> {
     // Pre-populate graph so dependency tools work from first call
     state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
 
-    let server = McpServer::new(state);
+    let server = McpServer::with_preset(state, preset);
     server.serve();
     Ok(())
 }

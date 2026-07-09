@@ -267,6 +267,16 @@ impl ApiState {
         }
     }
 
+    /// Convert an absolute file path (as stored in `MappedFile.path`) to a repo-relative
+    /// one for emission in responses. Keeps output compact and avoids leaking absolute
+    /// filesystem paths — internal storage stays absolute for file IO.
+    pub(crate) fn rel(&self, p: &str) -> String {
+        std::path::Path::new(p)
+            .strip_prefix(&self.root_path)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| p.to_string())
+    }
+
     #[allow(dead_code)]
     pub fn get_module_context(
         &self,
@@ -286,7 +296,7 @@ impl ApiState {
 
         let response = ModuleContextResponse {
             module_id: request.module_id.clone(),
-            path: module.path.clone(),
+            path: self.rel(&module.path),
             imports: module.imports.clone(),
             signatures: module.signatures.clone(),
             docstrings: match detail {
@@ -355,7 +365,7 @@ impl ApiState {
                 if let Some(node) = graph.nodes.iter().find(|n| n.module_id == edge.target) {
                     deps.push(DependencyInfo {
                         module_id: node.module_id.clone(),
-                        path: node.path.clone(),
+                        path: self.rel(&node.path),
                         signature_count: node.signature_count,
                     });
                 }
@@ -384,7 +394,7 @@ impl ApiState {
                 if let Some(node) = graph.nodes.iter().find(|n| n.module_id == edge.source) {
                     dependents.push(DependencyInfo {
                         module_id: node.module_id.clone(),
-                        path: node.path.clone(),
+                        path: self.rel(&node.path),
                         signature_count: node.signature_count,
                     });
                 }
@@ -443,7 +453,29 @@ impl ApiState {
         }
     }
 
+    /// Drop the cached project graph so the next `rebuild_graph` recomputes it. Call
+    /// after any mutation of `mapped_files`. (No runtime path mutates it today — the scan
+    /// happens once at startup — but this keeps the cache correct if that changes.)
+    #[allow(dead_code)]
+    pub(crate) fn invalidate_graph(&self) {
+        if let Ok(mut g) = self.project_graph.lock() {
+            *g = None;
+        }
+    }
+
     pub fn rebuild_graph(&self) -> Result<ProjectGraphResponse, String> {
+        // Serve the cached graph if present. Building it is expensive (cycle detection,
+        // betweenness centrality, god-module analysis) and it's recomputed on every tool
+        // call otherwise. The cache is populated once at startup and holds for the session
+        // because mapped_files is immutable after the initial scan; invalidate_graph()
+        // clears it if that ever stops being true.
+        {
+            let cached = self.project_graph.lock().map_err(|e| e.to_string())?;
+            if let Some(g) = cached.as_ref() {
+                return Ok(g.clone());
+            }
+        }
+
         let files = self.mapped_files.lock().map_err(|e| e.to_string())?;
 
         let mut nodes: Vec<GraphNode> = Vec::new();
@@ -461,7 +493,7 @@ impl ApiState {
 
             nodes.push(GraphNode {
                 module_id: module_id.clone(),
-                path: file.path.clone(),
+                path: self.rel(&file.path),
                 language,
                 signature_count: file.signatures.len(),
                 complexity: None,
@@ -721,7 +753,8 @@ pub struct RankedFile {
     /// PageRank score (normalized, higher = more relevant to the focus set).
     pub rank: f64,
     pub signature_count: usize,
-    /// Rough token estimate: 15 per signature + 5 per file.
+    /// tiktoken (cl100k_base) token count of this file's signature text, as used for the
+    /// budget cutoff. Falls back to a 15-per-signature heuristic only if the encoder fails.
     pub estimated_tokens: usize,
     pub role: Option<String>,
     pub signatures: Vec<String>,
@@ -826,13 +859,27 @@ impl ApiState {
             }
         }
 
-        // Sort by rank descending and collect into RankedFile, pruning to budget.
-        let mut ranked_idx: Vec<usize> = (0..n).collect();
-        ranked_idx.sort_by(|&a, &b| {
+        // Ordering: focus files first, in the order the caller supplied them (which is
+        // relevance order when seeded from a search). This guarantees the query-relevant
+        // files survive the budget cut instead of being displaced by high-centrality hubs.
+        // Remaining files follow, sorted by personalized PageRank descending.
+        let mut seen = vec![false; n];
+        let mut ranked_idx: Vec<usize> = Vec::with_capacity(n);
+        for path in focus {
+            if let Some(&i) = idx.get(path.as_str()) {
+                if !seen[i] {
+                    seen[i] = true;
+                    ranked_idx.push(i);
+                }
+            }
+        }
+        let mut rest: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
+        rest.sort_by(|&a, &b| {
             rank[b]
                 .partial_cmp(&rank[a])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        ranked_idx.extend(rest);
 
         let mut result = Vec::new();
         let mut tokens_used = 0usize;
@@ -849,14 +896,20 @@ impl ApiState {
                     .map(|bpe| bpe.encode_with_special_tokens(&text).len())
                     .unwrap_or_else(|_| sigs.len() * 15 + 5)
             };
+            // Account for the per-file JSON envelope so the budget reflects the actual
+            // returned payload, not raw signature tokens alone: the path + module_id
+            // strings (~len/4 tokens each) plus the fixed object keys (rank, role,
+            // signature_count, estimated_tokens, brackets ≈ 30 tokens).
+            let envelope = node.module_id.len() / 2 + 30;
+            let cost = estimated + envelope;
 
-            if token_budget > 0 && tokens_used + estimated > token_budget {
+            if token_budget > 0 && tokens_used + cost > token_budget {
                 break;
             }
-            tokens_used += estimated;
+            tokens_used += cost;
 
             result.push(RankedFile {
-                path: node.path.clone(),
+                path: self.rel(&node.path),
                 module_id: node.module_id.clone(),
                 rank: rank[i],
                 signature_count: node.signature_count,
@@ -1131,7 +1184,7 @@ impl ApiState {
                 .unwrap_or_default();
 
             docs.push(DocNode {
-                path: node.path.clone(),
+                path: self.rel(&node.path),
                 module_id: node.module_id.clone(),
                 signatures: sigs,
                 imports,
@@ -1494,7 +1547,7 @@ impl ApiState {
 
                     god_modules.push(GodModuleInfo {
                         module_id: node.module_id.clone(),
-                        path: node.path.clone(),
+                        path: self.rel(&node.path),
                         degree,
                         cohesion_score: cohesion,
                         severity: severity.to_string(),
