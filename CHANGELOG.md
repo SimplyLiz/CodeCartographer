@@ -4,6 +4,23 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-09
+
+### Added — call graphs & class diagrams for the six new languages
+
+Completes "full depth" for Java, C#, Ruby, Kotlin, Swift, and PHP:
+
+- **File-local call graphs** — a generic two-pass extractor resolves callees against
+  the file's functions (`method_invocation` / `invocation_expression` / `call_expression`
+  / `*_call_expression` / `call`). `reach_symbol` callees and `diagram --call-graph` now
+  work for all six. Ruby additionally resolves paren-less bare-identifier calls when they
+  uniquely match a known method.
+- **Class diagrams** — `diagram --call-graph FILE --format class` emits classes with
+  fields, methods (visibility, constructors, params), and inheritance/implements edges,
+  e.g. Java `Circle --|> Shape`, `..|> Drawable`.
+
+All twelve languages now sit at the same tier for the navigation surface.
+
 ## [1.3.0] - 2026-07-09
 
 Sharper, broader lightweight navigation for AI — six improvements from the C++

@@ -69,15 +69,14 @@ navigation bar ("point me at the right symbol/file"), not compiler precision.
 | JavaScript | Full | ✅ | — | — | const-arrow fns captured |
 | C | Full | ✅ `#include` | ✅ | — | macros partial; fields not itemised |
 | C++ | Full | ✅ `#include` | ✅ | — | templates/macros partial; `#include` resolved heuristically (no `-I`/macro expansion — CKB's job) |
-| Java | Good | ✅ | — | — | classes/interfaces/enums/methods/fields |
-| C# | Good | ✅ | — | — | classes/structs/interfaces/enums/methods/properties |
-| Kotlin | Good | ✅ | — | — | classes/objects/functions/properties |
-| Swift | Good | ✅ | — | — | class/struct/enum all reported as types; protocols captured |
-| PHP | Good | ✅ | — | — | classes/interfaces/traits/enums/functions/methods |
-| Ruby | Good | ✅ `require` | — | — | classes/modules/methods (`def…end`) |
+| Java | Full | ✅ | ✅ | ✅ | classes/interfaces/enums/methods/fields; extends/implements |
+| C# | Full | ✅ | ✅ | ✅ | classes/structs/interfaces/enums/methods/properties |
+| Kotlin | Full | ✅ | ✅ | ✅ | classes/objects/functions/properties |
+| Swift | Full | ✅ | ✅ | ✅ | class/struct/enum all reported as types; protocols captured |
+| PHP | Full | ✅ | ✅ | ✅ | classes/interfaces/traits/enums/functions/methods |
+| Ruby | Full | ✅ `require` | ✅ | ✅ | `def…end`; paren-less calls resolved when unambiguous; `module` not drawn as a class |
 
-**Full** = mature, extensively tested. **Good** = symbols + imports (skeleton, `ranked_skeleton`,
-`reach_symbol`, search all work); file-local call/class graphs not yet wired.
+**Full** = symbols + imports + call graph + class diagram. **Good** = symbols + imports only.
 
 ¹ *Call graph* = file-local **callee** resolution. `reach_symbol` **callers** are found by text
 search and work for **every** language, new ones included.
