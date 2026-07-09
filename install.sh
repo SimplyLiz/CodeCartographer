@@ -21,7 +21,7 @@ echo ""
 
 # Build CMP
 echo "[2/4] Building CMP (this may take a few minutes)..."
-cd mapper-core/nyx-navigator
+cd mapper-core/CodeCartographer
 cargo build --release
 cd ..
 echo "✓ Build successful"
@@ -32,9 +32,9 @@ echo "[3/4] Installing CMP..."
 mkdir -p ~/.local/bin
 
 # Copy binary
-cp navigator/target/release/navigator ~/.local/bin/
-chmod +x ~/.local/bin/navigator
-echo "✓ Binary copied to: ~/.local/bin/navigator"
+cp codecartographer/target/release/codecartographer ~/.local/bin/
+chmod +x ~/.local/bin/codecartographer
+echo "✓ Binary copied to: ~/.local/bin/codecartographer"
 echo ""
 
 # Add to PATH
@@ -65,8 +65,8 @@ echo ""
 # Test command
 echo "Testing installation..."
 export PATH="$HOME/.local/bin:$PATH"
-if navigator --version &> /dev/null; then
-    VERSION=$(navigator --version)
+if codecartographer --version &> /dev/null; then
+    VERSION=$(codecartographer --version)
     echo "✓ CMP is working: $VERSION"
 else
     echo "⚠️  Please restart your terminal for PATH changes to take effect"
@@ -78,9 +78,9 @@ echo "  1. Restart your terminal (if needed)"
 echo "  2. Set your UC API key:"
 echo "     echo 'ULTRA_CONTEXT=uc_live_your_key' > .env.local"
 echo "  3. Initialize your project:"
-echo "     navigator init --cloud --project my-project"
+echo "     codecartographer init --cloud --project my-project"
 echo "  4. Start using CMP:"
-echo "     navigator source && navigator push"
+echo "     codecartographer source && codecartographer push"
 echo ""
 echo "Documentation: UC_INTEGRATION.md"
 echo "Quick Start: QUICKSTART.md"

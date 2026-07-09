@@ -13,9 +13,9 @@
 
 ```bash
 git clone <repo>
-cd mapper-core/nyx-navigator
+cd mapper-core/CodeCartographer
 cargo build --release
-cp target/release/navigator ~/.local/bin/navigator
+cp target/release/codecartographer ~/.local/bin/codecartographer
 ```
 
 The `install.sh` script at the repo root automates the build and adds `~/.local/bin` to your `$PATH`.
@@ -40,20 +40,20 @@ Run this once per repo:
 
 ```bash
 cd my-repo
-navigator init
+codecartographer init
 ```
 
-This creates a `.navigator/` directory with a per-repo `config.toml`. You can commit this directory.
+This creates a `.codecartographer/` directory with a per-repo `config.toml`. You can commit this directory.
 
 For CKB integration:
 
 ```bash
-navigator init-ckb --ckb-url http://localhost:3001
+codecartographer init-ckb --ckb-url http://localhost:3001
 ```
 
 ## Your first run
 
-Run `navigator` with no arguments from inside any directory to get the interactive menu:
+Run `codecartographer` with no arguments from inside any directory to get the interactive menu:
 
 ```
   Project : my-app  (42 source files)
@@ -74,21 +74,21 @@ The menu shows token estimates so you can pick the right mode before committing.
 You can skip the menu by calling subcommands directly:
 
 ```bash
-navigator map        # writes navigator_map.xml to disk
-navigator source     # writes navigator_source.xml to disk
-navigator copy       # copies full source to clipboard, no disk write
+codecartographer map        # writes codecartographer_map.xml to disk
+codecartographer source     # writes codecartographer_source.xml to disk
+codecartographer copy       # copies full source to clipboard, no disk write
 ```
 
 ## Set a global default target
 
-Navigator supports three output formats, one of which is the default for your AI client:
+CodeCartographer supports three output formats, one of which is the default for your AI client:
 
 ```bash
-navigator config --default-target claude    # Claude Code (default)
-navigator config --default-target cursor    # Cursor
-navigator config --default-target raw       # plain output, no wrappers
+codecartographer config --default-target claude    # Claude Code (default)
+codecartographer config --default-target cursor    # Cursor
+codecartographer config --default-target raw       # plain output, no wrappers
 
-navigator config --show   # check current global config
+codecartographer config --show   # check current global config
 ```
 
 The `--target` flag on any command overrides the global default for that one invocation.
@@ -96,9 +96,9 @@ The `--target` flag on any command overrides the global default for that one inv
 ## Verify the installation
 
 ```bash
-navigator --version
-navigator status      # shows project status, file counts, last-sync time
-navigator health      # runs a full architectural health check
+codecartographer --version
+codecartographer status      # shows project status, file counts, last-sync time
+codecartographer health      # runs a full architectural health check
 ```
 
 ## Connecting to Claude Code (MCP)
@@ -106,7 +106,7 @@ navigator health      # runs a full architectural health check
 Start the MCP server:
 
 ```bash
-navigator serve
+codecartographer serve
 ```
 
 Register it in your Claude Code settings (`.claude/settings.json` or the global settings):
@@ -114,8 +114,8 @@ Register it in your Claude Code settings (`.claude/settings.json` or the global 
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve"]
     }
   }
@@ -126,7 +126,7 @@ Once registered, the MCP server exposes 30+ tools directly to Claude Code — sk
 
 ## What gets ignored
 
-Navigator automatically excludes noisy paths from all scanning, search, and find operations:
+CodeCartographer automatically excludes noisy paths from all scanning, search, and find operations:
 
 - Package managers: `node_modules/`, `vendor/`, `.venv/`, `venv/`
 - Build output: `target/`, `dist/`, `build/`, `out/`, `.next/`, `__pycache__/`
@@ -135,7 +135,7 @@ Navigator automatically excludes noisy paths from all scanning, search, and find
 - Minified files: `*.min.js`, `*.min.css`
 - Source maps, log files, binary files, large SVGs
 
-Add project-specific patterns to `.navigatorignore` (same syntax as `.gitignore`). Pass `--no-ignore` to bypass the filter for a single invocation.
+Add project-specific patterns to `.codecartographerignore` (same syntax as `.gitignore`). Pass `--no-ignore` to bypass the filter for a single invocation.
 
 ## Next steps
 

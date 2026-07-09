@@ -15,7 +15,7 @@ use std::path::Path;
 // ---------------------------------------------------------------------------
 
 /// Symbol classification following LIP SymbolKind (§4.1).
-/// `Struct` is a Nyx.Navigator extension; maps to `Class` in future LIP wire format.
+/// `Struct` is a CodeCartographer extension; maps to `Class` in future LIP wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SymbolKind {
     #[default]
@@ -2992,7 +2992,7 @@ components:
 
     #[test]
     fn toml_sections_and_keys() {
-        let content = "[package]\nname = \"navigator\"\nversion = \"3.0.0\"\n\n[dependencies]\nserde = \"1.0\"";
+        let content = "[package]\nname = \"codecartographer\"\nversion = \"3.0.0\"\n\n[dependencies]\nserde = \"1.0\"";
         let mf = extract_skeleton(Path::new("Cargo.toml"), content);
         let qnames: Vec<_> = mf.signatures.iter().filter_map(|s| s.qualified_name.as_deref()).collect();
         assert!(qnames.contains(&"package"), "should have package section");

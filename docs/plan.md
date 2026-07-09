@@ -1,4 +1,4 @@
-# Nyx.Navigator — Feature Status
+# CodeCartographer — Feature Status
 
 ---
 
@@ -50,18 +50,18 @@
 - [x] Graphviz DOT export
 - [x] `llms.txt` generation
 - [x] `CLAUDE.md` generation
-- [x] Personalized PageRank skeleton (`navigator context --focus <file> --budget N`)
+- [x] Personalized PageRank skeleton (`codecartographer context --focus <file> --budget N`)
 
 ### Integrations
 - [x] MCP server — JSON-RPC 2.0 stdio, 8 tools
-- [x] C FFI (`libnavigator.a`) — 16 functions for CKB via CGo
-- [x] `navigator check` — CI gate, exits non-zero on cycles or layer violations
-- [x] `navigator symbols --unreferenced`
-- [x] Global config (`~/.config/navigator/config.toml`)
-- [x] Per-repo `.navigatorignore`
-- [x] Content search — `navigator search <PATTERN>` + `navigator_search_content` FFI
-- [x] File find — `navigator find <GLOB>` + `navigator_find_files` FFI
-- [x] Context injection for tool-call-less models — `navigator context --query <PATTERN>` bundles ranked skeleton + search results in one invocation
+- [x] C FFI (`libcode_cartographer.a`) — 16 functions for CKB via CGo
+- [x] `codecartographer check` — CI gate, exits non-zero on cycles or layer violations
+- [x] `codecartographer symbols --unreferenced`
+- [x] Global config (`~/.config/codecartographer/config.toml`)
+- [x] Per-repo `.codecartographerignore`
+- [x] Content search — `codecartographer search <PATTERN>` + `codecartographer_search_content` FFI
+- [x] File find — `codecartographer find <GLOB>` + `codecartographer_find_files` FFI
+- [x] Context injection for tool-call-less models — `codecartographer context --query <PATTERN>` bundles ranked skeleton + search results in one invocation
 
 ---
 

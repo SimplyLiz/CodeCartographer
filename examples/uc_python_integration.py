@@ -94,12 +94,12 @@ class CMPUCIntegration:
     
     def __init__(self, api_key: str):
         self.client = UCClient(api_key)
-        self.config_file = ".navigator_uc_config.json"
+        self.config_file = ".codecartographer_uc_config.json"
     
     def load_config(self) -> Dict:
         """Load CMP UC configuration"""
         if not os.path.exists(self.config_file):
-            raise FileNotFoundError("No UC config found. Run 'navigator init --cloud' first.")
+            raise FileNotFoundError("No UC config found. Run 'codecartographer init --cloud' first.")
         
         with open(self.config_file, 'r') as f:
             return json.load(f)
@@ -109,11 +109,11 @@ class CMPUCIntegration:
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
     
-    def load_navigator_memory(self) -> Dict:
-        """Load Nyx.Navigator memory file"""
-        memory_file = ".navigator_memory.json"
+    def load_codecartographer_memory(self) -> Dict:
+        """Load CodeCartographer memory file"""
+        memory_file = ".codecartographer_memory.json"
         if not os.path.exists(memory_file):
-            raise FileNotFoundError("No Nyx.Navigator memory found. Run 'navigator source' first.")
+            raise FileNotFoundError("No CodeCartographer memory found. Run 'codecartographer source' first.")
         
         with open(memory_file, 'r') as f:
             return json.load(f)
@@ -147,9 +147,9 @@ class CMPUCIntegration:
         return config
     
     def push_to_uc(self):
-        """Push Nyx.Navigator memory to UC"""
+        """Push CodeCartographer memory to UC"""
         config = self.load_config()
-        memory = self.load_navigator_memory()
+        memory = self.load_codecartographer_memory()
         
         ctx_id = config["context_id"]
         files = memory.get("files", {})
@@ -201,7 +201,7 @@ class CMPUCIntegration:
         
         ctx = self.client.get_context(ctx_id, version)
         
-        # Convert to Nyx.Navigator memory format
+        # Convert to CodeCartographer memory format
         memory = {
             "version": ctx["version"],
             "files": {},
@@ -219,7 +219,7 @@ class CMPUCIntegration:
                 }
         
         # Save memory
-        with open(".navigator_memory.json", 'w') as f:
+        with open(".codecartographer_memory.json", 'w') as f:
             json.dump(memory, f, indent=2)
         
         print(f"✓ Pulled {len(memory['files'])} files (version {ctx['version']})")
@@ -247,7 +247,7 @@ class CMPUCIntegration:
         }
         
         # Save branch config
-        branch_file = f".navigator_uc_config.{branch_name}.json"
+        branch_file = f".codecartographer_uc_config.{branch_name}.json"
         with open(branch_file, 'w') as f:
             json.dump(branch_config, f, indent=2)
         

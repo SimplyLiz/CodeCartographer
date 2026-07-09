@@ -1,15 +1,15 @@
 # Search & Find — Reference
 
-Nyx.Navigator provides two commands — `search` and `find` — that give AI tools grep/find parity without leaving the project context. Both respect `.navigatorignore` and the built-in noise filter (vendor, generated files, binaries) by default.
+CodeCartographer provides two commands — `search` and `find` — that give AI tools grep/find parity without leaving the project context. Both respect `.codecartographerignore` and the built-in noise filter (vendor, generated files, binaries) by default.
 
 ---
 
-## `navigator search <PATTERN>`
+## `codecartographer search <PATTERN>`
 
 Grep-like content search across all project files.
 
 ```
-navigator search <PATTERN> [OPTIONS]
+codecartographer search <PATTERN> [OPTIONS]
 ```
 
 ### Flags
@@ -38,37 +38,37 @@ navigator search <PATTERN> [OPTIONS]
 
 ```bash
 # Find all TODO/FIXME comments in Rust files
-navigator search "TODO\|FIXME" --glob "*.rs"
+codecartographer search "TODO\|FIXME" --glob "*.rs"
 
 # Same, case-insensitive, with 2 lines of context
-navigator search "todo" -i -C 2 --glob "*.rs"
+codecartographer search "todo" -i -C 2 --glob "*.rs"
 
 # Multiple patterns (OR) — find either error string
-navigator search "connection refused" -e "dial tcp" --glob "*.go"
+codecartographer search "connection refused" -e "dial tcp" --glob "*.go"
 
 # Whole-word: find "fn" but not "fn_ptr" or "async_fn"
-navigator search "fn" -w --glob "*.rs"
+codecartographer search "fn" -w --glob "*.rs"
 
 # List files that import a specific package
-navigator search "from auth import" -l --glob "*.py"
+codecartographer search "from auth import" -l --glob "*.py"
 
 # Count how many times each file references a constant
-navigator search "MAX_RETRY" -c
+codecartographer search "MAX_RETRY" -c
 
 # Only show the matched expression on each line
-navigator search "version = \"[^\"]+\"" -o --glob "Cargo.toml" --no-ignore
+codecartographer search "version = \"[^\"]+\"" -o --glob "Cargo.toml" --no-ignore
 
 # Find all lines NOT matching (files missing a license header)
-navigator search "Copyright" -v -l --glob "*.go"
+codecartographer search "Copyright" -v -l --glob "*.go"
 
 # Search within a subdirectory
-navigator search "TODO" --path src/api --glob "*.go"
+codecartographer search "TODO" --path src/api --glob "*.go"
 
 # Find error strings in non-code config files
-navigator search "error" --glob "*.yaml" --no-ignore
+codecartographer search "error" --glob "*.yaml" --no-ignore
 
 # Invert + count: files with NO test coverage marker
-navigator search "// coverage: ignore" --files-without-match --glob "*.go"
+codecartographer search "// coverage: ignore" --files-without-match --glob "*.go"
 ```
 
 ### Output format
@@ -101,12 +101,12 @@ src/api.rs:
 
 ---
 
-## `navigator find <PATTERN>`
+## `codecartographer find <PATTERN>`
 
 Find files by name/path glob with optional mtime, size, and depth filters.
 
 ```
-navigator find <PATTERN> [OPTIONS]
+codecartographer find <PATTERN> [OPTIONS]
 ```
 
 `PATTERN` uses glob syntax: `*` matches within a path segment, `**` crosses segment boundaries, `?` matches any single character. Patterns without `/` are matched against the filename only.
@@ -127,31 +127,31 @@ navigator find <PATTERN> [OPTIONS]
 
 ```bash
 # Find all Rust source files
-navigator find "*.rs"
+codecartographer find "*.rs"
 
 # Find Go files changed in the last 24 hours
-navigator find "*.go" --modified-since 24h
+codecartographer find "*.go" --modified-since 24h
 
 # Find files newer than go.mod (recently added)
-navigator find "*.go" --newer go.mod
+codecartographer find "*.go" --newer go.mod
 
 # Find large files (possible accidental commits)
-navigator find "*" --min-size 1048576
+codecartographer find "*" --min-size 1048576
 
 # Find small config files at root level only
-navigator find "*.toml" --max-depth 0
+codecartographer find "*.toml" --max-depth 0
 
 # Find generated protobuf files (normally ignored)
-navigator find "*.pb.go" --no-ignore
+codecartographer find "*.pb.go" --no-ignore
 
 # Find recently modified test files
-navigator find "*_test.go" --modified-since 1h
+codecartographer find "*_test.go" --modified-since 1h
 
 # Find TypeScript files in src, not too deep
-navigator find "src/**/*.ts" --max-depth 3
+codecartographer find "src/**/*.ts" --max-depth 3
 
 # Find files within a size range (likely data files)
-navigator find "*" --min-size 10000 --max-size 100000
+codecartographer find "*" --min-size 10000 --max-size 100000
 ```
 
 ### Output format
@@ -166,12 +166,12 @@ Fields: `path`, `[language, size]`, `ISO-8601 mtime`.
 
 ---
 
-## `navigator context --query <PATTERN>`
+## `codecartographer context --query <PATTERN>`
 
 Bundle ranked skeleton + search results into a single stdout emission for models without tool-call support.
 
 ```bash
-navigator context --focus src/api.rs --budget 8000 --query "authentication"
+codecartographer context --focus src/api.rs --budget 8000 --query "authentication"
 ```
 
 Outputs:
@@ -180,20 +180,20 @@ Outputs:
 
 Designed for piping into local models:
 ```bash
-navigator context --focus src/api.rs --query "TODO" | ollama run qwen3
-navigator context --budget 4000 --query "error handling" > context.txt
+codecartographer context --focus src/api.rs --query "TODO" | ollama run qwen3
+codecartographer context --budget 4000 --query "error handling" > context.txt
 ```
 
 ---
 
 ## FFI (CKB / CGo)
 
-Both functions are exposed in `libnavigator.a` via `include/navigator.h`.
+Both functions are exposed in `libcode_cartographer.a` via `include/codecartographer.h`.
 
-### `navigator_search_content`
+### `codecartographer_search_content`
 
 ```c
-char* navigator_search_content(
+char* codecartographer_search_content(
     const char* path,       // absolute repo root
     const char* pattern,    // primary search pattern
     const char* opts_json   // JSON SearchOptions or NULL for defaults
@@ -250,10 +250,10 @@ Returns JSON envelope `{ "ok": true, "data": SearchResult }`.
 
 `filesWithMatches`, `filesWithoutMatch`, and `fileCounts` are only populated when the corresponding mode flag is set.
 
-### `navigator_find_files`
+### `codecartographer_find_files`
 
 ```c
-char* navigator_find_files(
+char* codecartographer_find_files(
     const char* path,       // absolute repo root
     const char* pattern,    // glob pattern
     unsigned int limit,     // max files, 0 = unlimited
@@ -297,21 +297,21 @@ Returns JSON envelope `{ "ok": true, "data": FindResult }`.
 ## Go bridge (CKB)
 
 ```go
-import "github.com/SimplyLiz/CodeMCP/internal/navigator"
+import "github.com/SimplyLiz/CodeMCP/internal/codecartographer"
 
 // Search — nil opts = defaults
-result, err := navigator.SearchContent(repoRoot, "TODO", &navigator.SearchContentOptions{
+result, err := codecartographer.SearchContent(repoRoot, "TODO", &codecartographer.SearchContentOptions{
     FileGlob:      "*.go",
     FilesWithMatches: true,
 })
 
 // Find — nil opts = defaults
-result, err := navigator.FindFiles(repoRoot, "*.go", 0, &navigator.FindOptions{
+result, err := codecartographer.FindFiles(repoRoot, "*.go", 0, &codecartographer.FindOptions{
     ModifiedSinceSecs: ptr(uint64(86400)),
 })
 
 // Check availability before calling
-if navigator.Available() {
+if codecartographer.Available() {
     // ...
 }
 ```
@@ -319,13 +319,13 @@ if navigator.Available() {
 `SearchContentOptions` mirrors the JSON fields above (camelCase → Go PascalCase).  
 `FindOptions` mirrors `FindOptions` JSON fields.
 
-Both functions return `ErrUnavailable` when built without `-tags navigator`.
+Both functions return `ErrUnavailable` when built without `-tags codecartographer`.
 
 ---
 
 ## MCP tools
 
-When `navigator serve` is running, both tools are available to any MCP client:
+When `codecartographer serve` is running, both tools are available to any MCP client:
 
 **`search_content`** — arguments map 1:1 to `SearchContentOptions` fields plus `pattern`:
 
@@ -356,12 +356,12 @@ When `navigator serve` is running, both tools are available to any MCP client:
 
 ---
 
-## `navigator replace <PATTERN> <REPLACEMENT>`
+## `codecartographer replace <PATTERN> <REPLACEMENT>`
 
 Sed-like in-place find-and-replace across all project files. Supports full regex with capture-group back-references, dry-run preview, and per-file `.bak` backups.
 
 ```
-navigator replace <PATTERN> <REPLACEMENT> [OPTIONS]
+codecartographer replace <PATTERN> <REPLACEMENT> [OPTIONS]
 ```
 
 `REPLACEMENT` supports `$0` (whole match) and `$1`/`$2` … (numbered capture groups).
@@ -386,25 +386,25 @@ navigator replace <PATTERN> <REPLACEMENT> [OPTIONS]
 
 ```bash
 # Dry-run: preview renaming a function across all Rust files
-navigator replace "fn authenticate\b" "fn auth" --glob "*.rs" --dry-run
+codecartographer replace "fn authenticate\b" "fn auth" --glob "*.rs" --dry-run
 
 # Rename with capture groups — reorder two arguments
-navigator replace "connect\((\w+),\s*(\w+)\)" "connect($2, $1)" --glob "*.go"
+codecartographer replace "connect\((\w+),\s*(\w+)\)" "connect($2, $1)" --glob "*.go"
 
 # Case-insensitive literal rename, with backup safety net
-navigator replace --literal --ignore-case "TODO" "FIXME" --backup --glob "*.rs"
+codecartographer replace --literal --ignore-case "TODO" "FIXME" --backup --glob "*.rs"
 
 # Whole-word rename: "ctx" but not "context"
-navigator replace "ctx" "rctx" -w --glob "*.go"
+codecartographer replace "ctx" "rctx" -w --glob "*.go"
 
 # Cap to 1 replacement per file (first occurrence only)
-navigator replace "import React" "import React, { StrictMode }" --glob "*.tsx" --max-per-file 1
+codecartographer replace "import React" "import React, { StrictMode }" --glob "*.tsx" --max-per-file 1
 
 # Replace inside a subdirectory only
-navigator replace "v1/api" "v2/api" --path src/http --glob "*.go"
+codecartographer replace "v1/api" "v2/api" --path src/http --glob "*.go"
 
 # Bump a hard-coded version string across all config files
-navigator replace "version = \"1\.7\.\d+\"" "version = \"1.8.0\"" --glob "*.toml" --no-ignore
+codecartographer replace "version = \"1\.7\.\d+\"" "version = \"1.8.0\"" --glob "*.toml" --no-ignore
 ```
 
 ### Output format
@@ -424,12 +424,12 @@ Without `--dry-run` the summary line also confirms `(written)`.
 
 ---
 
-## `navigator extract <PATTERN>`
+## `codecartographer extract <PATTERN>`
 
 Awk-like value extraction — pull specific pieces of text out of every matching line across the project. Supports capture groups, frequency tables, deduplication, and structured output.
 
 ```
-navigator extract <PATTERN> [OPTIONS]
+codecartographer extract <PATTERN> [OPTIONS]
 ```
 
 `PATTERN` is a regex. Wrap the portion you care about in capture groups: e.g. `pub fn (\w+)` to extract function names.
@@ -455,25 +455,25 @@ navigator extract <PATTERN> [OPTIONS]
 
 ```bash
 # Extract all public function names from Rust source
-navigator extract "pub fn (\w+)" -g 1 --glob "*.rs" --dedup --sort
+codecartographer extract "pub fn (\w+)" -g 1 --glob "*.rs" --dedup --sort
 
 # Frequency table: which functions are called most often?
-navigator extract "(\w+)\s*\(" -g 1 --glob "*.rs" --count
+codecartographer extract "(\w+)\s*\(" -g 1 --glob "*.rs" --count
 
 # Extract HTTP status codes returned in Go handlers
-navigator extract "http\.StatusCode\((\d+)\)|w\.WriteHeader\((\d+)\)" -g 1 -g 2 --glob "*.go" --count
+codecartographer extract "http\.StatusCode\((\d+)\)|w\.WriteHeader\((\d+)\)" -g 1 -g 2 --glob "*.go" --count
 
 # Pull all import paths from Go files, deduplicated
-navigator extract '"([^"]+)"' -g 1 --glob "*.go" --path src --dedup --sort
+codecartographer extract '"([^"]+)"' -g 1 --glob "*.go" --path src --dedup --sort
 
 # Find every TODO author tag — emit as CSV
-navigator extract "TODO\((\w+)\)" -g 1 --glob "*.go" --format csv --count
+codecartographer extract "TODO\((\w+)\)" -g 1 --glob "*.go" --format csv --count
 
 # Extract semver strings across all TOML/JSON config files
-navigator extract "(\d+\.\d+\.\d+)" -g 1 --glob "*.toml" --dedup --sort --no-ignore
+codecartographer extract "(\d+\.\d+\.\d+)" -g 1 --glob "*.toml" --dedup --sort --no-ignore
 
 # Whole-match extraction (group 0): pull all URLs from docs
-navigator extract "https?://[^\s\)]+" --glob "*.md" --dedup
+codecartographer extract "https?://[^\s\)]+" --glob "*.md" --dedup
 ```
 
 ### Output format
@@ -500,12 +500,12 @@ src/auth.rs:103     refresh_token
 
 ## FFI (CKB / CGo)
 
-Both functions are exposed in `libnavigator.a` via `include/navigator.h`.
+Both functions are exposed in `libcode_cartographer.a` via `include/codecartographer.h`.
 
-### `navigator_replace_content`
+### `codecartographer_replace_content`
 
 ```c
-char *navigator_replace_content(
+char *codecartographer_replace_content(
     const char *path,         // absolute repo root
     const char *pattern,      // regex (or literal) pattern
     const char *replacement,  // replacement string; $0/$1/$2 back-references
@@ -552,10 +552,10 @@ Returns JSON envelope `{ "ok": true, "data": ReplaceResult }`.
 }
 ```
 
-### `navigator_extract_content`
+### `codecartographer_extract_content`
 
 ```c
-char *navigator_extract_content(
+char *codecartographer_extract_content(
     const char *path,       // absolute repo root
     const char *pattern,    // regex with optional capture groups
     const char *opts_json   // JSON ExtractOptions or NULL for defaults
@@ -609,16 +609,16 @@ Returns JSON envelope `{ "ok": true, "data": ExtractResult }`.
 ## Go bridge (CKB)
 
 ```go
-import "github.com/SimplyLiz/CodeMCP/internal/navigator"
+import "github.com/SimplyLiz/CodeMCP/internal/codecartographer"
 
 // Replace — nil opts = defaults
-result, err := navigator.ReplaceContent(repoRoot, `fn authenticate\b`, "fn auth", &navigator.ReplaceOptions{
+result, err := codecartographer.ReplaceContent(repoRoot, `fn authenticate\b`, "fn auth", &codecartographer.ReplaceOptions{
     FileGlob: "*.rs",
     DryRun:   true,
 })
 
 // Extract — nil opts = defaults
-result, err := navigator.ExtractContent(repoRoot, `pub fn (\w+)`, &navigator.ExtractOptions{
+result, err := codecartographer.ExtractContent(repoRoot, `pub fn (\w+)`, &codecartographer.ExtractOptions{
     Groups: []int{1},
     Dedup:  true,
     Sort:   true,
@@ -628,13 +628,13 @@ result, err := navigator.ExtractContent(repoRoot, `pub fn (\w+)`, &navigator.Ext
 
 `ReplaceOptions` and `ExtractOptions` mirror the JSON fields above (camelCase → Go PascalCase).
 
-Both functions return `ErrUnavailable` when built without `-tags navigator`.
+Both functions return `ErrUnavailable` when built without `-tags codecartographer`.
 
 ---
 
 ## MCP tools
 
-When `navigator serve` is running, both tools are available to any MCP client:
+When `codecartographer serve` is running, both tools are available to any MCP client:
 
 **`replace_content`** — arguments map 1:1 to `ReplaceOptions` fields plus `pattern` and `replacement`:
 
@@ -673,6 +673,6 @@ By default both commands skip:
 - `vendor/`, `node_modules/`, `dist/`, `build/`, `target/`, `.next/`
 - Generated files: `*.pb.go`, `*.gen.go`, `*.min.js`, `*.d.ts`, `*.freezed.dart`, …
 - Binary and non-UTF-8 files (silently skipped on read failure)
-- Files listed in `.navigatorignore`
+- Files listed in `.codecartographerignore`
 
 Pass `--no-ignore` to bypass all of this and search everything under the root.

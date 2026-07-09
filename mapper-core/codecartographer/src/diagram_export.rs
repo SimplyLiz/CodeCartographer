@@ -143,7 +143,7 @@ fn tempfile(ext: &str) -> Result<std::path::PathBuf, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    path.push(format!("navigator-{}-{}{}", pid, nanos, ext));
+    path.push(format!("codecartographer-{}-{}{}", pid, nanos, ext));
     Ok(path)
 }
 
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn passthrough_for_non_image_extension() {
         let dir = std::env::temp_dir();
-        let target = dir.join(format!("navigator-test-{}.mmd", std::process::id()));
+        let target = dir.join(format!("codecartographer-test-{}.mmd", std::process::id()));
         let kind = export_diagram("graph TD\n    A --> B", DiagramFormat::Mermaid, &target).unwrap();
         assert_eq!(kind, ExportKind::Source);
         let written = std::fs::read_to_string(&target).unwrap();
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn passthrough_for_dot_source_with_dot_extension() {
         let dir = std::env::temp_dir();
-        let target = dir.join(format!("navigator-test-{}.dot", std::process::id()));
+        let target = dir.join(format!("codecartographer-test-{}.dot", std::process::id()));
         let kind = export_diagram("digraph G { A -> B }", DiagramFormat::Dot, &target).unwrap();
         assert_eq!(kind, ExportKind::Source);
         let _ = std::fs::remove_file(&target);

@@ -1,11 +1,11 @@
 # MCP Tools
 
-Navigator exposes 30+ tools over the Model Context Protocol (JSON-RPC 2.0, stdio transport). When connected to Claude Code, Cursor, or any MCP-aware client, these tools are available directly in the AI's tool call interface — no copy-pasting required.
+CodeCartographer exposes 30+ tools over the Model Context Protocol (JSON-RPC 2.0, stdio transport). When connected to Claude Code, Cursor, or any MCP-aware client, these tools are available directly in the AI's tool call interface — no copy-pasting required.
 
 ## Starting the MCP server
 
 ```bash
-navigator serve [PATH]
+codecartographer serve [PATH]
 ```
 
 Runs on stdio. Register it in your MCP client:
@@ -13,8 +13,8 @@ Runs on stdio. Register it in your MCP client:
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve"]
     }
   }
@@ -26,8 +26,8 @@ To point the server at a specific project directory:
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve", "/path/to/project"]
     }
   }
@@ -40,8 +40,8 @@ In addition to tools, the server exposes two readable resources:
 
 | URI | Description |
 |-----|-------------|
-| `navigator://project-graph` | Full dependency graph as JSON |
-| `navigator://module-index` | Index of all modules and their signatures as JSON |
+| `codecartographer://project-graph` | Full dependency graph as JSON |
+| `codecartographer://module-index` | Index of all modules and their signatures as JSON |
 
 ## MCP prompts
 
@@ -160,7 +160,7 @@ Parameters:
   maxSearchResults? number  — cap on BM25 search results before ranking
 ```
 
-Returns a ready-to-use context string plus health metadata. This is the highest-level tool — use it when you want Navigator to figure out what context is relevant rather than specifying files manually.
+Returns a ready-to-use context string plus health metadata. This is the highest-level tool — use it when you want CodeCartographer to figure out what context is relevant rather than specifying files manually.
 
 ### `search_skeleton`
 
@@ -232,11 +232,15 @@ Files and symbols affected by changing a module.
 
 ```
 Parameters:
-  target       string  — file path or module id (required)
-  max_related  number  — limit on related items (required)
+  target       string  — file path, module id, or directory prefix (required)
+  max_related  number  — limit on related items (default: 10)
 ```
 
-Returns the target module, its direct dependencies, and its direct dependents. Also returns `lip_uris` — CKB deep-link URIs for drill-down into compiler-accurate symbol analysis.
+Returns the target module, its direct dependencies, and its direct dependents.
+Only edges between source files are included — fixture files and documentation
+are excluded from the dependency graph regardless of filename overlap.
+Also returns `lip_uris` — CKB deep-link URIs for drill-down into compiler-accurate
+symbol analysis.
 
 ### `get_health`
 
@@ -299,6 +303,21 @@ Architectural health trend over time.
 Parameters:
   days?  number  — look-back window (default: 30)
 ```
+
+Returns `snapshots` ordered **newest-first** — `snapshots[0]` is always the current
+reading and carries the same health score as `get_health`. Historical snapshots follow
+in descending timestamp order.
+
+`trendAvailable` (`bool`) — `false` when the window contains fewer than two snapshots
+from distinct git commits (or spans less than one hour for non-git repos). Do not
+render a directional trend arrow or label when this is `false`.
+
+`healthTrend` — `"Improving"`, `"Degrading"`, or `"Stable"` when `trendAvailable` is
+`true`; an absolute label (`"Healthy"`, `"Moderate"`, `"At Risk"`) otherwise.
+
+Calling `get_evolution` on every startup is safe — snapshots for the same git commit
+are updated in-place rather than appended, so the history stays proportional to the
+number of commits, not the number of invocations.
 
 ### `search_project`
 
@@ -552,7 +571,7 @@ Parameters:
 
 ### `watch_status`
 
-Check for changes since the last `navigator watch` cycle.
+Check for changes since the last `codecartographer watch` cycle.
 
 ```
 Parameters: none

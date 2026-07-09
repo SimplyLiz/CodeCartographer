@@ -9,8 +9,8 @@ permissions:
   pull-requests: write   # required for posting PR comments
 
 jobs:
-  navigator:
-    name: Nyx.Navigator
+  codecartographer:
+    name: CodeCartographer
     runs-on: ubuntu-latest
 
     steps:
@@ -20,7 +20,7 @@ jobs:
           # via git show, so the base SHA must be present locally.
           fetch-depth: 0
 
-      - uses: anthropics/navigator@v3
+      - uses: anthropics/codecartographer@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

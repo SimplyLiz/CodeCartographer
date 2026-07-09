@@ -43,7 +43,7 @@ Option B: build a reverse call graph by running `build_file_call_graph` on every
 `answer` currently returns a fixed 6-item chain. A natural follow-on is letting the AI ask for more detail on a specific item:
 
 ```
-navigator answer "how does rate limiting work?" --then 2
+codecartographer answer "how does rate limiting work?" --then 2
 ```
 
 Which would call `reach` on item #2 and append its context tree below the original chain. This doesn't require new infrastructure — it's just `answer` + `reach` composed.
@@ -57,7 +57,7 @@ Which would call `reach` on item #2 and append its context tree below the origin
 `reach` currently starts from one symbol. For code review or refactoring tasks you often want the intersection of two symbols' neighborhoods:
 
 ```
-navigator reach "verify_token" "decode_jwt" --depth 1
+codecartographer reach "verify_token" "decode_jwt" --depth 1
 ```
 
 Returns the union of both trees with shared items deduplicated and shared depth-2 types promoted to depth-1. Implementation: run `build_reach` twice, merge results, re-rank.
@@ -69,7 +69,7 @@ Returns the union of both trees with shared items deduplicated and shared depth-
 We measured token efficiency (1–3% of focused_skeleton) but not answer quality in a controlled way. Experiment 4 was manual inspection on 4 queries.
 
 A proper quality eval would:
-1. Take 20 questions about the Navigator codebase with known correct answers
+1. Take 20 questions about the CodeCartographer codebase with known correct answers
 2. Score `answer` output on: correct item in top 3, noise items ≤ 1, connection annotations correct
 3. Baseline against `query_context` on the same questions
 4. Track as a regression suite when the scoring or ranking changes

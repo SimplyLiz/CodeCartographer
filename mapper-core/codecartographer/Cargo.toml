@@ -1,16 +1,16 @@
 [package]
-name = "nyx-navigator"
-version = "1.1.0"
+name = "CodeCartographer"
+version = "1.2.0"
 edition = "2021"
-description = "Nyx.Navigator for Architectural Intelligence"
+description = "CodeCartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
 
 [[bin]]
-name = "navigator"
+name = "codecartographer"
 path = "src/main.rs"
 
 [lib]
-name = "navigator"
+name = "code_cartographer"
 crate-type = ["staticlib", "rlib"]
 path = "src/lib.rs"
 

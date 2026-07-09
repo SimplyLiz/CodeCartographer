@@ -1,6 +1,6 @@
-# Nyx.Navigator — Gaps & Improvement Backlog
+# CodeCartographer — Gaps & Improvement Backlog
 
-Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs first, then feature ideas. Check off as you ship.
+Findings from a dogfooding session run on the CodeCartographer repo itself. Bugs first, then feature ideas. Check off as you ship.
 
 ---
 
@@ -32,18 +32,18 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
 
 ### Medium
 
-- [x] **`navigator <subcommand> [PATH]` rejects path argument**
-  - `navigator health .` → *"unexpected argument '.' found"*. Same for `hotspots`, `dead`, `diagram`.
-  - Top-level help shows `Usage: navigator [OPTIONS] [PATH] [COMMAND]` — only the bare form (routing to `map`) actually accepts a path. Misleading.
+- [x] **`codecartographer <subcommand> [PATH]` rejects path argument**
+  - `codecartographer health .` → *"unexpected argument '.' found"*. Same for `hotspots`, `dead`, `diagram`.
+  - Top-level help shows `Usage: codecartographer [OPTIONS] [PATH] [COMMAND]` — only the bare form (routing to `map`) actually accepts a path. Misleading.
   - Fix: accept `[PATH]` on every analysis subcommand, OR remove it from top-level usage.
   - **Resolution**: fixed in b73d5a5 — subcommand path arg wired through `resolve_path()` on all analysis commands.
 
 ### Low
 
 - [x] **`install.sh` leaves stale binary with no upgrade hint**
-  - `navigator --version` on a months-old install just prints the old version. No warning, no `navigator update`.
-  - Add `navigator update` or an opt-in version-check on startup.
-  - **Resolution**: `navigator update` command added. Walks up from the binary location to find `install.sh` and re-runs it. Falls back to a manual-install hint if the script isn't found.
+  - `codecartographer --version` on a months-old install just prints the old version. No warning, no `codecartographer update`.
+  - Add `codecartographer update` or an opt-in version-check on startup.
+  - **Resolution**: `codecartographer update` command added. Walks up from the binary location to find `install.sh` and re-runs it. Falls back to a manual-install hint if the script isn't found.
 
 ---
 
@@ -51,28 +51,28 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
 
 ### The single biggest fix
 
-- [x] **Default `.navigatorignore` + source-role classifier**
+- [x] **Default `.codecartographerignore` + source-role classifier**
   - Closes most of the noise above in one move.
   - Ship defaults: `*.md`, `*.toml`, `*.lock`, `*.yaml`, `*.yml`, `LICENSE*`, `.github/**`, `.gitignore`, generated files, etc.
   - Classify each file by language; gate `hotspots`, `dead`, `simulate`, `check` on `is_source == true`.
-  - **Resolution**: `is_source_file()` in scanner.rs:297 and applied in all structural analysis commands — `health`, `evolution`, `hotspots`, `dead`, `simulate`, `check` (b73d5a5), and `diagram` (this session, main.rs:2886). LLM-context commands (`map`, `llmstxt`, `claudemd`, `context`, `symbols`, `query`, MCP) intentionally keep all files. `.navigatorignore` + `.gitignore` user overrides remain available.
+  - **Resolution**: `is_source_file()` in scanner.rs:297 and applied in all structural analysis commands — `health`, `evolution`, `hotspots`, `dead`, `simulate`, `check` (b73d5a5), and `diagram` (this session, main.rs:2886). LLM-context commands (`map`, `llmstxt`, `claudemd`, `context`, `symbols`, `query`, MCP) intentionally keep all files. `.codecartographerignore` + `.gitignore` user overrides remain available.
 
 ### Closes existing gaps
 
 - [x] **`simulate --diff <ref>` / `simulate --staged`**
   - Today simulate only takes `--new-signature`. Real workflow: predict impact of pending changes already on disk.
-  - `navigator simulate --staged --fail-on-cycle` for pre-commit hooks.
+  - `codecartographer simulate --staged --fail-on-cycle` for pre-commit hooks.
   - **Resolution**: `--staged`, `--diff <ref>`, and `--fail-on-cycle` added. `--module` is now optional when either diff flag is present. git_changed_source_files() helper runs the appropriate `git diff --name-only` and feeds each changed module through the existing impact analysis.
 
 - [x] **PR health delta**
-  - `navigator health --compare main` → "Health: 80 → 72 (-8). Reason: +1 cycle, +3 bridges."
+  - `codecartographer health --compare main` → "Health: 80 → 72 (-8). Reason: +1 cycle, +3 bridges."
   - The interesting number is the change, not the absolute score.
   - **Resolution**: `--compare <ref>` added to `health`. Builds a second graph from `git ls-tree`/`git show` at the ref, then prints a before→after table for score, bridges, cycles, god modules, and layer violations.
 
 - [x] **`layers` subcommand group**
   - `layers.toml` is a headline feature with no tooling.
-  - `navigator layers init` (auto-propose from imports), `validate`, `diagram`, `suggest`.
-  - **Resolution**: All four subcommands implemented. Also fixed a critical bug: `detect_layer_violations` in api.rs was always using an empty default config, so `layers.toml` was never actually loaded — now loads from `./layers.toml` or `./.navigator/layers.toml` on every analysis. `init` topologically sorts directories by import in-degree and assigns presentation/domain/service/infrastructure names; `validate` exits 1 on any violation (with `--json`); `diagram` emits a collapsed layer graph in mermaid or dot; `suggest` reports unlayered directories, active violations with remediation hints, and unused allowed_flows entries.
+  - `codecartographer layers init` (auto-propose from imports), `validate`, `diagram`, `suggest`.
+  - **Resolution**: All four subcommands implemented. Also fixed a critical bug: `detect_layer_violations` in api.rs was always using an empty default config, so `layers.toml` was never actually loaded — now loads from `./layers.toml` or `./.codecartographer/layers.toml` on every analysis. `init` topologically sorts directories by import in-degree and assigns presentation/domain/service/infrastructure names; `validate` exits 1 on any violation (with `--json`); `diagram` emits a collapsed layer graph in mermaid or dot; `suggest` reports unlayered directories, active violations with remediation hints, and unused allowed_flows entries.
 
 - [x] **Bridge remediation hints**
   - `health` reports "14 bridges" silently. Each bridge deserves a one-line suggestion.
@@ -90,9 +90,9 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
   - **Resolution**: `--untested` flag added. `has_sibling_test()` checks `foo_test.rs`, `test_foo.py`, `foo.test.ts`, `foo.spec.ts` patterns and `tests/`/`__tests__`/`test/` sibling directories.
 
 - [x] **Snapshot + diff of `project_graph.json`**
-  - `navigator snapshot save v3.0.0` / `snapshot diff v1.3.0 v3.0.0`.
+  - `codecartographer snapshot save v3.0.0` / `snapshot diff v1.3.0 v3.0.0`.
   - Shows module/edge/cycle/bridge deltas between two saved graphs.
-  - **Resolution**: `navigator snapshot save <TAG>` persists health_score, file/edge/cycle/bridge/god-module/layer-violation counts to `.navigator/snapshots/<TAG>.json`. `snapshot diff <TAG1> <TAG2> [--json]` shows a before→after table with deltas. `snapshot list` enumerates saved snapshots.
+  - **Resolution**: `codecartographer snapshot save <TAG>` persists health_score, file/edge/cycle/bridge/god-module/layer-violation counts to `.codecartographer/snapshots/<TAG>.json`. `snapshot diff <TAG1> <TAG2> [--json]` shows a before→after table with deltas. `snapshot list` enumerates saved snapshots.
 
 ### New capabilities
 
@@ -101,26 +101,26 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
   - **Resolution**: `edge_type` on `GraphEdge` is now populated as `"runtime"`, `"test"`, or `"doc"` based on the source file path (using existing `is_test_path()` / `is_doc_path()`). Dead-code analysis uses a separate `runtime_in_degree` counter so modules imported only from tests are correctly flagged as dead-code candidates. Bridge math still uses total in-degree.
 
 - [x] **Tree-sitter parser as opt-in**
-  - `navigator map --parser tree-sitter` for accuracy over speed. Regex misses async/generic/macro corner cases.
+  - `codecartographer map --parser tree-sitter` for accuracy over speed. Regex misses async/generic/macro corner cases.
   - **Resolution**: Already implemented — `extract_skeleton()` in `mapper.rs` runs regex first for imports, then upgrades signatures via `crate::extractor::ts_extract()` (tree-sitter, Tier 2 confidence) for all supported languages (Rust, Go, Python, TS/JS, C/C++). No flag needed; tree-sitter runs automatically when the feature is compiled in (default).
 
 - [x] **Language-support introspection**
-  - `navigator languages` lists supported languages.
+  - `codecartographer languages` lists supported languages.
   - Every command should report `skipped N files (unsupported language)` so users see coverage.
-  - **Resolution**: `navigator languages [PATH] [--json]` added. Shows file count per language with ASCII bar chart, plus "skipped N non-source files" count.
+  - **Resolution**: `codecartographer languages [PATH] [--json]` added. Shows file count per language with ASCII bar chart, plus "skipped N non-source files" count.
 
 - [x] **Shortest-path explainer**
-  - `navigator path src/ui/login.tsx src/db/migrations.rs` → human-readable hop-by-hop chain.
+  - `codecartographer path src/ui/login.tsx src/db/migrations.rs` → human-readable hop-by-hop chain.
   - Trivial from the graph, exactly the tool people reach for in code review.
-  - **Resolution**: `navigator path --from <FILE> --to <FILE> [--json]` added. BFS on the directed import graph; accepts repo-relative paths or module IDs with fuzzy suffix matching. Reports hop count and each step.
+  - **Resolution**: `codecartographer path --from <FILE> --to <FILE> [--json]` added. BFS on the directed import graph; accepts repo-relative paths or module IDs with fuzzy suffix matching. Reports hop count and each step.
 
 - [x] **Co-change community detection**
   - `cochange` returns pairs. Cluster them (Louvain) to surface implicit modules vs declared modules → hidden coupling.
-  - **Resolution**: `navigator cochange --cluster [--threshold 0.5] [--json]` added. Uses union-find on pairs with `coupling_score >= threshold` to form connected components (implicit modules). Output shows each community's size and max coupling score. `--json` emits a stable schema.
+  - **Resolution**: `codecartographer cochange --cluster [--threshold 0.5] [--json]` added. Uses union-find on pairs with `coupling_score >= threshold` to form connected components (implicit modules). Output shows each community's size and max coupling score. `--json` emits a stable schema.
 
 - [x] **TODO/FIXME/HACK density heatmap**
   - Cheap, predictive, pairs nicely with hotspots.
-  - **Resolution**: `navigator todo [PATH] [--top N] [--json]` added. Scans all source files for TODO/FIXME/HACK/XXX/WORKAROUND/NOCOMMIT, reports per-file totals with per-marker breakdown, sorted by density.
+  - **Resolution**: `codecartographer todo [PATH] [--top N] [--json]` added. Scans all source files for TODO/FIXME/HACK/XXX/WORKAROUND/NOCOMMIT, reports per-file totals with per-marker breakdown, sorted by density.
 
 ### AI-context specific (the differentiation story)
 
@@ -136,7 +136,7 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
 
 - [x] **Token-budget regression in CI**
   - `context-health` exists; gate it. Warn when a PR pushes the architecture bundle past target budget.
-  - **Resolution**: `--fail-if-over <TOKENS>` added to `context-health`. Exits 1 with a clear message when token count exceeds the threshold. Compose with `navigator context | navigator context-health --fail-if-over 8000` in CI.
+  - **Resolution**: `--fail-if-over <TOKENS>` added to `context-health`. Exits 1 with a clear message when token count exceeds the threshold. Compose with `codecartographer context | codecartographer context-health --fail-if-over 8000` in CI.
 
 - [x] **Machine-readable everywhere (`--json`)**
   - Most commands emit pretty ANSI tables. For MCP / tool integration, every command needs `--json` with a stable schema.
@@ -146,13 +146,13 @@ Findings from a dogfooding session run on the Nyx.Navigator repo itself. Bugs fi
 ### Ergonomics & integration
 
 - [ ] **VSCode / JetBrains sidebar**
-  - `serve` exposes MCP for Claude Code / Cursor. A native tree view ("this file's bridgeness / hotspot / health contribution") pulls Nyx.Navigator into daily IDE use.
+  - `serve` exposes MCP for Claude Code / Cursor. A native tree view ("this file's bridgeness / hotspot / health contribution") pulls CodeCartographer into daily IDE use.
 
 - [x] **GitHub App / Action**
-  - `navigator-action` runs `check` + posts health delta as PR comment + uploads snapshot artifact.
+  - `codecartographer-action` runs `check` + posts health delta as PR comment + uploads snapshot artifact.
   - Without it, adoption stalls at "I installed it locally."
   - **Resolution**: `github-action/` composite action. `action.yml` defines inputs (`fail-on-cycle`, `fail-on-layer-violation`, `fail-on-regression`, `regression-threshold`, `post-comment`). `scripts/install.sh` downloads the platform binary from GitHub Releases. `scripts/run.sh` runs `health --compare BASE_SHA`, `hotspots`, `snapshot save`; cross-references changed files against hotspot list; posts/updates a single sticky PR comment (identified by HTML marker, PATCH if exists, POST if new); writes to `$GITHUB_STEP_SUMMARY`; exits 1 on gate failures. Release workflow updated to also publish binary tarballs alongside the static library. `example-workflow.yml` provided for users.
 
 - [ ] **Monorepo / multi-root stitching**
-  - `navigator-workspaces.toml` listing N paths, analyzed as one graph with cross-repo edges via a registry.
+  - `codecartographer-workspaces.toml` listing N paths, analyzed as one graph with cross-repo edges via a registry.
   - Answers: *"does service A still depend on legacy lib B?"*

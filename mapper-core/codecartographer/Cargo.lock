@@ -3,6 +3,39 @@
 version = 4
 
 [[package]]
+name = "CodeCartographer"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "cbindgen",
+ "chrono",
+ "clap",
+ "flate2",
+ "notify",
+ "notify-debouncer-mini",
+ "petgraph",
+ "rayon",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tiktoken-rs",
+ "tokio",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1076,39 +1109,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "nyx-navigator"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "arboard",
- "cbindgen",
- "chrono",
- "clap",
- "flate2",
- "notify",
- "notify-debouncer-mini",
- "petgraph",
- "rayon",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tiktoken-rs",
- "tokio",
- "toml",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "uuid",
- "walkdir",
 ]
 
 [[package]]

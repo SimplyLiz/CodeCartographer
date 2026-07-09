@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// Global user-level config at ~/.config/navigator/config.toml.
-/// Applies across all repos; per-repo .navigator/config.toml overrides it.
+/// Global user-level config at ~/.config/codecartographer/config.toml.
+/// Applies across all repos; per-repo .codecartographer/config.toml overrides it.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalConfig {
     #[serde(default)]
@@ -23,7 +23,7 @@ impl GlobalConfig {
         Some(
             PathBuf::from(home)
                 .join(".config")
-                .join("navigator")
+                .join("codecartographer")
                 .join("config.toml"),
         )
     }

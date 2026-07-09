@@ -1,6 +1,6 @@
 # Experiment Results: reach + answer vs focused_skeleton + query_context
 
-Ran against the Navigator codebase itself (25 Rust source files, ~16k tokens in full skeleton).
+Ran against the CodeCartographer codebase itself (25 Rust source files, ~16k tokens in full skeleton).
 
 ---
 

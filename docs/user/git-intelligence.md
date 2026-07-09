@@ -1,25 +1,25 @@
 # Git Intelligence
 
-Navigator analyzes git history to surface patterns that aren't visible from the code alone: which files are constantly changing, which files always change together, and which changes scatter unpredictably across the codebase.
+CodeCartographer analyzes git history to surface patterns that aren't visible from the code alone: which files are constantly changing, which files always change together, and which changes scatter unpredictably across the codebase.
 
 All git commands require git on your `$PATH` and a git repository with history.
 
 ## Hotspots
 
 ```bash
-navigator hotspots [PATH] [OPTIONS]
+codecartographer hotspots [PATH] [OPTIONS]
 ```
 
 Files that are both high-churn (changed frequently) and high-complexity (many imports or large surface area). These are the highest-risk files in a codebase — they change often and touch many things.
 
 ```bash
-navigator hotspots                       # top 15 hotspots, last 500 commits
-navigator hotspots --top 30              # show more results
-navigator hotspots --commits 1000        # look further back
-navigator hotspots --untested            # only hotspots with no sibling test file
-navigator hotspots --by-author           # add dominant owner column
-navigator hotspots --bus-factor          # add unique author count (lower = riskier)
-navigator hotspots --json                # machine-readable output
+codecartographer hotspots                       # top 15 hotspots, last 500 commits
+codecartographer hotspots --top 30              # show more results
+codecartographer hotspots --commits 1000        # look further back
+codecartographer hotspots --untested            # only hotspots with no sibling test file
+codecartographer hotspots --by-author           # add dominant owner column
+codecartographer hotspots --bus-factor          # add unique author count (lower = riskier)
+codecartographer hotspots --json                # machine-readable output
 ```
 
 **Flags:**
@@ -38,7 +38,7 @@ navigator hotspots --json                # machine-readable output
 ## Per-file churn
 
 ```bash
-navigator hotspots --commits 500 --json | jq '.[].churn_count'
+codecartographer hotspots --commits 500 --json | jq '.[].churn_count'
 ```
 
 Raw churn (commit count per file) is included in the JSON output. The MCP tool `git_churn` exposes this directly.
@@ -46,18 +46,18 @@ Raw churn (commit count per file) is included in the JSON output. The MCP tool `
 ## Co-change analysis
 
 ```bash
-navigator cochange [PATH] [OPTIONS]
+codecartographer cochange [PATH] [OPTIONS]
 ```
 
 Files that are frequently committed together, regardless of whether they have an import relationship. This is temporal coupling — the codebase is telling you these files are coupled even if the import graph doesn't show it.
 
 ```bash
-navigator cochange                        # top pairs, min 5 co-changes
-navigator cochange --min-count 3          # lower threshold to see more pairs
-navigator cochange --commits 1000         # look further back
-navigator cochange --cluster              # cluster into implicit modules
-navigator cochange --threshold 0.7        # coupling-score threshold for clusters
-navigator cochange --json                 # machine-readable output
+codecartographer cochange                        # top pairs, min 5 co-changes
+codecartographer cochange --min-count 3          # lower threshold to see more pairs
+codecartographer cochange --commits 1000         # look further back
+codecartographer cochange --cluster              # cluster into implicit modules
+codecartographer cochange --threshold 0.7        # coupling-score threshold for clusters
+codecartographer cochange --json                 # machine-readable output
 ```
 
 **Flags:**
@@ -79,15 +79,15 @@ navigator cochange --json                 # machine-readable output
 ## Semantic diff
 
 ```bash
-navigator semidiff COMMIT1 [COMMIT2]
+codecartographer semidiff COMMIT1 [COMMIT2]
 ```
 
 Function-level diff between two commits. Instead of showing line changes, shows which public signatures were added, removed, or modified.
 
 ```bash
-navigator semidiff HEAD~1             # compare current HEAD to one commit back
-navigator semidiff HEAD~5 HEAD~1      # compare any two refs
-navigator semidiff main               # compare working tree to main branch
+codecartographer semidiff HEAD~1             # compare current HEAD to one commit back
+codecartographer semidiff HEAD~5 HEAD~1      # compare any two refs
+codecartographer semidiff main               # compare working tree to main branch
 ```
 
 **Output:**
@@ -106,16 +106,16 @@ src/auth.rs
 ## Shotgun surgery candidates
 
 ```bash
-navigator shotgun [PATH] [OPTIONS]
+codecartographer shotgun [PATH] [OPTIONS]
 ```
 
 Files whose changes scatter across many unrelated modules — every time you touch file X, you also need to change files A, B, C, D, and E, which have nothing to do with each other. This is the "shotgun surgery" code smell: a single logical change requires edits in many places.
 
 ```bash
-navigator shotgun                     # top 20, min 3 partners
-navigator shotgun --top 30
-navigator shotgun --commits 1000
-navigator shotgun --min-partners 5    # only show files with high scatter
+codecartographer shotgun                     # top 20, min 3 partners
+codecartographer shotgun --top 30
+codecartographer shotgun --commits 1000
+codecartographer shotgun --min-partners 5    # only show files with high scatter
 ```
 
 **Flags:**
@@ -130,15 +130,15 @@ navigator shotgun --min-partners 5    # only show files with high scatter
 ## TODO density
 
 ```bash
-navigator todo [PATH] [--top N] [--json]
+codecartographer todo [PATH] [--top N] [--json]
 ```
 
 Scans all source files for `TODO`, `FIXME`, `HACK`, and similar markers. Reports per-file density (markers per thousand lines) and absolute counts.
 
 ```bash
-navigator todo                 # top 20 files by TODO density
-navigator todo --top 50
-navigator todo --json
+codecartographer todo                 # top 20 files by TODO density
+codecartographer todo --top 50
+codecartographer todo --json
 ```
 
 Use this to find accumulated technical debt that hasn't been tracked in an issue tracker.
@@ -146,7 +146,7 @@ Use this to find accumulated technical debt that hasn't been tracked in an issue
 ## Polling and watching for changes
 
 ```bash
-navigator watch [PATH]
+codecartographer watch [PATH]
 ```
 
 Stays running and updates the skeleton map when files change. Updates are debounced at 500ms.

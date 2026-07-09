@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Nyx.Navigator context compressor.
+CodeCartographer context compressor.
 
 Usage:
   python compressor.py [TARGET]
       Generate a deps snapshot for TARGET and save to state_key.md.
 
   python compressor.py [TARGET] --messages <file.json> --token-budget <N>
-      Load messages from a JSON file, append navigator context, compress
+      Load messages from a JSON file, append codecartographer context, compress
       with ContextCompressionEngine to fit N tokens, and save to state_key.md.
 
   python compressor.py --messages <file.json> --token-budget <N>
-      Compress an existing messages file without adding navigator context.
+      Compress an existing messages file without adding codecartographer context.
 """
 
 import json
@@ -22,42 +22,42 @@ import sys
 
 
 # ---------------------------------------------------------------------------
-# Nyx.Navigator analysis
+# CodeCartographer analysis
 # ---------------------------------------------------------------------------
 
-def get_navigator_analysis(target: str) -> dict | None:
+def get_codecartographer_analysis(target: str) -> dict | None:
     """
-    Run `navigator deps <target> --format json` and return parsed JSON output.
-    Returns None if navigator is not available or command fails.
+    Run `codecartographer deps <target> --format json` and return parsed JSON output.
+    Returns None if codecartographer is not available or command fails.
     """
-    if not shutil.which("navigator"):
-        print("Warning: 'navigator' not found in PATH. Skipping dependency analysis.")
+    if not shutil.which("codecartographer"):
+        print("Warning: 'codecartographer' not found in PATH. Skipping dependency analysis.")
         return None
 
     try:
         result = subprocess.run(
-            ["navigator", "deps", target, "--format", "json"],
+            ["codecartographer", "deps", target, "--format", "json"],
             capture_output=True,
             text=True,
             timeout=30,
         )
         if result.returncode != 0:
-            print(f"Warning: navigator command failed: {result.stderr.strip()}")
+            print(f"Warning: codecartographer command failed: {result.stderr.strip()}")
             return None
         return json.loads(result.stdout)
     except subprocess.TimeoutExpired:
-        print("Warning: navigator command timed out.")
+        print("Warning: codecartographer command timed out.")
         return None
     except json.JSONDecodeError as e:
-        print(f"Warning: Failed to parse navigator output: {e}")
+        print(f"Warning: Failed to parse codecartographer output: {e}")
         return None
     except Exception as e:
-        print(f"Warning: Unexpected error running navigator: {e}")
+        print(f"Warning: Unexpected error running codecartographer: {e}")
         return None
 
 
 def deps_to_xml(deps_output: dict) -> str:
-    """Convert navigator deps JSON to token-efficient XML."""
+    """Convert codecartographer deps JSON to token-efficient XML."""
     node_id = deps_output.get("node_id", "")
     node_name = deps_output.get("node_name", "unknown")
     dependencies = deps_output.get("dependencies", [])
@@ -98,7 +98,7 @@ def find_cce_dist() -> str | None:
     """
     Locate the built CCE dist directory.  Search order:
       1. CCE_DIST environment variable
-      2. .navigator/cce_dist config file (written by launch.py)
+      2. .codecartographer/cce_dist config file (written by launch.py)
       3. Sibling directory ContextCompressionEngine/dist (dev layout)
     """
     # 1. Env var
@@ -107,7 +107,7 @@ def find_cce_dist() -> str | None:
         return env
 
     # 2. Config written by launch.py
-    config_file = os.path.join(".navigator", "cce_dist")
+    config_file = os.path.join(".codecartographer", "cce_dist")
     if os.path.isfile(config_file):
         with open(config_file, encoding="utf-8") as f:
             path = f.read().strip()
@@ -199,7 +199,7 @@ def compress_chat_log(
     Generate a state snapshot.
 
     - If messages_file is given, load it as a message array.
-    - If target is given, run navigator and append it as a system message.
+    - If target is given, run codecartographer and append it as a system message.
     - If token_budget is given and CCE is available, compress to fit.
     - Write the result to state_key.md.
     """
@@ -217,14 +217,14 @@ def compress_chat_log(
             print(f"Error: failed to load {messages_file}: {e}")
             sys.exit(1)
 
-    # Append navigator context as a system message
+    # Append codecartographer context as a system message
     if target:
-        deps_output = get_navigator_analysis(target)
+        deps_output = get_codecartographer_analysis(target)
         if deps_output:
             xml_block = deps_to_xml(deps_output)
             messages.append({"role": "system", "content": xml_block})
         else:
-            messages.append({"role": "system", "content": "<!-- navigator analysis unavailable -->"})
+            messages.append({"role": "system", "content": "<!-- codecartographer analysis unavailable -->"})
 
     # Compress with CCE if token budget is set
     if token_budget is not None and messages:

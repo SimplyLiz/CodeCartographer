@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The Nyx.Navigator project supports the following versions:
+The CodeCartographer project supports the following versions:
 
 - **v3.0.x:** Supported until December 31, 2024
 - **v2.x:** End-of-life December 31, 2024
@@ -22,7 +22,7 @@ Security fixes will be released as patch versions (e.g., 3.0.1, 3.0.2). These re
 
 ## Path Validation
 
-All paths provided to Nyx.Navigator will be validated to prevent directory traversal attacks. Paths containing '..' that would escape the project root will be rejected.
+All paths provided to CodeCartographer will be validated to prevent directory traversal attacks. Paths containing '..' that would escape the project root will be rejected.
 
 ## Regex Timeouts
 
@@ -30,7 +30,7 @@ Regular expression operations will include safety limits to prevent denial-of-se
 
 ## File Permissions
 
-Temporary files created by Nyx.Navigator will be created with restricted permissions (0o600) to prevent unauthorized access.
+Temporary files created by CodeCartographer will be created with restricted permissions (0o600) to prevent unauthorized access.
 
 ## Dependency Security
 

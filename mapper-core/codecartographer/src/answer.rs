@@ -137,24 +137,26 @@ pub fn build_answer(
         file_total_chars.insert(path.clone(), chars.max(1));
     }
 
-    let mut ranked_files: Vec<(String, f64)> = file_matches
-        .iter()
-        .map(|(path, &hits)| {
-            // Normalise hits by estimated file density so large files don't win by volume.
-            let density = hits as f64 / (file_total_chars[path] as f64).sqrt();
-            (path.clone(), density)
-        })
-        .collect();
-    ranked_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked_files.truncate(10);
+    // Score every candidate file in a single map so name-matched code files reliably
+    // outrank doc coincidences whether or not BM25 already surfaced them.
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for (path, &hits) in &file_matches {
+        // Normalise hits by estimated file density so large files don't win by volume.
+        let mut density = hits as f64 / (file_total_chars[path] as f64).sqrt();
+        // Code bias: "how does X work" is answered by code, but docs win BM25 on
+        // conceptual terms (a design doc mentions "churn" far more than git_churn's
+        // body does). Down-weight docs so the implementation surfaces first.
+        if crate::api::is_doc_path(path) {
+            density *= 0.3;
+        }
+        scores.insert(path.clone(), density);
+    }
 
-    // Supplement BM25 with filename-match candidates.
-    // BM25 IDF-penalises terms that appear in many files (e.g. "reach" in a repo
-    // named "reach"), causing the directly relevant file to rank below noise.
-    // Any file whose stem matches a query term gets added with a small sentinel score.
-    let existing: std::collections::HashSet<_> = ranked_files.iter().map(|(p, _)| p.clone()).collect();
+    // Name-match boost across ALL files. BM25 IDF-penalises terms common to many files
+    // (e.g. "reach" in a repo named "reach") and misses vocabulary matches (a term
+    // `churn` vs symbol `git_churn`). Any file matching by filename stem, PascalCase
+    // symbol, or symbol-name substring is floored to a strong score — above doc noise.
     for mf in mapped {
-        if existing.contains(&mf.path) { continue; }
         let stem = mf.path
             .rsplit('/')
             .next()
@@ -168,17 +170,29 @@ pub fn build_answer(
         let matches_filename = query_terms.iter().any(|t| {
             t.len() >= 4 && (stem.contains(t.as_str()) || t.contains(stem.as_str()))
         });
-        // Also boost files containing PascalCase terms from the query.
         let matches_pascal = pascal_terms.iter().any(|pt| {
             mf.signatures.iter().any(|s| {
                 s.symbol_name.as_deref() == Some(pt.as_str())
                     || s.qualified_name.as_deref() == Some(pt.as_str())
             })
         });
-        if matches_filename || matches_pascal {
-            ranked_files.push((mf.path.clone(), 0.5)); // sentinel score below BM25 hits
+        let matches_symbol = mf.signatures.iter().any(|s| {
+            let nm = s.symbol_name.as_deref().unwrap_or("").to_lowercase();
+            !nm.is_empty()
+                && query_terms
+                    .iter()
+                    .any(|t| t.len() >= 3 && nm.contains(t.as_str()))
+        });
+        if matches_filename || matches_pascal || matches_symbol {
+            let floor = if crate::api::is_doc_path(&mf.path) { 0.5 } else { 2.0 };
+            let e = scores.entry(mf.path.clone()).or_insert(0.0);
+            *e = e.max(floor);
         }
     }
+
+    let mut ranked_files: Vec<(String, f64)> = scores.into_iter().collect();
+    ranked_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked_files.truncate(12);
 
     let mut scored: Vec<ScoredSymbol> = vec![];
 
@@ -293,11 +307,25 @@ const STOP_WORDS: &[&str] = &[
 ];
 
 fn tokenize_query(query: &str) -> Vec<String> {
-    query
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| t.len() >= 3 && !STOP_WORDS.contains(&t.to_lowercase().as_str()))
-        .map(|t| t.to_lowercase())
-        .collect()
+    let mut terms: Vec<String> = Vec::new();
+    for t in query.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let lower = t.to_lowercase();
+        if lower.len() >= 3 && !STOP_WORDS.contains(&lower.as_str()) {
+            terms.push(lower.clone());
+        }
+        // Also emit identifier subwords so a camelCase/snake_case term in the
+        // question (e.g. `getUserById`, `git_churn`) matches individual symbols.
+        for part in lower.split('_') {
+            for sub in crate::search::split_identifier(part) {
+                if sub.len() >= 3 && sub != lower && !STOP_WORDS.contains(&sub.as_str()) {
+                    terms.push(sub);
+                }
+            }
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 fn score_symbol(

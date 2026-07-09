@@ -1,11 +1,11 @@
 # Architecture Analysis
 
-Nyx.Navigator builds a dependency graph from your codebase and runs several analyses on top of it. This page covers the architectural analysis commands.
+CodeCartographer builds a dependency graph from your codebase and runs several analyses on top of it. This page covers the architectural analysis commands.
 
 ## Health score
 
 ```bash
-navigator health [PATH] [--compare REF] [--json]
+codecartographer health [PATH] [--compare REF] [--json]
 ```
 
 Produces an overall health score 0–100 and a breakdown of structural issues.
@@ -32,23 +32,23 @@ Health score: 74 / 100
 ## Simulate change
 
 ```bash
-navigator simulate --module FILE [OPTIONS] [--json]
+codecartographer simulate --module FILE [OPTIONS] [--json]
 ```
 
 Predicts the architectural impact of a change before you make it.
 
 ```bash
 # What happens if I add a new public function to auth.rs?
-navigator simulate --module src/auth.rs --new-signature "pub fn refresh_token(id: UserId) -> Token"
+codecartographer simulate --module src/auth.rs --new-signature "pub fn refresh_token(id: UserId) -> Token"
 
 # What if I remove this signature?
-navigator simulate --module src/auth.rs --remove-signature "pub fn legacy_login"
+codecartographer simulate --module src/auth.rs --remove-signature "pub fn legacy_login"
 
 # Analyse all staged changes (what would happen if I committed these?)
-navigator simulate --staged
+codecartographer simulate --staged
 
 # Analyse changes relative to a branch
-navigator simulate --diff main
+codecartographer simulate --diff main
 ```
 
 **Output includes:**
@@ -70,7 +70,7 @@ navigator simulate --diff main
 ## CI gate
 
 ```bash
-navigator check
+codecartographer check
 ```
 
 Exits non-zero if any hard constraint is violated. Designed for CI pipelines and pre-commit hooks.
@@ -84,17 +84,17 @@ The GitHub Action wraps this with more fine-grained gates — see [GitHub Action
 ## Dead code
 
 ```bash
-navigator dead [PATH] [--json]
+codecartographer dead [PATH] [--json]
 ```
 
 Lists files and public symbols that are not imported anywhere in the project (in-degree = 0 in the dependency graph). These are dead-code candidates.
 
-**Caveats:** Navigator's analysis is heuristic — it does not track runtime dynamism (reflection, dynamic imports, `require()` with variables). A symbol flagged here may still be used at runtime. Use the output as a list of candidates to verify manually, not as a deletion checklist.
+**Caveats:** CodeCartographer's analysis is heuristic — it does not track runtime dynamism (reflection, dynamic imports, `require()` with variables). A symbol flagged here may still be used at runtime. Use the output as a list of candidates to verify manually, not as a deletion checklist.
 
 ## Unreferenced symbols
 
 ```bash
-navigator symbols --unreferenced
+codecartographer symbols --unreferenced
 ```
 
 Lists public exported symbols — functions, types, constants — that have no callers within the scanned project. Narrower than `dead` (which operates at the file level); this operates at the symbol level.
@@ -102,26 +102,26 @@ Lists public exported symbols — functions, types, constants — that have no c
 ## Dependency tree
 
 ```bash
-navigator deps TARGET [--format json]
+codecartographer deps TARGET [--format json]
 ```
 
 Shows the dependency tree of a single module as JSON.
 
 ```bash
-navigator deps src/api.rs
-navigator deps src/auth.rs --format json | jq '.dependencies[]'
+codecartographer deps src/api.rs
+codecartographer deps src/auth.rs --format json | jq '.dependencies[]'
 ```
 
 ## Import path
 
 ```bash
-navigator path A B
+codecartographer path A B
 ```
 
 Finds the shortest import path between two modules — how does module A transitively depend on module B?
 
 ```bash
-navigator path src/main.rs src/db/migrations.rs
+codecartographer path src/main.rs src/db/migrations.rs
 ```
 
 Useful for understanding why a seemingly unrelated module is in the blast radius of a change.
@@ -129,13 +129,13 @@ Useful for understanding why a seemingly unrelated module is in the blast radius
 ## Architecture evolution
 
 ```bash
-navigator evolution [PATH] [--days DAYS]
+codecartographer evolution [PATH] [--days DAYS]
 ```
 
 Shows architectural health trends over time. Looks back at the last N days (default 30) of git history and plots how the health score, cycle count, and god-module count have changed.
 
 ```bash
-navigator evolution --days 90
+codecartographer evolution --days 90
 ```
 
 **Output includes:**
@@ -145,7 +145,7 @@ navigator evolution --days 90
 
 ## Layer enforcement
 
-Define allowed import flows in `layers.toml` and Navigator will detect violations automatically.
+Define allowed import flows in `layers.toml` and CodeCartographer will detect violations automatically.
 
 ```toml
 [layers]
@@ -159,8 +159,8 @@ services -> db
 ```
 
 ```bash
-navigator layers      # check current violations
-navigator check       # fail CI if violations exist
+codecartographer layers      # check current violations
+codecartographer check       # fail CI if violations exist
 ```
 
 **Violation types:**
@@ -174,8 +174,8 @@ See [Configuration](configuration.md) for `layers.toml` placement options.
 ## Architecture snapshots
 
 ```bash
-navigator snapshot          # save current architecture snapshot
-navigator snapshot --diff   # compare current state to last saved snapshot
+codecartographer snapshot          # save current architecture snapshot
+codecartographer snapshot --diff   # compare current state to last saved snapshot
 ```
 
 Snapshots record the dependency graph, health score, cycle list, and layer violations at a point in time. Use them to track whether a branch improves or degrades the architecture relative to the baseline.
@@ -183,10 +183,10 @@ Snapshots record the dependency graph, health score, cycle list, and layer viola
 ## Context health
 
 ```bash
-navigator context-health [FILE]
+codecartographer context-health [FILE]
 ```
 
-Scores a context bundle (e.g., `navigator_map.xml`) on six metrics:
+Scores a context bundle (e.g., `codecartographer_map.xml`) on six metrics:
 
 | Metric | What it measures |
 |--------|-----------------|
@@ -200,8 +200,8 @@ Scores a context bundle (e.g., `navigator_map.xml`) on six metrics:
 Composite grade A–F. A score below B is worth improving — usually by switching to `map` mode or trimming with `--focus` and `--budget`.
 
 ```bash
-navigator context-health navigator_map.xml --model claude
-navigator context-health navigator_map.xml --model gpt4
+codecartographer context-health codecartographer_map.xml --model claude
+codecartographer context-health codecartographer_map.xml --model gpt4
 ```
 
 The `--model` flag adjusts the utilization headroom calculation to use the correct context window size for your target model.
@@ -209,8 +209,8 @@ The `--model` flag adjusts the utilization headroom calculation to use the corre
 ## Generate AI-friendly project files
 
 ```bash
-navigator llmstxt    # generate llms.txt project index
-navigator claudemd   # generate CLAUDE.md architecture guide
+codecartographer llmstxt    # generate llms.txt project index
+codecartographer claudemd   # generate CLAUDE.md architecture guide
 ```
 
 `llmstxt` produces a `llms.txt` file following the LLMs.txt standard — a structured index of your project an AI can use as a root context. `claudemd` produces a `CLAUDE.md` tailored to Claude Code's conventions.
@@ -218,15 +218,15 @@ navigator claudemd   # generate CLAUDE.md architecture guide
 ## Languages detected
 
 ```bash
-navigator languages
+codecartographer languages
 ```
 
-Lists the programming languages Navigator detected in the project and the number of files per language. Useful for verifying the scanner is finding what you expect.
+Lists the programming languages CodeCartographer detected in the project and the number of files per language. Useful for verifying the scanner is finding what you expect.
 
 ## Project status
 
 ```bash
-navigator status [PATH]
+codecartographer status [PATH]
 ```
 
 Shows a dashboard: file counts, last-sync time, current health score summary, and whether any state is stale.

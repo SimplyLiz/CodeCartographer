@@ -1,17 +1,17 @@
 openapi: 3.0.3
 info:
-  title: Project Nyx.Navigator API
+  title: Project CodeCartographer API
   description: |
-    HTTP API for Project Nyx.Navigator - Semantic Workspace Mapping.
+    HTTP API for Project CodeCartographer - Semantic Workspace Mapping.
     Provides endpoints for AI tools like ShellAI to query module context and project graphs.
   version: 1.0.0
   contact:
-    name: Project Nyx.Navigator Team
+    name: Project CodeCartographer Team
 
 servers:
   - url: http://localhost:8080
     description: Development server
-  - url: https://api.navigator.dev
+  - url: https://api.codecartographer.dev
     description: Production server
 
 paths:

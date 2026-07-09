@@ -18,10 +18,19 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Nyx.Navigator generated
+# CodeCartographer generated
 state_key.md
 .ckb/
-navigator_map.xml
+codecartographer_map.xml
 
-# Local Nyx.Navigator config (contains machine-specific paths)
-.navigator/
+# Local CodeCartographer config (contains machine-specific paths)
+.codecartographer/
+# Generated tool state/outputs (regenerated on run; not tracked)
+context.xml
+index.scip
+.codecartographer_memory.json
+.codecartographer_cache.json
+.codecartographer_history.json
+.codecartographer_watch_state.json
+.codecartographer_uc_config.json
+.cartographer_memory.json

@@ -1,12 +1,110 @@
 # Changelog
 
-All notable changes to Nyx.Navigator will be documented in this file.
+All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-09
+
+### Fixed — MCP server was unusable with spec-compliant clients
+
+`codecartographer serve` emitted `input_schema` (not `inputSchema`), content
+blocks without a `type` field, and `is_error` (not `isError`). Spec-compliant
+clients such as Claude Code rejected `tools/list` ("tools fetch failed"). The
+`McpTool`, `McpContent`, and `McpToolResult` serializations now match the MCP
+spec, so the server connects and its tools are callable.
+
+### Fixed — natural-language retrieval returned the same files for every query
+
+`query_context` passed the whole question to a raw-regex line search, which
+almost never matched, so personalized PageRank had no anchor and fell back to
+the graph's most central files regardless of the question. It now ranks via
+`bm25_search` and biases toward code over docs. The tokenizer splits
+camelCase/snake_case identifiers, so `churn` matches `git_churn` and `user`
+matches `getUserById`. `ranked_skeleton` now places focus files first so a
+relevant but low-centrality file survives the token-budget cut. `answer_question`
+compared repo-relative BM25 paths against absolute `MappedFile.path` (dropping
+every BM25 candidate); it now normalizes paths and seeds symbol-name matches.
+
+### Added — `serve` incremental refresh (live sessions stay fresh)
+
+A persistent `serve` scanned once at startup and went stale until restart.
+`refresh_if_stale` runs a debounced (750 ms), mtime-based incremental sync on
+each tool call: only changed files are re-parsed, deleted files are dropped, and
+the graph cache is invalidated when anything changes. Uncommitted working-tree
+edits are picked up mid-session; a burst of calls triggers at most one rescan.
+
+### Added — `serve --preset=core`
+
+Exposes a 12-tool discovery subset (also via `CARTOGRAPHER_PRESET`); the full
+41-tool surface remains the default. Keeps the tool surface small so a model
+picks the right tool.
+
+### Changed — tool contract and output
+
+- `target` is now a universal, backward-compatible alias for each tool's primary
+  identifier (`module_id` / `file` / `focus` / `symbol` / `doc_path`).
+- `reach_symbol` returns the candidate list on an ambiguous name instead of an
+  error, and is documented as the primary symbol-discovery entry point.
+- Response paths are repo-relative (were absolute), JSON is compact, and the
+  `ranked_skeleton` budget now accounts for the serialized envelope (a 6000-token
+  budget returns ≈6k, was ≈8.6k).
+- The project graph is cached within a session instead of recomputed per call.
+
+### Fixed — `get_evolution` unusable on fresh repos
+
+Each FFI call previously appended one snapshot unconditionally, so three
+calls 15 seconds apart produced three "snapshots" labelled with current
+timestamps and presented as a trend. The output was a function of call count,
+not project history.
+
+**Deduplication by git HEAD** — if the most recent history entry carries the
+same commit SHA as the current call, the entry is updated in-place rather than
+a new snapshot being appended. Callers can invoke `get_evolution`/`codecartographer_evolution`
+on every startup without polluting the history.
+
+**`trendAvailable` flag** — `ArchitectureEvolution` gains a `trend_available`
+(`trendAvailable` in JSON) boolean. It is `false` when the look-back window
+contains fewer than two snapshots from distinct git commits (or, for non-git
+roots, when the window spans less than one hour). Callers must suppress
+directional trend UI when this field is `false`.
+
+**`gitRef` in snapshots** — `ArchitectureSnapshot` gains an optional `git_ref`
+field (serialised as `gitRef`) holding the HEAD SHA at snapshot time. Omitted
+when the root is not a git repository.
+
+### Fixed — `get_blast_radius` edge quality
+
+Two sources of false edges in the dependency graph have been eliminated:
+
+**Cross-type edges** — `rebuild_graph` no longer creates edges between source files
+and doc/fixture files. A Go source file importing `"encoding/json"` would previously
+resolve to any file whose stem matched `"json"` (e.g. `testdata/review/json.json`),
+causing JSON fixtures to appear as dependencies. Markdown files like `CHANGELOG.md`
+were appearing as dependents of source modules because `extract_markdown` treats
+prose path mentions as imports. Edges are now only created between files of the same
+type (source↔source or doc↔doc).
+
+**Substring target match** — `get_blast_radius` resolved the query target using
+`path.contains(target)`, which matched any path containing the target string as an
+arbitrary substring. The lookup now requires an exact path match or a path-component
+prefix boundary (`internal/codecartographer` matches `internal/codecartographer/bridge.go` but not
+`internal/codecartographer_extra/foo.go`).
+
+### Fixed — `get_evolution` snapshot ordering
+
+`get_evolution` was appending the current snapshot to the end of the persisted history
+list, so `snapshots[0]` was the **oldest** entry in the look-back window rather than
+the live reading. The CLI "Current Status" display and MCP clients that inspect
+`snapshots[0]` were showing stale or zero-scored historical data instead of the
+current health score.
+
+Snapshots are now returned newest-first (`snapshots[0]` = current). The `healthTrend`
+delta comparators are updated accordingly.
+
 ### Added — multi-symbol reach and answer --then
 
-**`navigator reach SYMBOL [SYMBOL ...]`** — passing two or more symbols
+**`codecartographer reach SYMBOL [SYMBOL ...]`** — passing two or more symbols
 produces a unified intersection view. Callers are merged and deduped by
 `(file, line)`. Callees appearing in more than one root are annotated
 `[shared]`. Depth-2 types present in multiple results are promoted to a
@@ -14,7 +112,7 @@ produces a unified intersection view. Callers are merged and deduped by
 buried at the end. Ambiguous or not-found symbols are reported per-symbol
 and skipped; the remaining results still render.
 
-**`navigator answer QUESTION --then N`** — after printing the evidence
+**`codecartographer answer QUESTION --then N`** — after printing the evidence
 chain, drills into item #N via `reach` (using the item's file for
 disambiguation) and appends the context tree below. Reuses the scan
 already done by `answer`, so there is no second disk pass.
@@ -67,7 +165,7 @@ and returns precise callee lists for these languages instead of the
 
 ### Added — cross-file sequence trace (PR #9, spike)
 
-`navigator diagram --entry FILE::FUNCTION --format sequence [--depth N]` traces
+`codecartographer diagram --entry FILE::FUNCTION --format sequence [--depth N]` traces
 call edges across file boundaries rather than within a single file.
 
 Resolution is two-level: (1) direct-import match — callee name found in a module
@@ -91,7 +189,7 @@ Mermaid `sequenceDiagram` with one participant per module (not per function).
 captured as imports so the adjacency builder can recognise them as direct
 dependencies. Previously only `use` declarations were recorded.
 
-**`src/main.rs`** — `--entry FILE::FUNCTION` flag on `navigator diagram`; triggers
+**`src/main.rs`** — `--entry FILE::FUNCTION` flag on `codecartographer diagram`; triggers
 a full project scan to build the symbol index before tracing.
 
 Spike validated on `diagram_mode` (the target from charts.md): 13 modules,
@@ -100,7 +198,7 @@ transitive edges correctly annotated `(~)`.
 
 ### Added — quadrant chart and ER diagram formats (PR #8)
 
-Two new `--format` values for `navigator diagram`:
+Two new `--format` values for `codecartographer diagram`:
 
 **`--format quadrant`** — Mermaid `quadrantChart` plotting every file on a churn ×
 complexity plane. Top-right = danger zone (refactor now); top-left = risky debt;
@@ -181,7 +279,7 @@ but still allowed an out-of-bounds index on the empty counts vec.
 can consume without calling the tool:
 
 - **`title`** — human-readable display name (e.g. `"Get Module Context"`).
-  All 38 tools have a title; `McpServerInfo` gains one too (`"Nyx Navigator"`).
+  All 38 tools have a title; `McpServerInfo` gains one too (`"CodeCartographer"`).
 - **`annotations`** — `ToolAnnotations` struct with `readOnlyHint`,
   `destructiveHint`, and `idempotentHint`. Every read-only tool advertises
   `readOnlyHint: true` via the `read_only!()` macro; `replace_content` sets
@@ -231,7 +329,7 @@ Skeleton output now includes:
 
 ### Added — function-level call graphs for Rust and Python
 
-`navigator diagram --call-graph PATH` now extracts a file-local call graph
+`codecartographer diagram --call-graph PATH` now extracts a file-local call graph
 and renders it through the existing Mermaid/DOT/ASCII pipeline. Nodes are
 functions/methods, edges are caller→callee relations resolved within the same
 file; calls into the stdlib or other files are dropped and reported as an
@@ -251,7 +349,7 @@ file; calls into the stdlib or other files are dropped and reported as an
   `diagram::render()` can consume it without any call-graph-specific rendering
   code.
 
-**`src/main.rs`** — `--call-graph FILE` flag on `navigator diagram`. When set,
+**`src/main.rs`** — `--call-graph FILE` flag on `codecartographer diagram`. When set,
 import-graph-only options (`--cochange-threshold`, `--docs-only`,
 `--group-by-folder`, `--color-by-owner`) are bypassed rather than erroring,
 since the common case is combining `--call-graph` with `--focus`, `--depth`,
@@ -389,8 +487,8 @@ of the previous, so only the **last** grammar's C parser survived on
 disk. The resulting localized archive then had `_tree_sitter_c` and
 `_tree_sitter_cpp` as undefined externals, referenced by the Rust
 `tree_sitter_c::language()` / `tree_sitter_cpp::language()` wrappers
-but never provided, so Go consumers linking `libnavigator.a` got
-undefined-symbol errors at `navigator`-tagged builds.
+but never provided, so Go consumers linking `libcode_cartographer.a` got
+undefined-symbol errors at `codecartographer`-tagged builds.
 
 The script now feeds the archive directly to `ld -r` via
 `-Wl,-force_load,input.a` (Mach-O) or
@@ -427,7 +525,7 @@ Backwards-compatible: the existing role-based fill colours (`core`, `bridge`,
 compose rather than collide. Existing tests asserting `:::core`/`:::bridge`
 still pass.
 
-### Added — `renderArchitecture` MCP tool + `navigator_render_architecture` FFI
+### Added — `renderArchitecture` MCP tool + `codecartographer_render_architecture` FFI
 
 The CLI's `diagram` command has been factored into a shared renderer and
 exposed via FFI so MCP clients can return Mermaid/DOT directly. IDEs that
@@ -442,28 +540,28 @@ GitHub) now get paste-able diagrams without any extra UI.
 - `truncated: true` in the response signals the node cap kicked in so the caller/model can tighten focus or lower depth
 - 12 unit tests cover top-N, BFS direction, path-suffix match, cycle safety, truncation, format parsing, and output structure
 
-**`src/lib.rs`** — `navigator_render_architecture(path, format, focus, depth, max_nodes)`:
+**`src/lib.rs`** — `codecartographer_render_architecture(path, format, focus, depth, max_nodes)`:
 - Defaults: `format` null → `"mermaid"`, `depth` 0 → 2, `max_nodes` 0 → 40
 - Returns JSON `{ diagram, truncated, format, nodeCount }`
-- cbindgen regenerates `include/navigator.h` automatically
+- cbindgen regenerates `include/codecartographer.h` automatically
 
 **`src/main.rs`** — CLI `diagram_mode` now delegates to `diagram::render()`, so CLI and FFI outputs stay identical.
 
-### Added — tree-sitter symbol localization for `libnavigator.a`
+### Added — tree-sitter symbol localization for `libcode_cartographer.a`
 
-`libnavigator.a` now ships with its tree-sitter runtime and grammar
+`libcode_cartographer.a` now ships with its tree-sitter runtime and grammar
 symbols hidden from the global symbol resolver, so consumers that also
 link tree-sitter (e.g. Go projects using `go-tree-sitter`) no longer
 trip duplicate-symbol errors at link time. This matters beyond the
 ergonomic complaint: if both copies were left global, the linker would
-bind Nyx.Navigator's Rust code to whichever archive came first on the
+bind CodeCartographer's Rust code to whichever archive came first on the
 command line — and if the two tree-sitter versions drifted in struct
 layout, the loser's callers would walk the wrong struct and produce
 silent memory corruption.
 
 **`scripts/localize-tree-sitter-symbols.sh`** (new):
-- Partial-links all `.o` members of `libnavigator.a` into one combined relocatable object via `cc -nostdlib -Wl,-r`, so Nyx.Navigator's internal `ts_*`/`tree_sitter_*` references resolve within the archive
-- `rust-objcopy --wildcard --localize-symbol='ts_*' --localize-symbol='tree_sitter_*'` then marks those symbols local on the combined object; `navigator_*` FFI entry points stay global
+- Partial-links all `.o` members of `libcode_cartographer.a` into one combined relocatable object via `cc -nostdlib -Wl,-r`, so CodeCartographer's internal `ts_*`/`tree_sitter_*` references resolve within the archive
+- `rust-objcopy --wildcard --localize-symbol='ts_*' --localize-symbol='tree_sitter_*'` then marks those symbols local on the combined object; `codecartographer_*` FFI entry points stay global
 - Resolves `rust-objcopy` via `rustc --print target-libdir`; falls back to `llvm-objcopy`/`objcopy` if `llvm-tools-preview` isn't installed
 - `scripts/tests/test-localize-symbols.sh` — synthetic fixture smoke test
 - **Background:** tree-sitter's own build.rs already passes `-fvisibility=hidden`, but `tree_sitter/api.h` wraps the API in `#pragma GCC visibility push(default)`, which wins over the command-line flag whenever a C source includes the header. Compile-time visibility is therefore insufficient; the archive must be post-processed.
@@ -566,11 +664,11 @@ All extractors carry `confidence = 30` (Tier 1 regex). Previously all these file
 - `cochange_partners` — distinct co-change partners (populated by `enrich_with_git`)
 - `cochange_entropy` — Shannon entropy of co-change distribution
 
-**CLI**: `navigator shotgun [--commits N] [--top N] [--min-partners N]` — ranked shotgun surgery candidates with HIGH/MODERATE/LOW tiers
+**CLI**: `codecartographer shotgun [--commits N] [--top N] [--min-partners N]` — ranked shotgun surgery candidates with HIGH/MODERATE/LOW tiers
 
 **MCP tool**: `shotgun_surgery` — tool #29; returns `CoChangeDispersion[]` ranked by dispersion score
 
-**FFI**: `navigator_shotgun_surgery(path, limit, min_partners) -> *mut c_char` — #19
+**FFI**: `codecartographer_shotgun_surgery(path, limit, min_partners) -> *mut c_char` — #19
 
 ---
 
@@ -588,15 +686,15 @@ All extractors carry `confidence = 30` (Tier 1 regex). Previously all these file
 - **Dedup ratio** — unique-line fraction as quick redundancy check
 - Composite score (0–100, graded A–F) with BudgetMem-informed weights: signal_density 25%, compression_density 20%, position_health 20%, entity_density 15%, utilisation_headroom 10%, dedup_ratio 10%
 
-**CLI**: `navigator context-health [FILE] [--model claude|gpt4|llama|gpt35] [--window N] [--format text|json]`
+**CLI**: `codecartographer context-health [FILE] [--model claude|gpt4|llama|gpt35] [--window N] [--format text|json]`
 
 **MCP tool**: `context_health` — tool #27; scores any context string passed directly as an argument
 
-**FFI**: `navigator_context_health(content, opts_json) -> *mut c_char` for CKB
+**FFI**: `codecartographer_context_health(content, opts_json) -> *mut c_char` for CKB
 
 **13 tests** covering all individual metrics, composite analysis, and warning generation
 
-### Added — PKG retrieval pipeline (`query_context`, `navigator query`)
+### Added — PKG retrieval pipeline (`query_context`, `codecartographer query`)
 
 **MCP tool #28: `query_context`** — single-call retrieval pipeline replacing the manual search → ranked_skeleton → context_health sequence:
 1. Searches the codebase for files matching the query (regex)
@@ -605,7 +703,7 @@ All extractors carry `confidence = 30` (Tier 1 regex). Previously all these file
 4. Scores the bundle with context_health
 5. Returns `{ context, filesUsed, focusFiles, totalTokens, health }` — ready to inject
 
-**CLI**: `navigator query <QUERY> [--budget N] [--model claude|gpt4|llama|gpt35] [--format text|json]`
+**CLI**: `codecartographer query <QUERY> [--budget N] [--model claude|gpt4|llama|gpt35] [--format text|json]`
 
 **BM25 search** (`src/search.rs`): `bm25_search(root, query, opts)` — TF-IDF ranked file search for natural language queries, used by `query_context` as a complement to regex matching. No external dependencies; pure Rust with standard BM25 (k1=1.5, b=0.75). Returns ranked `Vec<BM25Match>` with per-file scores and matching term snippets.
 
@@ -657,7 +755,7 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 
 ### Added — sed + awk equivalents
 
-**`navigator replace <PATTERN> <REPLACEMENT>`** — regex find-and-replace across project files:
+**`codecartographer replace <PATTERN> <REPLACEMENT>`** — regex find-and-replace across project files:
 - Replacement string supports `$0` (whole match), `$1`/`$2` (capture groups)
 - `--dry-run` — preview what would change (shows colored diff, no writes)
 - `--backup` — write `.bak` before modifying each file
@@ -669,7 +767,7 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 - Colored terminal diff: red `-` for removed, green `+` for added lines
 - Summary: files changed, total replacements, backup notice
 
-**`navigator extract <PATTERN>`** — capture-group extraction across project files (awk-like):
+**`codecartographer extract <PATTERN>`** — capture-group extraction across project files (awk-like):
 - `-g N` / `--group N` — capture group index (repeatable; default: 0 = whole match)
 - `--count` — aggregate: show frequency table sorted by count descending
 - `--dedup` — deduplicate extracted values
@@ -680,10 +778,10 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 - `--limit N` — cap total results
 
 **FFI additions** (CKB + CGo consumers):
-- `navigator_replace_content(path, pattern, replacement, opts_json)`
-- `navigator_extract_content(path, pattern, opts_json)`
+- `codecartographer_replace_content(path, pattern, replacement, opts_json)`
+- `codecartographer_extract_content(path, pattern, opts_json)`
 
-**CKB bridge** — `ReplaceOptions`, `ReplaceResult`, `FileChange`, `DiffLine`, `ExtractOptions`, `ExtractResult`, `ExtractMatch`, `CountEntry` added to `internal/navigator`
+**CKB bridge** — `ReplaceOptions`, `ReplaceResult`, `FileChange`, `DiffLine`, `ExtractOptions`, `ExtractResult`, `ExtractMatch`, `CountEntry` added to `internal/codecartographer`
 
 ---
 
@@ -691,7 +789,7 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 
 ### Added — full grep + find parity
 
-**`navigator search <PATTERN>`** — complete grep parity:
+**`codecartographer search <PATTERN>`** — complete grep parity:
 - `-e PATTERN` — additional patterns OR'd together (like `grep -e`)
 - `-i` — case-insensitive
 - `-v` — invert match (lines that don't match)
@@ -706,7 +804,7 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 - `--no-ignore` — search vendor/generated/noise files too
 - `--limit N` — cap results
 
-**`navigator find <PATTERN>`** — complete find parity:
+**`codecartographer find <PATTERN>`** — complete find parity:
 - `--modified-since 24h` / `7d` / `30m` / `3600s` — mtime filter
 - `--newer <FILE>` — files newer than reference file's mtime
 - `--min-size N` / `--max-size N` — size filter in bytes
@@ -714,15 +812,15 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 - `--no-ignore` — include vendor/noise directories
 - Reports language + human-readable size + ISO-8601 mtime per file
 
-**`navigator context --query <PATTERN>`** — bundles ranked skeleton + search results for context injection into models without tool-call support (Qwen3, Llama 3, local models)
+**`codecartographer context --query <PATTERN>`** — bundles ranked skeleton + search results for context injection into models without tool-call support (Qwen3, Llama 3, local models)
 
 **FFI additions** (CKB + any CGo consumer):
-- `navigator_search_content(path, pattern, opts_json)` — all grep options exposed via JSON; `opts_json` can be null for defaults
-- `navigator_find_files(path, pattern, limit, opts_json)` — all find options via JSON
+- `codecartographer_search_content(path, pattern, opts_json)` — all grep options exposed via JSON; `opts_json` can be null for defaults
+- `codecartographer_find_files(path, pattern, limit, opts_json)` — all find options via JSON
 
 **MCP tool expansion** — `search_content` and `find_files` tools now expose all new options as top-level MCP arguments
 
-**CKB bridge** — `SearchContentOptions`, `FindOptions`, `FileCount`, `MatchedTexts`, `FilesWithMatches`, `FilesWithoutMatch`, `FileCounts` added to `internal/navigator` package
+**CKB bridge** — `SearchContentOptions`, `FindOptions`, `FileCount`, `MatchedTexts`, `FilesWithMatches`, `FilesWithoutMatch`, `FileCounts` added to `internal/codecartographer` package
 
 ## [1.6.0] - 2026-04-09
 
@@ -730,20 +828,20 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 - **Bot-author filtering** in git history analysis — commits from bots (`[bot]`, `dependabot`, `renovate`, `github-actions`, `snyk-bot`, etc.) are excluded from churn and co-change metrics; eliminates the ~74% noise inflation documented in arXiv 2602.13170
 - **Formatting-commit filtering** — commits matching patterns like `cargo fmt`, `prettier`, `rustfmt`, `eslint fix`, `trailing whitespace`, etc. are excluded; same noise gate applied to all git-history paths (`git_churn`, `git_cochange`, FFI wrappers)
 - **Personalized PageRank** over the dependency graph (`ranked_skeleton()` in `api.rs`) — 30-iteration power iteration with damping 0.85; personalization vector concentrates weight on focus files; used by:
-  - `navigator context --focus src/api.rs --budget 8000` — ranked skeleton pruned to token budget, highest-rank files first
-  - `navigator_ranked_skeleton(path, focus_json, budget)` — new FFI function for CKB context injection
-- **CI enforcement** — `navigator check` scans the project and exits non-zero if any cycles or layer violations are found; suitable for CI gates (pre-commit hook, GitHub Actions step)
+  - `codecartographer context --focus src/api.rs --budget 8000` — ranked skeleton pruned to token budget, highest-rank files first
+  - `codecartographer_ranked_skeleton(path, focus_json, budget)` — new FFI function for CKB context injection
+- **CI enforcement** — `codecartographer check` scans the project and exits non-zero if any cycles or layer violations are found; suitable for CI gates (pre-commit hook, GitHub Actions step)
 - **Unreferenced export detection** — `rebuild_graph` builds an import-token corpus from all files and marks public symbols whose names don't appear in any import as `unreferenced_exports`; surfaced via:
-  - `navigator symbols --unreferenced` — file-by-file listing with caveat note
-  - `navigator_unreferenced_symbols(path)` — new FFI function
+  - `codecartographer symbols --unreferenced` — file-by-file listing with caveat note
+  - `codecartographer_unreferenced_symbols(path)` — new FFI function
 
 ## [1.5.0] - 2026-04-09
 
 ### Added
-- **`navigator_version()`** — FFI function returning the library version string; CKB uses this for compatibility checks before calling any other function
-- **`navigator_git_churn(path, limit)`** — FFI wrapper for git churn analysis; returns `{ "src/api.rs": 42, ... }` (empty object when not a git repo)
-- **`navigator_git_cochange(path, limit, min_count)`** — FFI wrapper for temporal coupling; returns sorted array of `{ fileA, fileB, count, couplingScore }` pairs
-- **`navigator_semidiff(path, commit1, commit2)`** — FFI wrapper for semantic diff; returns per-file `{ path, status, added[], removed[] }` using skeleton extraction at each commit
+- **`codecartographer_version()`** — FFI function returning the library version string; CKB uses this for compatibility checks before calling any other function
+- **`codecartographer_git_churn(path, limit)`** — FFI wrapper for git churn analysis; returns `{ "src/api.rs": 42, ... }` (empty object when not a git repo)
+- **`codecartographer_git_cochange(path, limit, min_count)`** — FFI wrapper for temporal coupling; returns sorted array of `{ fileA, fileB, count, couplingScore }` pairs
+- **`codecartographer_semidiff(path, commit1, commit2)`** — FFI wrapper for semantic diff; returns per-file `{ path, status, added[], removed[] }` using skeleton extraction at each commit
 - `mod git_analysis` added to `lib.rs` — git subprocess helpers are now available to all FFI callers, not just the CLI binary
 
 ## [1.4.0] - 2026-04-09
@@ -751,22 +849,22 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 ### Added
 - **CCE integration** — `compressor.py` now compresses context through [ContextCompressionEngine](https://github.com/SimplyLiz/ContextCompressionEngine), reducing token usage while preserving code verbatim
   - `python compressor.py --messages chat.json --token-budget 8000` compresses any message array to fit a token budget
-  - Nyx.Navigator dependency context is appended as a system message before compression
-  - CCE path auto-discovered via `CCE_DIST` env var, `.navigator/cce_dist` config, or sibling directory
+  - CodeCartographer dependency context is appended as a system message before compression
+  - CCE path auto-discovered via `CCE_DIST` env var, `.codecartographer/cce_dist` config, or sibling directory
 - **`tools/cce_bridge.mjs`** — thin stdin/stdout Node.js bridge to CCE; normalises messages (adds `id`/`index`), accepts `--cce-dist` flag
-- **`launch.py` CCE setup** — steps 5–6 check Node.js 20+ and build CCE; dist path saved to `.navigator/cce_dist` for `compressor.py` to use
+- **`launch.py` CCE setup** — steps 5–6 check Node.js 20+ and build CCE; dist path saved to `.codecartographer/cce_dist` for `compressor.py` to use
   - `--cce-path <dir>` overrides the default sibling-directory assumption
 
 ## [1.3.0] - 2026-04-09
 
 ### Added
-- **`cochange`** — temporal coupling analysis from git history; surfaces files that always change together without an import link (`navigator cochange --min-count 3`)
-- **`hotspots`** — churn × complexity ranking with CRITICAL / HIGH / MODERATE / LOW tiers (`navigator hotspots --top 10`)
-- **`dead`** — dead code candidates based on in-degree = 0 in the dependency graph (`navigator dead`)
-- **`diagram`** — exports dependency graph as Mermaid or Graphviz DOT with role-based colouring (`navigator diagram --format mermaid -o graph.md`)
-- **`llmstxt`** — generates `llms.txt` index (entry points first, sorted by symbol count) for LLM inference-time context (`navigator llmstxt`)
-- **`claudemd`** — generates a `CLAUDE.md` architecture guide covering entry points, core modules, hotspots, cycles, and hidden coupling (`navigator claudemd`)
-- **`semidiff`** — function-level semantic diff between two commits using skeleton extraction (`navigator semidiff HEAD~1`)
+- **`cochange`** — temporal coupling analysis from git history; surfaces files that always change together without an import link (`codecartographer cochange --min-count 3`)
+- **`hotspots`** — churn × complexity ranking with CRITICAL / HIGH / MODERATE / LOW tiers (`codecartographer hotspots --top 10`)
+- **`dead`** — dead code candidates based on in-degree = 0 in the dependency graph (`codecartographer dead`)
+- **`diagram`** — exports dependency graph as Mermaid or Graphviz DOT with role-based colouring (`codecartographer diagram --format mermaid -o graph.md`)
+- **`llmstxt`** — generates `llms.txt` index (entry points first, sorted by symbol count) for LLM inference-time context (`codecartographer llmstxt`)
+- **`claudemd`** — generates a `CLAUDE.md` architecture guide covering entry points, core modules, hotspots, cycles, and hidden coupling (`codecartographer claudemd`)
+- **`semidiff`** — function-level semantic diff between two commits using skeleton extraction (`codecartographer semidiff HEAD~1`)
 - **`git_analysis` module** — `git_churn`, `git_cochange`, `git_show_file`, `git_diff_files` helpers (binary-only; not exposed via C FFI)
 - **Role classification** — every `GraphNode` now carries `role` (entry / core / utility / leaf / dead / bridge / standard), `churn`, `hotspot_score`, and `is_dead`
 - **`CoChangePair`** in `ProjectGraphResponse` — populated by `enrich_with_git()`
@@ -775,21 +873,21 @@ All symbols extracted from Rust, Go, Python, TS, and JS now carry `confidence = 
 
 ### Added
 - **`launch.py`** — cross-platform Python installer replacing `install.sh`; supports Linux, macOS, and Windows; updates shell RC automatically
-- **`deps` command** — `navigator deps <target> --format json` outputs dependency graph for a target module as JSON
-- **`serve` command** — `navigator serve` starts the MCP server with full JSON-RPC 2.0 stdio transport
+- **`deps` command** — `codecartographer deps <target> --format json` outputs dependency graph for a target module as JSON
+- **`serve` command** — `codecartographer serve` starts the MCP server with full JSON-RPC 2.0 stdio transport
 - **MCP tools** — `get_symbol_context` (filter signatures by symbol name) and `get_blast_radius` (dependencies + dependents up to depth limit)
 - **`#[serde(rename = "type")]`** fix on `McpInputSchema` and `McpProperty` so tool schemas serialise correctly
 
 ### Fixed
-- `compressor.py` called a non-existent `cmp deps` subcommand; now calls `navigator deps`
+- `compressor.py` called a non-existent `cmp deps` subcommand; now calls `codecartographer deps`
 - `verify_ignore.py` hardcoded the old `cmp` binary path; now resolves the correct platform binary
 - Stale "architect" branding in `install.sh`
 
 ## [1.1.0] - 2025-04-07
 
 ### Changed
-- Renamed binary from `architect` to `navigator`
-- Updated package description to "Nyx.Navigator for Architectural Intelligence"
+- Renamed binary from `architect` to `codecartographer`
+- Updated package description to "CodeCartographer for Architectural Intelligence"
 
 ### Added
 - LICENSE file (CKB License)

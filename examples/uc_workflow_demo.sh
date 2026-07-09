@@ -22,56 +22,56 @@ echo ""
 # Step 1: Initialize UC sync
 echo "Step 1: Initialize UC sync"
 echo "-------------------------------------------"
-navigator init --cloud --project demo-project
+codecartographer init --cloud --project demo-project
 echo ""
 
 # Step 2: Scan codebase
 echo "Step 2: Scan codebase"
 echo "-------------------------------------------"
-navigator source
+codecartographer source
 echo ""
 
 # Step 3: Push to UC
 echo "Step 3: Push to UC"
 echo "-------------------------------------------"
-navigator push
+codecartographer push
 echo ""
 
 # Step 4: View history
 echo "Step 4: View version history"
 echo "-------------------------------------------"
-navigator history
+codecartographer history
 echo ""
 
 # Step 5: Create a branch
 echo "Step 5: Create feature branch"
 echo "-------------------------------------------"
-navigator branch feature-demo
+codecartographer branch feature-demo
 echo ""
 
 # Step 6: Add some agents
 echo "Step 6: Configure AI agents"
 echo "-------------------------------------------"
-navigator agents add cursor --type cursor
-navigator agents add claude --type claude
+codecartographer agents add cursor --type cursor
+codecartographer agents add claude --type claude
 echo ""
 
 # Step 7: List agents
 echo "Step 7: List configured agents"
 echo "-------------------------------------------"
-navigator agents list
+codecartographer agents list
 echo ""
 
 # Step 8: View analytics
 echo "Step 8: View analytics dashboard"
 echo "-------------------------------------------"
-navigator analytics
+codecartographer analytics
 echo ""
 
 # Step 9: Get optimization suggestions
 echo "Step 9: Get optimization suggestions"
 echo "-------------------------------------------"
-navigator optimize
+codecartographer optimize
 echo ""
 
 echo "=========================================="
@@ -86,7 +86,7 @@ echo "  ✓ Accessible by configured agents"
 echo "  ✓ Tracked with analytics"
 echo ""
 echo "Next steps:"
-echo "  - Run 'navigator pull' on another machine"
-echo "  - Run 'navigator watch' for live updates"
-echo "  - Run 'navigator diff 0 1' to see changes"
+echo "  - Run 'codecartographer pull' on another machine"
+echo "  - Run 'codecartographer watch' for live updates"
+echo "  - Run 'codecartographer diff 0 1' to see changes"
 echo ""

@@ -150,16 +150,16 @@ pub const IGNORED_FILES: &[&str] = &[
     "context.xml",
     "context.json",
     "context.md",
-    "navigator_map.xml",
-    "navigator_map.md",
-    "navigator_map.json",
-    ".navigator_memory.json",
-    ".cartographer_memory.json",
-    // Nyx.Navigator runtime state files
-    ".navigator_cache.json",
-    ".cartographer_cache.json",
-    ".navigator_watch_state.json",
-    ".navigator_history.json",
+    "codecartographer_map.xml",
+    "codecartographer_map.md",
+    "codecartographer_map.json",
+    ".codecartographer_memory.json",
+    ".codecartographer_memory.json",
+    // CodeCartographer runtime state files
+    ".codecartographer_cache.json",
+    ".codecartographer_cache.json",
+    ".codecartographer_watch_state.json",
+    ".codecartographer_history.json",
 ];
 
 // Patterns for extension-based blocking
@@ -176,17 +176,17 @@ pub const BLOCKED_PATTERNS: &[&str] = &[
 ];
 
 // =============================================================================
-// .navigatorignore support
+// .codecartographerignore support
 // =============================================================================
 
-/// A compiled pattern from .navigatorignore
-pub struct NavigatorIgnorePattern {
+/// A compiled pattern from .codecartographerignore
+pub struct CodeCartographerIgnorePattern {
     pub negate: bool,
     filename_only: bool,
     regex: regex::Regex,
 }
 
-impl NavigatorIgnorePattern {
+impl CodeCartographerIgnorePattern {
     fn parse(line: &str) -> Option<Self> {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -254,28 +254,28 @@ fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
     regex::Regex::new(&out).ok()
 }
 
-/// Load .navigatorignore from the repo root.
-pub fn load_navigator_ignore(root: &Path) -> Vec<NavigatorIgnorePattern> {
-    let path = root.join(".navigatorignore");
+/// Load .codecartographerignore from the repo root.
+pub fn load_codecartographer_ignore(root: &Path) -> Vec<CodeCartographerIgnorePattern> {
+    let path = root.join(".codecartographerignore");
     fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(NavigatorIgnorePattern::parse)
+        .filter_map(CodeCartographerIgnorePattern::parse)
         .collect()
 }
 
 /// Load .gitignore from the repo root.  Same pattern syntax — reuses the
-/// existing NavigatorIgnorePattern parser since .gitignore is compatible.
-pub fn load_gitignore(root: &Path) -> Vec<NavigatorIgnorePattern> {
+/// existing CodeCartographerIgnorePattern parser since .gitignore is compatible.
+pub fn load_gitignore(root: &Path) -> Vec<CodeCartographerIgnorePattern> {
     let path = root.join(".gitignore");
     fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(NavigatorIgnorePattern::parse)
+        .filter_map(CodeCartographerIgnorePattern::parse)
         .collect()
 }
 
-fn is_navigator_ignored(rel_path: &str, patterns: &[NavigatorIgnorePattern]) -> bool {
+fn is_codecartographer_ignored(rel_path: &str, patterns: &[CodeCartographerIgnorePattern]) -> bool {
     let mut ignored = false;
     for p in patterns {
         if p.matches(rel_path) {
@@ -325,10 +325,10 @@ pub fn scan_files(root: &Path) -> Result<Vec<PathBuf>> {
 pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
     let ignored_dirs: HashSet<&str> = IGNORED_DIRS.iter().copied().collect();
     let ignored_files: HashSet<&str> = IGNORED_FILES.iter().copied().collect();
-    // .gitignore patterns are processed first; .navigatorignore is appended
+    // .gitignore patterns are processed first; .codecartographerignore is appended
     // so its rules (including negations) take precedence over .gitignore.
     let mut ignore_patterns = load_gitignore(root);
-    ignore_patterns.extend(load_navigator_ignore(root));
+    ignore_patterns.extend(load_codecartographer_ignore(root));
 
     let mut result = ScanResult::default();
 
@@ -347,13 +347,13 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
             continue;
         }
 
-        // Check .gitignore + .navigatorignore patterns (silently excluded)
+        // Check .gitignore + .codecartographerignore patterns (silently excluded)
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if is_navigator_ignored(&rel, &ignore_patterns) {
+        if is_codecartographer_ignored(&rel, &ignore_patterns) {
             continue;
         }
 

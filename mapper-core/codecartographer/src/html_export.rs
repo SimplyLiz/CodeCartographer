@@ -96,7 +96,7 @@ pub fn render_html(graph: &ProjectGraphResponse, included: &[String]) -> String 
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Nyx.Navigator — Interactive Diagram</title>
+<title>CodeCartographer — Interactive Diagram</title>
 <style>
   :root {{
     --fg: #222; --bg: #fafafa; --panel: #fff; --border: #ddd; --muted: #666;
@@ -147,7 +147,7 @@ pub fn render_html(graph: &ProjectGraphResponse, included: &[String]) -> String 
 <body>
 <div id="sidebar">
   <header>
-    <div style="font-weight:600; margin-bottom:8px;">Nyx.Navigator</div>
+    <div style="font-weight:600; margin-bottom:8px;">CodeCartographer</div>
     <input id="filter" placeholder="Filter nodes…" />
   </header>
   <div id="node-list"></div>

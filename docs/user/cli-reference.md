@@ -1,6 +1,6 @@
 # CLI Reference
 
-Complete reference for all `navigator` commands and flags.
+Complete reference for all `codecartographer` commands and flags.
 
 ## Global flags
 
@@ -11,13 +11,13 @@ These flags apply to most commands:
 | `--target TARGET` | Output format: `claude` (default), `cursor`, or `raw` |
 | `--copy` | Also copy output to clipboard |
 | `--ignore FILE` | Additional ignore file(s) to load |
-| `--no-ignore` | Bypass `.navigatorignore` and built-in noise filter |
+| `--no-ignore` | Bypass `.codecartographerignore` and built-in noise filter |
 | `PATH` | Directory to scan (defaults to current directory) |
 
-## navigator (no subcommand)
+## codecartographer (no subcommand)
 
 ```bash
-navigator [PATH] [--target TARGET] [--copy]
+codecartographer [PATH] [--target TARGET] [--copy]
 ```
 
 Interactive menu. Shows token estimates for each mode and prompts you to pick one.
@@ -29,25 +29,25 @@ Interactive menu. Shows token estimates for each mode and prompts you to pick on
 ### map
 
 ```bash
-navigator map [PATH]
+codecartographer map [PATH]
 ```
 
-Skeleton map — imports and public signatures only. Writes `navigator_map.xml`.
+Skeleton map — imports and public signatures only. Writes `codecartographer_map.xml`.
 
 Approximately 200 tokens per module vs 5,000 for full source. Use this for most tasks.
 
 ### source
 
 ```bash
-navigator source [PATH]
+codecartographer source [PATH]
 ```
 
-Full source code. Writes `navigator_source.xml`. Use when you need function bodies.
+Full source code. Writes `codecartographer_source.xml`. Use when you need function bodies.
 
 ### copy
 
 ```bash
-navigator copy [PATH]
+codecartographer copy [PATH]
 ```
 
 Full source to clipboard only. No disk write. Use for a quick one-off paste.
@@ -55,7 +55,7 @@ Full source to clipboard only. No disk write. Use for a quick one-off paste.
 ### context
 
 ```bash
-navigator context --focus FILE [--budget TOKENS]
+codecartographer context --focus FILE [--budget TOKENS]
 ```
 
 PageRank-ranked skeleton around a seed file, pruned to a token budget.
@@ -68,7 +68,7 @@ PageRank-ranked skeleton around a seed file, pruned to a token budget.
 ### query
 
 ```bash
-navigator query QUESTION
+codecartographer query QUESTION
 ```
 
 BM25 search → PageRank → skeleton in one step. Takes a natural-language question and produces ready-to-use context.
@@ -76,7 +76,7 @@ BM25 search → PageRank → skeleton in one step. Takes a natural-language ques
 ### sync
 
 ```bash
-navigator sync [PATH]
+codecartographer sync [PATH]
 ```
 
 Incremental update — re-processes only files changed since the last snapshot.
@@ -84,7 +84,7 @@ Incremental update — re-processes only files changed since the last snapshot.
 ### watch
 
 ```bash
-navigator watch [PATH]
+codecartographer watch [PATH]
 ```
 
 Live watcher. Stays running and re-processes changed files on save (debounced 500ms).
@@ -96,18 +96,18 @@ Live watcher. Stays running and re-processes changed files on save (debounced 50
 ### init
 
 ```bash
-navigator init [PATH]
+codecartographer init [PATH]
 ```
 
-Initialize a project. Creates `.navigator/config.toml`.
+Initialize a project. Creates `.codecartographer/config.toml`.
 
 ### init-ckb
 
 ```bash
-navigator init-ckb [PATH] [--ckb-url URL] [--webhook-url URL]
+codecartographer init-ckb [PATH] [--ckb-url URL] [--webhook-url URL]
 ```
 
-Initialize with CKB integration. Writes CKB connection settings to `.navigator/config.toml`.
+Initialize with CKB integration. Writes CKB connection settings to `.codecartographer/config.toml`.
 
 | Flag | Description |
 |------|-------------|
@@ -121,7 +121,7 @@ Initialize with CKB integration. Writes CKB connection settings to `.navigator/c
 ### health
 
 ```bash
-navigator health [PATH] [--compare REF] [--json]
+codecartographer health [PATH] [--compare REF] [--json]
 ```
 
 Health score 0–100 plus breakdown: cycles, bridges, god modules, layer violations.
@@ -134,7 +134,7 @@ Health score 0–100 plus breakdown: cycles, bridges, god modules, layer violati
 ### simulate
 
 ```bash
-navigator simulate [PATH] [OPTIONS]
+codecartographer simulate [PATH] [OPTIONS]
 ```
 
 Predict architectural impact of a change.
@@ -152,7 +152,7 @@ Predict architectural impact of a change.
 ### check
 
 ```bash
-navigator check [PATH]
+codecartographer check [PATH]
 ```
 
 CI gate. Exits non-zero if any cycle or layer violation exists.
@@ -160,7 +160,7 @@ CI gate. Exits non-zero if any cycle or layer violation exists.
 ### dead
 
 ```bash
-navigator dead [PATH] [--json]
+codecartographer dead [PATH] [--json]
 ```
 
 Dead code candidates — files and public symbols with no callers.
@@ -168,7 +168,7 @@ Dead code candidates — files and public symbols with no callers.
 ### symbols
 
 ```bash
-navigator symbols --unreferenced [PATH]
+codecartographer symbols --unreferenced [PATH]
 ```
 
 Public symbols with no callers (symbol-level, narrower than `dead`).
@@ -176,7 +176,7 @@ Public symbols with no callers (symbol-level, narrower than `dead`).
 ### deps
 
 ```bash
-navigator deps TARGET [--format json]
+codecartographer deps TARGET [--format json]
 ```
 
 Dependency tree of a single module as JSON.
@@ -184,7 +184,7 @@ Dependency tree of a single module as JSON.
 ### path
 
 ```bash
-navigator path --from A --to B [PATH]
+codecartographer path --from A --to B [PATH]
 ```
 
 Shortest import path between two modules.
@@ -198,15 +198,17 @@ Shortest import path between two modules.
 ### evolution
 
 ```bash
-navigator evolution [PATH] [--days DAYS]
+codecartographer evolution [PATH] [--days DAYS]
 ```
 
-Architectural health trend over the last N days (default 30).
+Architectural health trend over the last N days (default 30). "Current Status"
+always reflects the live health score from the current scan, matching what
+`codecartographer health` reports for the same project state.
 
 ### layers
 
 ```bash
-navigator layers [PATH] SUBCOMMAND
+codecartographer layers [PATH] SUBCOMMAND
 ```
 
 Manage architectural layer definitions.
@@ -221,7 +223,7 @@ Manage architectural layer definitions.
 ### snapshot
 
 ```bash
-navigator snapshot SUBCOMMAND
+codecartographer snapshot SUBCOMMAND
 ```
 
 Save or compare architecture snapshots.
@@ -239,7 +241,7 @@ Save or compare architecture snapshots.
 ### hotspots
 
 ```bash
-navigator hotspots [PATH] [OPTIONS]
+codecartographer hotspots [PATH] [OPTIONS]
 ```
 
 High-churn × high-complexity files.
@@ -256,7 +258,7 @@ High-churn × high-complexity files.
 ### cochange
 
 ```bash
-navigator cochange [PATH] [OPTIONS]
+codecartographer cochange [PATH] [OPTIONS]
 ```
 
 Files that frequently change together.
@@ -272,7 +274,7 @@ Files that frequently change together.
 ### semidiff
 
 ```bash
-navigator semidiff COMMIT1 [COMMIT2]
+codecartographer semidiff COMMIT1 [COMMIT2]
 ```
 
 Function-level semantic diff: which public signatures were added, removed, or changed.
@@ -280,7 +282,7 @@ Function-level semantic diff: which public signatures were added, removed, or ch
 ### shotgun
 
 ```bash
-navigator shotgun [PATH] [OPTIONS]
+codecartographer shotgun [PATH] [OPTIONS]
 ```
 
 Shotgun surgery candidates — files whose changes scatter across many unrelated modules.
@@ -294,7 +296,7 @@ Shotgun surgery candidates — files whose changes scatter across many unrelated
 ### todo
 
 ```bash
-navigator todo [PATH] [--top N] [--json]
+codecartographer todo [PATH] [--top N] [--json]
 ```
 
 TODO/FIXME/HACK density across source files. Default: top 20.
@@ -306,7 +308,7 @@ TODO/FIXME/HACK density across source files. Default: top 20.
 ### search
 
 ```bash
-navigator search PATTERN [OPTIONS]
+codecartographer search PATTERN [OPTIONS]
 ```
 
 Grep-like content search.
@@ -326,7 +328,7 @@ Grep-like content search.
 ### find
 
 ```bash
-navigator find PATTERN [OPTIONS]
+codecartographer find PATTERN [OPTIONS]
 ```
 
 Glob file discovery.
@@ -341,7 +343,7 @@ Glob file discovery.
 ### replace
 
 ```bash
-navigator replace PATTERN REPLACEMENT [OPTIONS]
+codecartographer replace PATTERN REPLACEMENT [OPTIONS]
 ```
 
 Regex find-and-replace. Supports `$0` (full match), `$1`, `$2` (groups).
@@ -360,7 +362,7 @@ Regex find-and-replace. Supports `$0` (full match), `$1`, `$2` (groups).
 ### extract
 
 ```bash
-navigator extract PATTERN [OPTIONS]
+codecartographer extract PATTERN [OPTIONS]
 ```
 
 Capture-group extraction.
@@ -381,7 +383,7 @@ Capture-group extraction.
 ## Diagram
 
 ```bash
-navigator diagram [PATH] [OPTIONS]
+codecartographer diagram [PATH] [OPTIONS]
 ```
 
 Full reference in [Diagrams](diagrams.md). Quick summary:
@@ -411,7 +413,7 @@ Full reference in [Diagrams](diagrams.md). Quick summary:
 ### context-health
 
 ```bash
-navigator context-health [FILE] [--model MODEL]
+codecartographer context-health [FILE] [--model MODEL]
 ```
 
 Score a context bundle on six metrics. Grade A–F.
@@ -419,7 +421,7 @@ Score a context bundle on six metrics. Grade A–F.
 ### llmstxt
 
 ```bash
-navigator llmstxt [PATH]
+codecartographer llmstxt [PATH]
 ```
 
 Generate `llms.txt` — a structured project index following the LLMs.txt standard.
@@ -427,7 +429,7 @@ Generate `llms.txt` — a structured project index following the LLMs.txt standa
 ### claudemd
 
 ```bash
-navigator claudemd [PATH]
+codecartographer claudemd [PATH]
 ```
 
 Generate `CLAUDE.md` — an architecture guide formatted for Claude Code.
@@ -439,7 +441,7 @@ Generate `CLAUDE.md` — an architecture guide formatted for Claude Code.
 ### reach
 
 ```bash
-navigator reach SYMBOL [SYMBOL ...] [OPTIONS] [PATH]
+codecartographer reach SYMBOL [SYMBOL ...] [OPTIONS] [PATH]
 ```
 
 Semantic graph traversal from a named symbol. Returns a compact AI-native context tree: callers with one-line snippets, callees with signatures, depth-2 type definitions. 135–500 tokens per symbol.
@@ -456,18 +458,18 @@ Pass two or more symbols for an **intersection view**: callers are merged and de
 | `--format compact\|json` | Output format (default: compact; single-symbol only for json) |
 
 ```bash
-navigator reach verify_token
-navigator reach "Auth::verify_token" --file src/auth.rs
-navigator reach FileCallGraph --depth 1
-navigator reach build_reach --show-body
-navigator reach verify_token decode_jwt
-navigator reach build_reach render_reach --depth 1
+codecartographer reach verify_token
+codecartographer reach "Auth::verify_token" --file src/auth.rs
+codecartographer reach FileCallGraph --depth 1
+codecartographer reach build_reach --show-body
+codecartographer reach verify_token decode_jwt
+codecartographer reach build_reach render_reach --depth 1
 ```
 
 ### answer
 
 ```bash
-navigator answer QUESTION [OPTIONS] [PATH]
+codecartographer answer QUESTION [OPTIONS] [PATH]
 ```
 
 Question-driven evidence chain. Takes a natural-language question and returns a numbered list of the minimum semantic units that together answer it, in reading order with inter-item connections annotated. When companion implementations score within 10% of each other, the one from the older file ranks first.
@@ -480,10 +482,10 @@ Question-driven evidence chain. Takes a natural-language question and returns a 
 | `--then N` | After the chain, drill into item #N via `reach` and append its context tree |
 
 ```bash
-navigator answer "how does rate limiting work?"
-navigator answer "what is FileCallGraph and how is it built"
-navigator answer "how does token budget trimming work" --max-items 4
-navigator answer "how does the call graph work?" --then 2
+codecartographer answer "how does rate limiting work?"
+codecartographer answer "what is FileCallGraph and how is it built"
+codecartographer answer "how does token budget trimming work" --max-items 4
+codecartographer answer "how does the call graph work?" --then 2
 ```
 
 ---
@@ -493,7 +495,7 @@ navigator answer "how does the call graph work?" --then 2
 ### serve
 
 ```bash
-navigator serve [PATH]
+codecartographer serve [PATH]
 ```
 
 Start the MCP server on stdio (JSON-RPC 2.0). See [MCP Tools](mcp-tools.md).
@@ -501,7 +503,7 @@ Start the MCP server on stdio (JSON-RPC 2.0). See [MCP Tools](mcp-tools.md).
 ### config
 
 ```bash
-navigator config [--default-target TARGET] [--show]
+codecartographer config [--default-target TARGET] [--show]
 ```
 
 Manage global configuration.
@@ -514,7 +516,7 @@ Manage global configuration.
 ### status
 
 ```bash
-navigator status [PATH]
+codecartographer status [PATH]
 ```
 
 Project dashboard: file counts, last-sync time, health score summary.
@@ -522,7 +524,7 @@ Project dashboard: file counts, last-sync time, health score summary.
 ### languages
 
 ```bash
-navigator languages [PATH]
+codecartographer languages [PATH]
 ```
 
 Detected programming languages and file counts.
@@ -530,7 +532,7 @@ Detected programming languages and file counts.
 ### update
 
 ```bash
-navigator update
+codecartographer update
 ```
 
 Re-runs the install script to build and install the latest version from source. Requires the repo to be present at the expected location relative to the binary.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Nyx.Navigator Launcher
-Build, install, and run Nyx.Navigator interactively.
+CodeCartographer Launcher
+Build, install, and run CodeCartographer interactively.
 """
 
 import os
@@ -30,7 +30,7 @@ def section(title): print(f"\n{C.BOLD}{C.BLUE}▶ {title}{C.END}")
 
 def banner():
     print(f"\n{C.BOLD}{C.CYAN}{'='*60}")
-    print("  Nyx.Navigator — Launcher")
+    print("  CodeCartographer — Launcher")
     print(f"{'='*60}{C.END}\n")
 
 def confirm(prompt, default_yes=False):
@@ -60,8 +60,8 @@ def choose(prompt, options):
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-CARGO_DIR   = os.path.join(SCRIPT_DIR, "mapper-core", "navigator")
-BINARY_NAME = "navigator"
+CARGO_DIR   = os.path.join(SCRIPT_DIR, "mapper-core", "codecartographer")
+BINARY_NAME = "codecartographer"
 
 def binary_src():
     ext = ".exe" if platform.system() == "Windows" else ""
@@ -88,7 +88,7 @@ def check_cargo():
     ok(result.stdout.strip())
 
 def build():
-    section("Building Nyx.Navigator")
+    section("Building CodeCartographer")
     info(f"cargo build --release  (in {CARGO_DIR})")
     result = subprocess.run(["cargo", "build", "--release"], cwd=CARGO_DIR)
     if result.returncode != 0:
@@ -149,10 +149,10 @@ def verify():
 
 # ── Run helpers ───────────────────────────────────────────────────────────────
 
-def _navigator(args, cwd=None):
+def _codecartographer(args, cwd=None):
     binary = find_installed_binary() or binary_src()
     if not os.path.exists(binary) and not shutil.which(binary):
-        err("navigator binary not found — build and install first.")
+        err("codecartographer binary not found — build and install first.")
         return
     subprocess.run([binary] + args, cwd=cwd or SCRIPT_DIR)
 
@@ -182,34 +182,34 @@ def action_build_only():
     ok(f"Binary at: {binary_src()}")
 
 def action_map():
-    section("Run: navigator map")
+    section("Run: codecartographer map")
     path = ask_target_path()
     args = ["map"] + ([path] if path else [])
-    _navigator(args)
+    _codecartographer(args)
 
 def action_health():
-    section("Run: navigator health")
+    section("Run: codecartographer health")
     path = ask_target_path()
     args = ["health"] + ([path] if path else [])
-    _navigator(args)
+    _codecartographer(args)
 
 def action_serve():
-    section("Run: navigator serve  (MCP server — Ctrl+C to stop)")
+    section("Run: codecartographer serve  (MCP server — Ctrl+C to stop)")
     path = ask_target_path()
     args = ["serve"] + ([path] if path else [])
-    _navigator(args)
+    _codecartographer(args)
 
 def action_init():
-    section("Run: navigator init")
+    section("Run: codecartographer init")
     path = ask_target_path()
     args = ["init"] + ([path] if path else [])
-    _navigator(args)
+    _codecartographer(args)
 
 def action_watch():
-    section("Run: navigator watch  (Ctrl+C to stop)")
+    section("Run: codecartographer watch  (Ctrl+C to stop)")
     path = ask_target_path()
     args = ["watch"] + ([path] if path else [])
-    _navigator(args)
+    _codecartographer(args)
 
 def action_verify():
     section("Verify installation")
@@ -222,13 +222,13 @@ def main():
     banner()
 
     menu = {
-        "install": "Build and install navigator globally",
+        "install": "Build and install codecartographer globally",
         "build":   "Build only (no install)",
-        "init":    "Run: navigator init   — create .navigator/config.toml",
-        "map":     "Run: navigator map   — generate skeleton map",
-        "health":  "Run: navigator health — architectural health score",
-        "serve":   "Run: navigator serve  — start MCP server",
-        "watch":   "Run: navigator watch  — live file watcher",
+        "init":    "Run: codecartographer init   — create .codecartographer/config.toml",
+        "map":     "Run: codecartographer map   — generate skeleton map",
+        "health":  "Run: codecartographer health — architectural health score",
+        "serve":   "Run: codecartographer serve  — start MCP server",
+        "watch":   "Run: codecartographer watch  — live file watcher",
         "verify":  "Verify installed binary",
         "quit":    "Quit",
     }
