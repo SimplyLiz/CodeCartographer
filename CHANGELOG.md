@@ -4,6 +4,49 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-09
+
+Sharper, broader lightweight navigation for AI — six improvements from the C++
+evaluation plus six new languages. Everything stays tree-sitter/regex only;
+compiler-precise resolution remains CKB's job.
+
+### Added — six new languages (on by default)
+
+Java, C#, Ruby, Kotlin, Swift, and PHP now have tree-sitter skeleton extraction
+(classes, interfaces, structs, enums, methods, functions, properties, namespaces,
+imports) with qualified names and doc-comments. A single generic walker covers the
+brace-based OO grammars; Ruby has a dedicated `def…end` walker. `skeleton_map`,
+`ranked_skeleton`, `reach_symbol`, and search work for all of them. Grammar crates
+are pinned to tree-sitter 0.22-compatible versions (no core bump). File-local
+call-graph and class-diagram support for these six is not yet wired (see the
+Language support table in the README); `reach_symbol` callers work via text search.
+
+### Added — symbol-aware search corpus
+
+`query_context` and `answer_question` now rank over a BM25 corpus built from parsed
+symbols (name + qualified name + signature + doc-comment) instead of raw file bytes,
+falling back to content BM25 only when it finds nothing. Matches code intent rather
+than string-literal/comment noise — e.g. "how does the hash map resize and rehash"
+surfaces the hash-map files directly.
+
+### Changed — reach_symbol navigation
+
+Renders the scope-qualified name (`Object.get_class`) so overloads/overrides across
+classes are distinguishable, surfaces the symbol's doc-comment, and skips call sites
+that type-qualify the same name against a different class.
+
+### Changed — orientation-first repo map
+
+`ranked_skeleton` no longer sorts purely by PageRank-of-imports (which rewards
+ubiquitous sink headers). Ranking is role-primary and uses fan-out, so the first
+tokens land on entry points and domain core (e.g. Godot core/ now leads with
+`register_core_types.cpp` and `variant.h`).
+
+### Changed — import resolution
+
+Ambiguous basenames (bare `#include "foo.h"` with `foo.h` in several dirs) now break
+ties by directory proximity to the including file, then shortest path.
+
 ## [1.2.1] - 2026-07-09
 
 ### Fixed — graph build was O(N²) and hung on large C/C++ trees

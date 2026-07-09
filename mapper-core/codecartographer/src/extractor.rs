@@ -17,6 +17,8 @@ use std::path::Path;
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 use tree_sitter::{Language, Node, Parser};
 
@@ -25,6 +27,8 @@ use tree_sitter::{Language, Node, Parser};
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 const CONFIDENCE_TS: u8 = 60;
 
@@ -91,6 +95,24 @@ pub fn ts_extract(path: &Path, source: &str) -> Option<TsOutput> {
         #[cfg(all(feature = "lang-c", not(feature = "lang-cpp")))]
         "h" => Some(extract_c(source, path)),
 
+        #[cfg(feature = "lang-java")]
+        "java" => Some(extract_java(source, path)),
+
+        #[cfg(feature = "lang-csharp")]
+        "cs" => Some(extract_csharp(source, path)),
+
+        #[cfg(feature = "lang-ruby")]
+        "rb" => Some(extract_ruby(source, path)),
+
+        #[cfg(feature = "lang-kotlin")]
+        "kt" | "kts" => Some(extract_kotlin(source, path)),
+
+        #[cfg(feature = "lang-swift")]
+        "swift" => Some(extract_swift(source, path)),
+
+        #[cfg(feature = "lang-php")]
+        "php" => Some(extract_php(source, path)),
+
         _ => None,
     }
 }
@@ -103,6 +125,8 @@ pub fn ts_extract(path: &Path, source: &str) -> Option<TsOutput> {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
@@ -113,6 +137,8 @@ fn node_text<'a>(node: &Node, src: &'a [u8]) -> &'a str {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn sig_up_to_block(node: &Node, src: &[u8]) -> String {
     let body_start = {
@@ -122,7 +148,8 @@ fn sig_up_to_block(node: &Node, src: &[u8]) -> String {
             .find(|c| matches!(c.kind(),
                 "block" | "statement_block" | "compound_statement" |
                 "class_body" | "declaration_list" | "field_declaration_list" |
-                "enum_body" | "interface_body" | "object_type"
+                "enum_body" | "interface_body" | "object_type" |
+                "function_body" | "protocol_body" | "enum_class_body" | "body_statement"
             ))
             .map(|c| c.start_byte())
             .unwrap_or(node.end_byte())
@@ -153,6 +180,8 @@ fn sig_up_to_colon(node: &Node, src: &[u8]) -> String {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn first_line(node: &Node, src: &[u8]) -> String {
     let text = node_text(node, src);
@@ -164,6 +193,8 @@ fn first_line(node: &Node, src: &[u8]) -> String {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn preceding_doc_comment(node: &Node, src: &[u8]) -> Option<String> {
     let mut prev = node.prev_sibling()?;
@@ -193,6 +224,8 @@ fn preceding_doc_comment(node: &Node, src: &[u8]) -> Option<String> {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn lip_uri(path: &Path, qualified: &str) -> String {
     let p = path.to_string_lossy().replace('\\', "/");
@@ -204,6 +237,8 @@ fn lip_uri(path: &Path, qualified: &str) -> String {
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn make_sig(
     raw: String, kind: SymbolKind, node: &Node, path: &Path,
@@ -232,6 +267,8 @@ fn make_sig(
     feature = "lang-rust",   feature = "lang-go",   feature = "lang-python",
     feature = "lang-typescript", feature = "lang-javascript",
     feature = "lang-c",      feature = "lang-cpp",
+    feature = "lang-java",   feature = "lang-csharp", feature = "lang-ruby",
+    feature = "lang-kotlin", feature = "lang-swift",  feature = "lang-php",
 ))]
 fn scope_qualify(scope: &[String], name: &str) -> String {
     match scope.last() {
@@ -1183,6 +1220,278 @@ fn is_function_declarator(node: &Node) -> bool {
                 .unwrap_or(false)
         }
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Brace-based OO languages: Java, C#, Kotlin, Swift, PHP
+// One generic walker — these grammars share declaration node kinds and a `name`
+// field (or a leading identifier child), so a single mapping covers them all.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-kotlin",
+    feature = "lang-swift", feature = "lang-php",
+))]
+fn oo_name(node: &Node, src: &[u8]) -> Option<String> {
+    if let Some(n) = node.child_by_field_name("name") {
+        let t = node_text(&n, src);
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let mut cur = node.walk();
+    for ch in node.children(&mut cur) {
+        if matches!(
+            ch.kind(),
+            "identifier" | "type_identifier" | "simple_identifier" | "name" | "constant"
+        ) {
+            let t = node_text(&ch, src);
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-kotlin",
+    feature = "lang-swift", feature = "lang-php",
+))]
+fn walk_oo(node: &Node, src: &[u8], path: &Path, sigs: &mut Vec<Signature>, scope: &mut Vec<String>) {
+    // (SymbolKind, opens_scope). Types open a scope so members qualify as `Type.member`.
+    let mapped: Option<(SymbolKind, bool)> = match node.kind() {
+        "class_declaration" | "object_declaration" | "trait_declaration" => {
+            Some((SymbolKind::Class, true))
+        }
+        "interface_declaration" | "protocol_declaration" => Some((SymbolKind::Interface, true)),
+        "struct_declaration" => Some((SymbolKind::Struct, true)),
+        "enum_declaration" => Some((SymbolKind::Enum, true)),
+        "namespace_declaration" | "namespace_definition" => Some((SymbolKind::Namespace, true)),
+        "method_declaration" | "constructor_declaration" | "protocol_function_declaration" => {
+            Some((SymbolKind::Method, false))
+        }
+        "property_declaration" => Some((SymbolKind::Field, false)),
+        "function_declaration" | "function_definition" => {
+            let k = if scope.is_empty() {
+                SymbolKind::Function
+            } else {
+                SymbolKind::Method
+            };
+            Some((k, false))
+        }
+        _ => None,
+    };
+
+    match mapped {
+        Some((symkind, opens)) => {
+            let name = oo_name(node, src).unwrap_or_default();
+            if !name.is_empty() {
+                let raw = sig_up_to_block(node, src);
+                let qualified = scope_qualify(scope, &name);
+                let doc = preceding_doc_comment(node, src);
+                sigs.push(make_sig(raw, symkind, node, path, &name, &qualified, doc));
+            }
+            if opens {
+                scope.push(name);
+                let mut cur = node.walk();
+                for ch in node.children(&mut cur) {
+                    walk_oo(&ch, src, path, sigs, scope);
+                }
+                scope.pop();
+            }
+            // methods/functions: do not recurse into bodies (local fns are noise).
+        }
+        None => {
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                walk_oo(&ch, src, path, sigs, scope);
+            }
+        }
+    }
+}
+
+/// Collect imports for OO languages: find `kinds` nodes anywhere, strip the leading
+/// keyword(s) and trailing `;`, and keep the qualified path token.
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-kotlin",
+    feature = "lang-swift", feature = "lang-php",
+))]
+fn collect_oo_imports(node: &Node, src: &[u8], kinds: &[&str], strip: &[&str], out: &mut Vec<String>) {
+    if kinds.contains(&node.kind()) {
+        let mut text = node_text(node, src).trim().trim_end_matches(';').trim().to_string();
+        for s in strip {
+            text = text.trim_start_matches(s).trim().to_string();
+        }
+        if let Some(first) = text.split_whitespace().next() {
+            let imp = first.trim_matches(|c| c == '"' || c == '\'').to_string();
+            if !imp.is_empty() {
+                out.push(imp);
+            }
+        }
+        return;
+    }
+    let mut cur = node.walk();
+    for ch in node.children(&mut cur) {
+        collect_oo_imports(&ch, src, kinds, strip, out);
+    }
+}
+
+#[cfg(any(
+    feature = "lang-java", feature = "lang-csharp", feature = "lang-kotlin",
+    feature = "lang-swift", feature = "lang-php",
+))]
+fn extract_oo(
+    source: &str,
+    path: &Path,
+    lang: Language,
+    import_kinds: &[&str],
+    strip: &[&str],
+) -> TsOutput {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return TsOutput::new(vec![], vec![]);
+    }
+    let tree = match parser.parse(source.as_bytes(), None) {
+        Some(t) => t,
+        None => return TsOutput::new(vec![], vec![]),
+    };
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    let mut sigs = Vec::new();
+    let mut imports = Vec::new();
+    collect_oo_imports(&root, src, import_kinds, strip, &mut imports);
+    let mut scope: Vec<String> = Vec::new();
+    walk_oo(&root, src, path, &mut sigs, &mut scope);
+    TsOutput::new(sigs, imports)
+}
+
+#[cfg(feature = "lang-java")]
+fn extract_java(source: &str, path: &Path) -> TsOutput {
+    extract_oo(source, path, tree_sitter_java::language(), &["import_declaration"], &["import", "static"])
+}
+
+#[cfg(feature = "lang-csharp")]
+fn extract_csharp(source: &str, path: &Path) -> TsOutput {
+    extract_oo(source, path, tree_sitter_c_sharp::language(), &["using_directive"], &["using", "static", "global"])
+}
+
+#[cfg(feature = "lang-kotlin")]
+fn extract_kotlin(source: &str, path: &Path) -> TsOutput {
+    extract_oo(source, path, tree_sitter_kotlin::language(), &["import_header"], &["import"])
+}
+
+#[cfg(feature = "lang-swift")]
+fn extract_swift(source: &str, path: &Path) -> TsOutput {
+    extract_oo(source, path, tree_sitter_swift::language(), &["import_declaration"], &["import"])
+}
+
+#[cfg(feature = "lang-php")]
+fn extract_php(source: &str, path: &Path) -> TsOutput {
+    extract_oo(source, path, tree_sitter_php::language_php(), &["namespace_use_declaration"], &["use", "function", "const"])
+}
+
+// ---------------------------------------------------------------------------
+// Ruby — `def…end` (no braces); driven by AST structure, not brace depth.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "lang-ruby")]
+fn extract_ruby(source: &str, path: &Path) -> TsOutput {
+    let mut parser = Parser::new();
+    if parser.set_language(&tree_sitter_ruby::language()).is_err() {
+        return TsOutput::new(vec![], vec![]);
+    }
+    let tree = match parser.parse(source.as_bytes(), None) {
+        Some(t) => t,
+        None => return TsOutput::new(vec![], vec![]),
+    };
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    let mut sigs = Vec::new();
+    let mut imports = Vec::new();
+    collect_ruby_requires(&root, src, &mut imports);
+    let mut scope: Vec<String> = Vec::new();
+    walk_ruby(&root, src, path, &mut sigs, &mut scope);
+    TsOutput::new(sigs, imports)
+}
+
+#[cfg(feature = "lang-ruby")]
+fn collect_ruby_requires(node: &Node, src: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "call" {
+        let method = node
+            .child_by_field_name("method")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default();
+        if method == "require" || method == "require_relative" {
+            let text = node_text(node, src);
+            if let Some(start) = text.find(|c| c == '"' || c == '\'') {
+                let rest = &text[start + 1..];
+                if let Some(end) = rest.find(|c| c == '"' || c == '\'') {
+                    let imp = &rest[..end];
+                    if !imp.is_empty() {
+                        out.push(imp.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut cur = node.walk();
+    for ch in node.children(&mut cur) {
+        collect_ruby_requires(&ch, src, out);
+    }
+}
+
+#[cfg(feature = "lang-ruby")]
+fn walk_ruby(node: &Node, src: &[u8], path: &Path, sigs: &mut Vec<Signature>, scope: &mut Vec<String>) {
+    match node.kind() {
+        "class" | "module" => {
+            let name = node
+                .child_by_field_name("name")
+                .map(|n| node_text(&n, src).to_string())
+                .unwrap_or_default();
+            let kind = if node.kind() == "module" {
+                SymbolKind::Namespace
+            } else {
+                SymbolKind::Class
+            };
+            if !name.is_empty() {
+                let raw = format!("{} {}", node.kind(), name);
+                let qualified = scope_qualify(scope, &name);
+                let doc = preceding_doc_comment(node, src);
+                sigs.push(make_sig(raw, kind, node, path, &name, &qualified, doc));
+                scope.push(name);
+                let mut cur = node.walk();
+                for ch in node.children(&mut cur) {
+                    walk_ruby(&ch, src, path, sigs, scope);
+                }
+                scope.pop();
+            }
+        }
+        "method" | "singleton_method" => {
+            let name = node
+                .child_by_field_name("name")
+                .map(|n| node_text(&n, src).to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let line = first_line(node, src);
+                let raw = line.split(';').next().unwrap_or(&line).trim().to_string();
+                let kind = if scope.is_empty() {
+                    SymbolKind::Function
+                } else {
+                    SymbolKind::Method
+                };
+                let qualified = scope_qualify(scope, &name);
+                let doc = preceding_doc_comment(node, src);
+                sigs.push(make_sig(raw, kind, node, path, &name, &qualified, doc));
+            }
+        }
+        _ => {
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                walk_ruby(&ch, src, path, sigs, scope);
+            }
+        }
     }
 }
 

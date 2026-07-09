@@ -96,6 +96,11 @@ pub struct RootSymbol {
     pub kind: SymbolKind,
     pub sig: String,
     pub name: String,
+    /// Scope-qualified name (e.g. `Object.get_class`) when the symbol is a member;
+    /// `None` for free functions. Used to disambiguate same-named callers.
+    pub qualified_name: Option<String>,
+    /// Preceding doc-comment, if any — surfaced in the render.
+    pub doc_comment: Option<String>,
     pub visibility: Visibility,
 }
 
@@ -282,6 +287,8 @@ fn resolve_symbol(
                     .clone()
                     .or_else(|| sig.qualified_name.clone())
                     .unwrap_or_else(|| name.clone()),
+                qualified_name: sig.qualified_name.clone(),
+                doc_comment: sig.doc_comment.clone(),
                 visibility: detect_visibility(&sig.raw),
             };
 
@@ -358,6 +365,18 @@ fn detect_visibility(raw: &str) -> Visibility {
 // Caller discovery
 // ---------------------------------------------------------------------------
 
+/// The immediate scope of a qualified member name — `Object.get_class` → `Object`,
+/// `A::B::foo` → `B`. Returns `None` for a free function (no scope separator).
+fn scope_of_member(qualified: &str) -> Option<String> {
+    let norm = qualified.replace("::", ".");
+    let parts: Vec<&str> = norm.split('.').filter(|s| !s.is_empty()).collect();
+    if parts.len() >= 2 {
+        Some(parts[parts.len() - 2].to_string())
+    } else {
+        None
+    }
+}
+
 fn find_callers(
     root_path: &Path,
     mapped: &[MappedFile],
@@ -376,6 +395,22 @@ fn find_callers(
         Ok(r) => r,
         Err(_) => return (vec![], 0),
     };
+
+    // Scope-aware precision: when the root is a member (e.g. `Object.get_class`), a call
+    // site that explicitly type-qualifies the same name against a DIFFERENT capitalized
+    // type/namespace (`Node::get_class(`) is a different symbol — skip it. Bare and
+    // instance calls are kept (can't be attributed without types — that's CKB's job).
+    let root_scope = root
+        .qualified_name
+        .as_deref()
+        .and_then(scope_of_member);
+    let qual_re = root_scope.as_ref().and_then(|_| {
+        regex::Regex::new(&format!(
+            r"\b([A-Z][A-Za-z0-9_]*)\s*(?:::|\.)\s*{}\b",
+            regex::escape(&root.name)
+        ))
+        .ok()
+    });
 
     let mut callers: Vec<CallerInfo> = vec![];
     let mut test_count = 0usize;
@@ -396,6 +431,22 @@ fn find_callers(
         let trimmed = m.line.trim();
         if is_definition_line(trimmed) || is_import_line(trimmed) || is_comment_line(trimmed) {
             continue;
+        }
+
+        // Skip call sites qualified against a different type than the root's scope.
+        if let (Some(scope), Some(re)) = (&root_scope, &qual_re) {
+            let mut has_other = false;
+            let mut has_ours = false;
+            for c in re.captures_iter(trimmed) {
+                if &c[1] == scope {
+                    has_ours = true;
+                } else {
+                    has_other = true;
+                }
+            }
+            if has_other && !has_ours {
+                continue;
+            }
         }
 
         let is_test = is_test_path(&m.path)
@@ -971,11 +1022,26 @@ pub fn render_reach(result: &ReachResult) -> String {
 
     let short_file = short_path(&result.root.file);
 
-    // Header line
+    // Header line — show the scope-qualified name when the symbol is a member
+    // (e.g. `Object.get_class`), so overloads across classes are distinguishable.
+    let header_name = result
+        .root
+        .qualified_name
+        .as_deref()
+        .filter(|q| q.contains('.') || q.contains("::"))
+        .unwrap_or(&result.root.name);
     out.push_str(&format!(
         "── {}  {}  {}:{}{}\n",
-        result.root.name, kind_label, short_file, result.root.line, vis_label
+        header_name, kind_label, short_file, result.root.line, vis_label
     ));
+
+    // Doc-comment (one line) — the symbol's stated intent, invaluable for navigation.
+    if let Some(doc) = result.root.doc_comment.as_deref() {
+        let doc = doc.split('\n').next().unwrap_or(doc).trim();
+        if !doc.is_empty() {
+            out.push_str(&format!("   doc  {}\n", truncate_snippet(doc, 100)));
+        }
+    }
 
     // Signature
     out.push_str(&format!("   sig  {}\n", result.root.sig.trim()));
@@ -1421,6 +1487,8 @@ mod tests {
                 kind: SymbolKind::Function,
                 sig: "pub fn verify_token(token: &str) -> Result<Claims>".into(),
                 name: "verify_token".into(),
+                qualified_name: None,
+                doc_comment: None,
                 visibility: Visibility::Public,
             },
             callers: vec![CallerInfo {

@@ -2454,23 +2454,35 @@ impl McpServer {
                 let max_search = args.get("maxSearchResults").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                 let model_str = args.get("model").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
 
-                // Step 1: rank files by BM25 relevance to the query. Uses the tokenizer
-                // (identifier subword splitting) so a natural-language question actually
-                // matches code — unlike a raw-regex line search, which almost never does.
+                // Step 1: rank files by BM25 relevance to the query. Rank over the SYMBOL
+                // corpus first (names + qualified names + signatures + doc-comments) so the
+                // query matches code intent, not string-literal/comment noise — the key fix
+                // for macro-heavy languages like C++. Fall back to raw-content BM25 only if
+                // the symbol corpus finds nothing.
                 let bm25_opts = crate::search::BM25Options {
                     max_results: max_search,
                     ..Default::default()
                 };
-                let focus_files: Vec<String> = match crate::search::bm25_search(
-                    &self.api_state.root_path,
-                    &query,
-                    &bm25_opts,
-                ) {
-                    Ok(sr) => {
-                        // Already relevance-ordered and one entry per file.
-                        sr.matches.into_iter().map(|m| m.path).collect()
+                let _ = self.api_state.rebuild_graph();
+                let sym_hits: Vec<String> = {
+                    let files = self.api_state.mapped_files.lock().map_err(|e| e.to_string())?;
+                    crate::search::bm25_search_symbols(
+                        files.iter().map(|(k, v)| (k.as_str(), v)),
+                        &query,
+                        &bm25_opts,
+                    )
+                    .matches
+                    .into_iter()
+                    .map(|m| m.path)
+                    .collect()
+                };
+                let focus_files: Vec<String> = if !sym_hits.is_empty() {
+                    sym_hits
+                } else {
+                    match crate::search::bm25_search(&self.api_state.root_path, &query, &bm25_opts) {
+                        Ok(sr) => sr.matches.into_iter().map(|m| m.path).collect(),
+                        Err(_) => vec![],
                     }
-                    Err(_) => vec![],
                 };
                 // query_context injects CODE context — bias toward source files and drop
                 // docs (which win BM25 on conceptual terms). Use query_docs for doc context.

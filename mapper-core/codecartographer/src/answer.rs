@@ -20,7 +20,7 @@ use std::path::Path;
 use crate::formatter::estimate_tokens;
 use regex::Regex;
 use crate::mapper::{MappedFile, Signature, SymbolKind};
-use crate::search::{bm25_search, BM25Options};
+use crate::search::{bm25_search, bm25_search_symbols, BM25Options};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -84,20 +84,31 @@ pub fn build_answer(
     opts: &AnswerOptions,
 ) -> AnswerResult {
     // --- 1. BM25 search ---
+    // Rank over the SYMBOL corpus (names + signatures + doc-comments) first so the answer
+    // is anchored on code intent; fall back to raw-content BM25 only if it finds nothing.
     let bm25_opts = BM25Options {
         max_results: 30,
         ..Default::default()
     };
-    let bm25 = match bm25_search(root_path, query, &bm25_opts) {
-        Ok(r) => r,
-        Err(_) => {
-            return AnswerResult {
-                query: query.to_string(),
-                items: vec![],
-                tokens_used: 0,
-                budget_hit: false,
-                files_searched: 0,
-            };
+    let sym = bm25_search_symbols(
+        mapped.iter().map(|mf| (mf.path.as_str(), mf)),
+        query,
+        &bm25_opts,
+    );
+    let bm25 = if !sym.matches.is_empty() {
+        sym
+    } else {
+        match bm25_search(root_path, query, &bm25_opts) {
+            Ok(r) => r,
+            Err(_) => {
+                return AnswerResult {
+                    query: query.to_string(),
+                    items: vec![],
+                    tokens_used: 0,
+                    budget_hit: false,
+                    files_searched: 0,
+                };
+            }
         }
     };
 

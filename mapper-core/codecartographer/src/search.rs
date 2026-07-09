@@ -377,7 +377,138 @@ pub fn bm25_search(root: &Path, query: &str, opts: &BM25Options) -> Result<BM25R
     Ok(BM25Result { matches, total })
 }
 
-fn tokenize(text: &str) -> Vec<String> {
+/// Rank project files by BM25 relevance to `query`, but over a corpus built from PARSED
+/// SYMBOLS (name + qualified name + signature + doc-comment) rather than raw file bytes.
+/// This makes "where does X" navigation queries match code intent instead of drowning in
+/// string literals, comments-as-noise, and macro boilerplate — the failure mode on C++.
+/// One document per file; result `path` is the repo-relative module_id (map key).
+pub fn bm25_search_symbols<'a>(
+    files: impl Iterator<Item = (&'a str, &'a crate::mapper::MappedFile)>,
+    query: &str,
+    opts: &BM25Options,
+) -> BM25Result {
+    let query_terms: Vec<String> = tokenize(query);
+    if query_terms.is_empty() {
+        return BM25Result { matches: vec![], total: 0 };
+    }
+
+    struct SymDoc {
+        path: String,
+        tf: std::collections::HashMap<String, usize>,
+        length: usize,
+        snippets: Vec<String>,
+    }
+
+    let mut docs: Vec<SymDoc> = Vec::new();
+    for (module_id, mf) in files {
+        let mut text = String::new();
+        let mut sig_pool: Vec<String> = Vec::new();
+        for sig in &mf.signatures {
+            if let Some(n) = &sig.symbol_name {
+                text.push_str(n);
+                text.push(' ');
+            }
+            if let Some(q) = &sig.qualified_name {
+                text.push_str(q);
+                text.push(' ');
+            }
+            text.push_str(&sig.raw);
+            text.push(' ');
+            if let Some(d) = &sig.doc_comment {
+                text.push_str(d);
+                text.push(' ');
+            }
+            sig_pool.push(sig.raw.trim().to_string());
+        }
+        if text.is_empty() {
+            continue;
+        }
+        let tokens = tokenize(&text);
+        let length = tokens.len();
+        let mut tf: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for t in &tokens {
+            *tf.entry(t.clone()).or_insert(0) += 1;
+        }
+        docs.push(SymDoc { path: module_id.to_string(), tf, length, snippets: sig_pool });
+    }
+
+    let n = docs.len() as f64;
+    if n == 0.0 {
+        return BM25Result { matches: vec![], total: 0 };
+    }
+    let avg_len: f64 = docs.iter().map(|d| d.length as f64).sum::<f64>() / n;
+
+    let df: std::collections::HashMap<String, usize> = {
+        let mut map = std::collections::HashMap::new();
+        for term in &query_terms {
+            let count = docs.iter().filter(|d| d.tf.contains_key(term)).count();
+            map.insert(term.clone(), count);
+        }
+        map
+    };
+
+    let mut scored: Vec<(f64, usize)> = docs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, doc)| {
+            let mut score = 0.0_f64;
+            let mut has_match = false;
+            for term in &query_terms {
+                let tf_val = *doc.tf.get(term).unwrap_or(&0);
+                if tf_val == 0 {
+                    continue;
+                }
+                has_match = true;
+                let df_val = *df.get(term).unwrap_or(&0) as f64;
+                let idf = ((n - df_val + 0.5) / (df_val + 0.5) + 1.0).ln();
+                let tf_norm = (tf_val as f64 * (opts.k1 + 1.0))
+                    / (tf_val as f64 + opts.k1 * (1.0 - opts.b + opts.b * doc.length as f64 / avg_len));
+                score += idf * tf_norm;
+            }
+            if has_match {
+                Some((score, i))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let total = scored.len();
+    let limit = if opts.max_results == 0 {
+        scored.len()
+    } else {
+        opts.max_results.min(scored.len())
+    };
+
+    let matches: Vec<BM25Match> = scored
+        .into_iter()
+        .take(limit)
+        .map(|(score, i)| {
+            let doc = &docs[i];
+            let matching_terms: Vec<String> = query_terms
+                .iter()
+                .filter(|t| doc.tf.contains_key(*t))
+                .cloned()
+                .collect();
+            let snippets: Vec<String> = doc
+                .snippets
+                .iter()
+                .filter(|s| {
+                    let lower = s.to_lowercase();
+                    query_terms.iter().any(|t| lower.contains(t.as_str()))
+                })
+                .take(3)
+                .cloned()
+                .collect();
+            BM25Match { path: doc.path.clone(), score, matching_terms, snippets }
+        })
+        .collect();
+
+    BM25Result { matches, total }
+}
+
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     // Split on non-alphanumeric runs (this already splits snake_case on `_`), then
     // further split each token on camelCase / PascalCase / letter-digit boundaries.
     // Emit BOTH the whole token and its subwords so a query term like `churn` matches
