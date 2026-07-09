@@ -308,7 +308,7 @@ fn build_warnings(
             m.signal_density * 100.0
         ));
         recs.push(
-            "Use `navigator context --budget <N>` — PageRank ordering maximises \
+            "Use `codecartographer context --budget <N>` — PageRank ordering maximises \
              symbol density within a token budget".to_string()
         );
     } else if m.signal_density < 0.15 {
@@ -318,7 +318,7 @@ fn build_warnings(
             m.signal_density * 100.0
         ));
         recs.push(
-            "Try `navigator context --focus <file> --budget <N>` to get a \
+            "Try `codecartographer context --focus <file> --budget <N>` to get a \
              signal-dense, query-focused subset".to_string()
         );
     }
@@ -352,7 +352,7 @@ fn build_warnings(
              vs. context boundaries".to_string()
         );
         recs.push(
-            "`navigator context` uses PageRank ordering, which naturally places \
+            "`codecartographer context` uses PageRank ordering, which naturally places \
              high-centrality modules near the boundary positions".to_string()
         );
     }

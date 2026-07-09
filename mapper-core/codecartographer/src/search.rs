@@ -1,6 +1,6 @@
 //! Content search and file discovery — grep-like text/regex search + glob find.
 //!
-//! Reuses the existing file scanner (`.navigatorignore`, noise filter, security
+//! Reuses the existing file scanner (`.codecartographerignore`, noise filter, security
 //! block) unless `no_ignore` is set, in which case raw `walkdir` is used.
 
 use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};

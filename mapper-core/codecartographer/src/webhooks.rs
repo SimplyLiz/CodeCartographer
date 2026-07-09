@@ -274,7 +274,7 @@ impl WebhookService {
         let response = client
             .post(&webhook.url)
             .header("Content-Type", "application/json")
-            .header("X-Webhook-Event", "navigator")
+            .header("X-Webhook-Event", "codecartographer")
             .header("X-Webhook-Id", &webhook.id)
             .body(payload.to_string())
             .send()

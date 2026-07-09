@@ -1,15 +1,15 @@
 # Configuration
 
-Navigator has four layers of configuration, applied in this priority order (highest first):
+CodeCartographer has four layers of configuration, applied in this priority order (highest first):
 
 1. **CLI flags** — override everything for a single invocation
-2. **Per-repo config** — `.navigator/config.toml` in the project root
-3. **Global config** — `~/.config/navigator/config.toml`
+2. **Per-repo config** — `.codecartographer/config.toml` in the project root
+3. **Global config** — `~/.config/codecartographer/config.toml`
 4. **Defaults** — built-in defaults (`target = "claude"`)
 
 ## Global configuration
 
-File: `~/.config/navigator/config.toml`
+File: `~/.config/codecartographer/config.toml`
 
 ```toml
 [defaults]
@@ -19,15 +19,15 @@ target = "claude"   # "claude" | "cursor" | "raw"
 Manage via CLI:
 
 ```bash
-navigator config --default-target claude    # set default output target
-navigator config --default-target cursor
-navigator config --default-target raw
-navigator config --show                     # print current global config
+codecartographer config --default-target claude    # set default output target
+codecartographer config --default-target cursor
+codecartographer config --default-target raw
+codecartographer config --show                     # print current global config
 ```
 
 ## Per-repo configuration
 
-File: `.navigator/config.toml` (created by `navigator init`)
+File: `.codecartographer/config.toml` (created by `codecartographer init`)
 
 Per-repo settings override the global config. Commit this file so your team shares the same settings.
 
@@ -40,9 +40,9 @@ url = "http://localhost:3001"
 webhook_url = "http://localhost:3002"
 ```
 
-The `[ckb]` section is populated by `navigator init-ckb`.
+The `[ckb]` section is populated by `codecartographer init-ckb`.
 
-## .navigatorignore
+## .codecartographerignore
 
 Same syntax as `.gitignore`. Place in the project root.
 
@@ -58,7 +58,7 @@ tests/fixtures/large_*.json
 vendor/
 ```
 
-**Built-in noise filter (always active):** Navigator automatically excludes the following even without a `.navigatorignore`:
+**Built-in noise filter (always active):** CodeCartographer automatically excludes the following even without a `.codecartographerignore`:
 
 | Category | Paths |
 |----------|-------|
@@ -72,13 +72,13 @@ vendor/
 | Large SVGs | SVG files over 2KB |
 | Binary/media | Standard image, audio, video, font extensions |
 
-Pass `--no-ignore` to any command to bypass both `.navigatorignore` and the built-in filter for that invocation.
+Pass `--no-ignore` to any command to bypass both `.codecartographerignore` and the built-in filter for that invocation.
 
 ## Layer enforcement (`layers.toml`)
 
 Define architectural layers and the allowed import flows between them.
 
-**File location:** `layers.toml` in the project root, or `.navigator/layers.toml`.
+**File location:** `layers.toml` in the project root, or `.codecartographer/layers.toml`.
 
 ```toml
 [layers]
@@ -104,8 +104,8 @@ db       -> shared
 Check violations:
 
 ```bash
-navigator layers        # show all current violations with severity
-navigator check         # exit non-zero if any violations exist (for CI)
+codecartographer layers        # show all current violations with severity
+codecartographer check         # exit non-zero if any violations exist (for CI)
 ```
 
 The `check_layers` MCP tool returns violations over the MCP protocol.
@@ -120,35 +120,35 @@ Controls the format of output files and MCP responses.
 | `cursor` | Cursor-optimized format |
 | `raw` | Plain output, no wrappers |
 
-Set globally: `navigator config --default-target TARGET`
+Set globally: `codecartographer config --default-target TARGET`
 
-Override per-command: `navigator map --target raw`
+Override per-command: `codecartographer map --target raw`
 
 ## VS Code extension settings
 
-If you are using the Nyx.Navigator VS Code extension, configure it via `settings.json`:
+If you are using the CodeCartographer VS Code extension, configure it via `settings.json`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `navigator.binaryPath` | `"navigator"` | Path to the `navigator` binary |
-| `navigator.refreshOnSave` | `false` | Re-run file metrics whenever a source file is saved |
-| `navigator.hotspotThreshold` | `50` | Minimum hotspot score to show a gutter decoration |
-| `navigator.commitWindow` | `500` | Commit count for hotspot and churn analysis |
-| `navigator.showEdgeKinds` | `["runtime"]` | Which import edge kinds to render in diagrams |
-| `navigator.statusBar` | `true` | Show a health-score item in the VS Code status bar |
-| `navigator.explorerBadges` | `true` | Show health/hotspot badges on files in the Explorer sidebar |
+| `codecartographer.binaryPath` | `"codecartographer"` | Path to the `codecartographer` binary |
+| `codecartographer.refreshOnSave` | `false` | Re-run file metrics whenever a source file is saved |
+| `codecartographer.hotspotThreshold` | `50` | Minimum hotspot score to show a gutter decoration |
+| `codecartographer.commitWindow` | `500` | Commit count for hotspot and churn analysis |
+| `codecartographer.showEdgeKinds` | `["runtime"]` | Which import edge kinds to render in diagrams |
+| `codecartographer.statusBar` | `true` | Show a health-score item in the VS Code status bar |
+| `codecartographer.explorerBadges` | `true` | Show health/hotspot badges on files in the Explorer sidebar |
 
 ## MCP server configuration
 
-The MCP server (`navigator serve`) uses the same per-repo config. There are no MCP-specific config keys — all behavior is governed by the repo's `.navigator/config.toml` and the global config.
+The MCP server (`codecartographer serve`) uses the same per-repo config. There are no MCP-specific config keys — all behavior is governed by the repo's `.codecartographer/config.toml` and the global config.
 
 Register the server in your MCP client:
 
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve"]
     }
   }
@@ -160,8 +160,8 @@ For a specific working directory:
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve", "/path/to/my-project"]
     }
   }
@@ -171,12 +171,12 @@ For a specific working directory:
 ## CKB integration
 
 ```bash
-navigator init-ckb --ckb-url http://localhost:3001 --webhook-url http://localhost:3002
+codecartographer init-ckb --ckb-url http://localhost:3001 --webhook-url http://localhost:3002
 ```
 
-Writes CKB connection details to `.navigator/config.toml`. Navigator will then:
+Writes CKB connection details to `.codecartographer/config.toml`. CodeCartographer will then:
 - Send blast-radius hints to CKB after graph changes
 - Register webhooks so CKB can subscribe to change events
 - Include `lip_uris` in `get_blast_radius` responses for CKB drill-down
 
-See [Ecosystem](ecosystem.md) for how Nyx.Navigator and CKB interact.
+See [Ecosystem](ecosystem.md) for how CodeCartographer and CKB interact.

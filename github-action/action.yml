@@ -1,6 +1,6 @@
-name: Nyx.Navigator Architecture Health
+name: CodeCartographer Architecture Health
 description: >
-  Runs Nyx.Navigator analysis on a pull request: posts a health-delta comment,
+  Runs CodeCartographer analysis on a pull request: posts a health-delta comment,
   gates on cycles / layer violations, and uploads a snapshot artifact.
 
 inputs:
@@ -13,9 +13,9 @@ inputs:
     required: false
     default: '.'
 
-  navigator-version:
+  codecartographer-version:
     description: >
-      Nyx.Navigator release tag to install (e.g. "v3.0.0"). Use "latest" to
+      CodeCartographer release tag to install (e.g. "v3.0.0"). Use "latest" to
       always pull the newest release.
     required: false
     default: latest
@@ -66,10 +66,10 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install Nyx.Navigator binary
+    - name: Install CodeCartographer binary
       shell: bash
       env:
-        NAVIGATOR_VERSION: ${{ inputs.navigator-version }}
+        CODECARTOGRAPHER_VERSION: ${{ inputs.codecartographer-version }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: bash "${{ github.action_path }}/scripts/install.sh"
 
@@ -97,7 +97,7 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: navigator-snapshot-${{ github.sha }}
-        path: ${{ inputs.working-directory }}/.navigator/snapshots/
+        name: codecartographer-snapshot-${{ github.sha }}
+        path: ${{ inputs.working-directory }}/.codecartographer/snapshots/
         if-no-files-found: ignore
         retention-days: 90

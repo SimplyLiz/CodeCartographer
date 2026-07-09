@@ -1,10 +1,10 @@
-# Nyx.Navigator — Architecture
+# CodeCartographer — Architecture
 
 ## What it is
 
-Nyx.Navigator builds a **semantic map** of a codebase — not full source, but the shape: public API surfaces, imports, symbol kinds, dependency graph, and git history signals. It exposes this map via CLI, MCP server, and a C FFI consumed by CKB.
+CodeCartographer builds a **semantic map** of a codebase — not full source, but the shape: public API surfaces, imports, symbol kinds, dependency graph, and git history signals. It exposes this map via CLI, MCP server, and a C FFI consumed by CKB.
 
-The extraction is regex-based and intentionally fast. It is not a compiler. The trade-off is deliberate: 30 ms over an entire repo beats 30 minutes of accurate compilation for the use cases Nyx.Navigator serves (LLM context injection, architectural analysis, hotspot detection).
+The extraction is regex-based and intentionally fast. It is not a compiler. The trade-off is deliberate: 30 ms over an entire repo beats 30 minutes of accurate compilation for the use cases CodeCartographer serves (LLM context injection, architectural analysis, hotspot detection).
 
 ---
 
@@ -40,7 +40,7 @@ enrich_with_git()
 
 | Module | Responsibility |
 |--------|---------------|
-| `scanner.rs` | File discovery, noise filtering, `.navigatorignore`, security blocking |
+| `scanner.rs` | File discovery, noise filtering, `.codecartographerignore`, security blocking |
 | `mapper.rs` | Language skeleton extraction dispatcher; `Signature`, `MappedFile`, `SymbolKind` |
 | `extractor.rs` | Tree-sitter extraction (Tier 2, confidence=60) for Rust/Go/Python/TS/JS; called by `mapper.rs` after regex pass |
 | `api.rs` | `ApiState`, `rebuild_graph`, import resolution, all graph analysis |
@@ -52,14 +52,14 @@ enrich_with_git()
 | `lib.rs` | C FFI (`extern "C"`, `#[no_mangle]`), 19 functions consumed by CKB via CGo |
 | `memory.rs` | Versioned local memory, incremental hash-based sync |
 | `formatter.rs` | Output formatting: XML, Markdown, JSON |
-| `global_config.rs` | `~/.config/navigator/config.toml` |
+| `global_config.rs` | `~/.config/codecartographer/config.toml` |
 | `main.rs` | CLI (`clap`), all commands and watch mode |
 
 ---
 
 ## Symbol model (`mapper.rs`)
 
-Nyx.Navigator's symbol extraction follows the [LIP (Linked Incremental Protocol)](../../Protocols/LIP/docs/LIP_SPEC.mdx) taxonomy — designed so the data model is compatible when LIP becomes available, allowing a data-source swap without structural changes.
+CodeCartographer's symbol extraction follows the [LIP (Linked Incremental Protocol)](../../Protocols/LIP/docs/LIP_SPEC.mdx) taxonomy — designed so the data model is compatible when LIP becomes available, allowing a data-source swap without structural changes.
 
 ### `Signature` fields
 
@@ -156,39 +156,39 @@ All git metrics are computed by shelling out to `git` and parsing stdout. No lib
 
 ## C FFI (`lib.rs`)
 
-Compiled as `libnavigator.a` (staticlib). CKB loads via CGo.
+Compiled as `libcode_cartographer.a` (staticlib). CKB loads via CGo.
 
-Memory contract: all output strings are heap-allocated by Rust and **must** be freed by the caller via `navigator_free_string(ptr)`. Input strings are borrowed. No panics across the FFI boundary — all errors returned as `{"ok":false,"error":"..."}`.
+Memory contract: all output strings are heap-allocated by Rust and **must** be freed by the caller via `codecartographer_free_string(ptr)`. Input strings are borrowed. No panics across the FFI boundary — all errors returned as `{"ok":false,"error":"..."}`.
 
 | Function | Returns |
 |----------|---------|
-| `navigator_free_string(ptr)` | — |
-| `navigator_version()` | version string |
-| `navigator_map_project(path)` | `ProjectGraphResponse` JSON |
-| `navigator_health(path)` | health score + counts |
-| `navigator_check_layers(path, layers_path)` | violations JSON |
-| `navigator_simulate_change(path, module_id, new_sig, rem_sig)` | impact JSON |
-| `navigator_skeleton_map(path, detail)` | skeleton JSON |
-| `navigator_module_context(path, module_id, depth)` | module + deps JSON |
-| `navigator_git_churn(path, limit)` | `{ "file": count }` |
-| `navigator_git_cochange(path, limit, min_count)` | `[{fileA,fileB,count,couplingScore}]` |
-| `navigator_semidiff(path, commit1, commit2)` | `[{path,status,added[],removed[]}]` |
-| `navigator_hidden_coupling(path, limit, min_count)` | co-change pairs without import edge |
-| `navigator_ranked_skeleton(path, focus_json, budget)` | PageRank-ordered skeleton |
-| `navigator_unreferenced_symbols(path)` | `{totalCount, files:[{path,symbols}]}` |
-| `navigator_search_content(path, pattern, opts_json)` | grep-like search results |
-| `navigator_find_files(path, pattern, limit, opts_json)` | glob file discovery |
-| `navigator_replace_content(path, pattern, replacement, opts_json)` | sed-like find-and-replace; supports dry-run + diff |
-| `navigator_extract_content(path, pattern, opts_json)` | awk-like capture-group extraction; count/dedup/sort |
-| `navigator_bm25_search(path, query, opts_json)` | BM25 ranked file retrieval for natural language queries |
-| `navigator_query_context(path, query, opts_json)` | Full PKG pipeline: BM25+regex → PageRank → health → ready bundle |
-| `navigator_shotgun_surgery(path, limit, min_partners)` | Co-change dispersion — shotgun surgery candidates ranked by entropy |
+| `codecartographer_free_string(ptr)` | — |
+| `codecartographer_version()` | version string |
+| `codecartographer_map_project(path)` | `ProjectGraphResponse` JSON |
+| `codecartographer_health(path)` | health score + counts |
+| `codecartographer_check_layers(path, layers_path)` | violations JSON |
+| `codecartographer_simulate_change(path, module_id, new_sig, rem_sig)` | impact JSON |
+| `codecartographer_skeleton_map(path, detail)` | skeleton JSON |
+| `codecartographer_module_context(path, module_id, depth)` | module + deps JSON |
+| `codecartographer_git_churn(path, limit)` | `{ "file": count }` |
+| `codecartographer_git_cochange(path, limit, min_count)` | `[{fileA,fileB,count,couplingScore}]` |
+| `codecartographer_semidiff(path, commit1, commit2)` | `[{path,status,added[],removed[]}]` |
+| `codecartographer_hidden_coupling(path, limit, min_count)` | co-change pairs without import edge |
+| `codecartographer_ranked_skeleton(path, focus_json, budget)` | PageRank-ordered skeleton |
+| `codecartographer_unreferenced_symbols(path)` | `{totalCount, files:[{path,symbols}]}` |
+| `codecartographer_search_content(path, pattern, opts_json)` | grep-like search results |
+| `codecartographer_find_files(path, pattern, limit, opts_json)` | glob file discovery |
+| `codecartographer_replace_content(path, pattern, replacement, opts_json)` | sed-like find-and-replace; supports dry-run + diff |
+| `codecartographer_extract_content(path, pattern, opts_json)` | awk-like capture-group extraction; count/dedup/sort |
+| `codecartographer_bm25_search(path, query, opts_json)` | BM25 ranked file retrieval for natural language queries |
+| `codecartographer_query_context(path, query, opts_json)` | Full PKG pipeline: BM25+regex → PageRank → health → ready bundle |
+| `codecartographer_shotgun_surgery(path, limit, min_partners)` | Co-change dispersion — shotgun surgery candidates ranked by entropy |
 
 ---
 
 ## MCP server (`mcp.rs`)
 
-Exposed via `navigator serve` — JSON-RPC 2.0 over stdio. 30 tools covering the full FFI surface.
+Exposed via `codecartographer serve` — JSON-RPC 2.0 over stdio. 30 tools covering the full FFI surface.
 
 ### Graph & architecture
 
@@ -245,9 +245,9 @@ Exposed via `navigator serve` — JSON-RPC 2.0 over stdio. 30 tools covering the
 
 ## CKB integration
 
-Nyx.Navigator and CKB operate at complementary layers:
+CodeCartographer and CKB operate at complementary layers:
 
-| Aspect | Nyx.Navigator | CKB |
+| Aspect | CodeCartographer | CKB |
 |--------|-------------|-----|
 | Level | File / module | Symbol |
 | Method | Regex skeleton | AST + code graph |
@@ -255,18 +255,18 @@ Nyx.Navigator and CKB operate at complementary layers:
 | Git signals | Churn, co-change, semidiff | — |
 | Symbol model | Heuristic (Tier 1, confidence=30) | Compiler-accurate |
 
-**CKB consumes Nyx.Navigator via FFI:**
-1. `navigator_map_project()` → graph for navigation and blast-radius pre-filtering
-2. `navigator_git_churn()` + `navigator_git_cochange()` → hotspot prioritization
-3. `navigator_semidiff()` → semantic context for `reviewPR` / `summarizeDiff`
-4. `navigator_ranked_skeleton()` → token-budget-aware context
-5. `navigator_version()` → compatibility gating before any call
+**CKB consumes CodeCartographer via FFI:**
+1. `codecartographer_map_project()` → graph for navigation and blast-radius pre-filtering
+2. `codecartographer_git_churn()` + `codecartographer_git_cochange()` → hotspot prioritization
+3. `codecartographer_semidiff()` → semantic context for `reviewPR` / `summarizeDiff`
+4. `codecartographer_ranked_skeleton()` → token-budget-aware context
+5. `codecartographer_version()` → compatibility gating before any call
 
 ---
 
 ## Design boundaries
 
-**Stays in Nyx.Navigator permanently** (not replaced by LIP):
+**Stays in CodeCartographer permanently** (not replaced by LIP):
 - Git temporal coupling — LIP is file-state-aware, not git-history-aware
 - Architectural layer violation detection (`layers.toml`)
 - God module / cycle detection (Petgraph)

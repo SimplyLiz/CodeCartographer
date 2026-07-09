@@ -1,6 +1,6 @@
-# Nyx.Navigator — User Documentation
+# CodeCartographer — User Documentation
 
-Nyx.Navigator packages your repository into a structured snapshot an AI can reason about. It sits between your codebase and your AI assistant — Claude, Cursor, GPT-4, or any model with a context window.
+CodeCartographer packages your repository into a structured snapshot an AI can reason about. It sits between your codebase and your AI assistant — Claude, Cursor, GPT-4, or any model with a context window.
 
 ## Guides
 
@@ -14,14 +14,14 @@ Nyx.Navigator packages your repository into a structured snapshot an AI can reas
 | [Semantic Traversal](cli-reference.md#semantic-traversal-experimental) | `reach` and `answer` — symbol-scoped and question-driven context at 1–3% of skeleton token cost |
 | [Diagrams](diagrams.md) | Dependency graphs, call graphs, blast radius, HTML explorer |
 | [MCP Tools](mcp-tools.md) | MCP server setup and full tool reference |
-| [Configuration](configuration.md) | Global config, per-repo config, .navigatorignore, layers.toml |
+| [Configuration](configuration.md) | Global config, per-repo config, .codecartographerignore, layers.toml |
 | [GitHub Action](github-action.md) | CI health gates and PR health-delta comments |
-| [Ecosystem](ecosystem.md) | How Nyx.Navigator fits with CKB, TruthKeeper, LLMRouter, and CCE |
+| [Ecosystem](ecosystem.md) | How CodeCartographer fits with CKB, TruthKeeper, LLMRouter, and CCE |
 | [Integration](integration.md) | ShellAI integration |
 
 ## How it works
 
-1. Run `navigator` in any repo.
+1. Run `codecartographer` in any repo.
 2. Pick a mode — `map` (skeletons, ~90% fewer tokens) or `source` (full content).
 3. The snapshot is written to disk and optionally copied to clipboard.
 4. Paste it into your AI chat, or let the MCP server inject it automatically.
@@ -40,9 +40,9 @@ What would you like to do? [map/source/diagram/query/quit]:
 ## Quick reference
 
 ```bash
-navigator map        # skeleton — imports + public signatures (~200 tokens/module)
-navigator source     # full source — everything
-navigator query "how does authentication work?"
-navigator health     # architectural health score 0–100
-navigator serve      # start MCP server for Claude Code / Cursor
+codecartographer map        # skeleton — imports + public signatures (~200 tokens/module)
+codecartographer source     # full source — everything
+codecartographer query "how does authentication work?"
+codecartographer health     # architectural health score 0–100
+codecartographer serve      # start MCP server for Claude Code / Cursor
 ```

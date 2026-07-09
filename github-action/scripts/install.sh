@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# Install the Nyx.Navigator binary from GitHub Releases.
-# Env: NAVIGATOR_VERSION (tag or "latest"), GH_TOKEN (for API calls)
+# Install the CodeCartographer binary from GitHub Releases.
+# Env: CODECARTOGRAPHER_VERSION (tag or "latest"), GH_TOKEN (for API calls)
 set -euo pipefail
 
-REPO="anthropics/navigator"   # update to real org/repo name before publishing
+REPO="anthropics/codecartographer"   # update to real org/repo name before publishing
 BIN_DIR="${HOME}/.local/bin"
 mkdir -p "${BIN_DIR}"
 
 # Resolve "latest" to the actual tag.
-if [[ "${NAVIGATOR_VERSION:-latest}" == "latest" ]]; then
+if [[ "${CODECARTOGRAPHER_VERSION:-latest}" == "latest" ]]; then
   TAG=$(curl -fsSL \
     -H "Authorization: Bearer ${GH_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
   if [[ -z "${TAG}" ]]; then
-    echo "::error::Could not resolve latest Nyx.Navigator release. Check REPO=${REPO} and token permissions."
+    echo "::error::Could not resolve latest CodeCartographer release. Check REPO=${REPO} and token permissions."
     exit 1
   fi
 else
-  TAG="${NAVIGATOR_VERSION}"
+  TAG="${CODECARTOGRAPHER_VERSION}"
 fi
 
-echo "Installing Nyx.Navigator ${TAG}"
+echo "Installing CodeCartographer ${TAG}"
 
 # Detect platform.
 OS=$(uname -s)
@@ -38,7 +38,7 @@ case "${OS}/${ARCH}" in
     ;;
 esac
 
-ARTIFACT="navigator-binary-navigator-${PLATFORM}"
+ARTIFACT="codecartographer-binary-codecartographer-${PLATFORM}"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ARTIFACT}.tar.gz"
 
 echo "Downloading ${URL}"
@@ -46,20 +46,20 @@ TMP=$(mktemp -d)
 curl -fsSL \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/octet-stream" \
-  -o "${TMP}/navigator.tar.gz" \
+  -o "${TMP}/codecartographer.tar.gz" \
   "${URL}"
 
-tar -xzf "${TMP}/navigator.tar.gz" -C "${TMP}"
-BINARY=$(find "${TMP}" -name "navigator" -type f | head -1)
+tar -xzf "${TMP}/codecartographer.tar.gz" -C "${TMP}"
+BINARY=$(find "${TMP}" -name "codecartographer" -type f | head -1)
 if [[ -z "${BINARY}" ]]; then
-  echo "::error::navigator binary not found in ${ARTIFACT}.tar.gz"
+  echo "::error::codecartographer binary not found in ${ARTIFACT}.tar.gz"
   exit 1
 fi
 
-install -m 755 "${BINARY}" "${BIN_DIR}/navigator"
+install -m 755 "${BINARY}" "${BIN_DIR}/codecartographer"
 rm -rf "${TMP}"
 
 # Make sure the bin dir is on PATH for subsequent steps.
 echo "${BIN_DIR}" >> "${GITHUB_PATH}"
 
-echo "Nyx.Navigator $(navigator --version) installed to ${BIN_DIR}/navigator"
+echo "CodeCartographer $(codecartographer --version) installed to ${BIN_DIR}/codecartographer"

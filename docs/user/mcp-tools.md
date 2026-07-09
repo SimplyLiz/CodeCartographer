@@ -1,11 +1,11 @@
 # MCP Tools
 
-Navigator exposes 30+ tools over the Model Context Protocol (JSON-RPC 2.0, stdio transport). When connected to Claude Code, Cursor, or any MCP-aware client, these tools are available directly in the AI's tool call interface — no copy-pasting required.
+CodeCartographer exposes 30+ tools over the Model Context Protocol (JSON-RPC 2.0, stdio transport). When connected to Claude Code, Cursor, or any MCP-aware client, these tools are available directly in the AI's tool call interface — no copy-pasting required.
 
 ## Starting the MCP server
 
 ```bash
-navigator serve [PATH]
+codecartographer serve [PATH]
 ```
 
 Runs on stdio. Register it in your MCP client:
@@ -13,8 +13,8 @@ Runs on stdio. Register it in your MCP client:
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve"]
     }
   }
@@ -26,8 +26,8 @@ To point the server at a specific project directory:
 ```json
 {
   "mcpServers": {
-    "navigator": {
-      "command": "navigator",
+    "codecartographer": {
+      "command": "codecartographer",
       "args": ["serve", "/path/to/project"]
     }
   }
@@ -40,8 +40,8 @@ In addition to tools, the server exposes two readable resources:
 
 | URI | Description |
 |-----|-------------|
-| `navigator://project-graph` | Full dependency graph as JSON |
-| `navigator://module-index` | Index of all modules and their signatures as JSON |
+| `codecartographer://project-graph` | Full dependency graph as JSON |
+| `codecartographer://module-index` | Index of all modules and their signatures as JSON |
 
 ## MCP prompts
 
@@ -160,7 +160,7 @@ Parameters:
   maxSearchResults? number  — cap on BM25 search results before ranking
 ```
 
-Returns a ready-to-use context string plus health metadata. This is the highest-level tool — use it when you want Navigator to figure out what context is relevant rather than specifying files manually.
+Returns a ready-to-use context string plus health metadata. This is the highest-level tool — use it when you want CodeCartographer to figure out what context is relevant rather than specifying files manually.
 
 ### `search_skeleton`
 
@@ -571,7 +571,7 @@ Parameters:
 
 ### `watch_status`
 
-Check for changes since the last `navigator watch` cycle.
+Check for changes since the last `codecartographer watch` cycle.
 
 ```
 Parameters: none

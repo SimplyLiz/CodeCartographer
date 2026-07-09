@@ -1,4 +1,4 @@
-# Project Nyx.Navigator API Documentation
+# Project CodeCartographer API Documentation
 
 ## Module Context API: `get_module_context`
 
@@ -36,4 +36,4 @@ The `compressed-ai-lang` format is highly optimized to minimize token usage for 
 
 ## Project Graph JSON (`project_graph.json`)
 
-While `get_module_context` provides on-demand module details, the `project_graph.json` file offers a static, comprehensive map of the entire codebase. This file is generated and maintained by the `navigator_service.py` background worker and is primarily consumed by systems requiring a global view. It contains metadata about files/modules, their exported signatures, and their interdependencies. Its format is also optimized for size, removing whitespace and normalizing formatting.
+While `get_module_context` provides on-demand module details, the `project_graph.json` file offers a static, comprehensive map of the entire codebase. This file is generated and maintained by the `codecartographer_service.py` background worker and is primarily consumed by systems requiring a global view. It contains metadata about files/modules, their exported signatures, and their interdependencies. Its format is also optimized for size, removing whitespace and normalizing formatting.

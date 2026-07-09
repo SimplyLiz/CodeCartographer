@@ -1,20 +1,20 @@
 # Search
 
-Navigator provides four complementary search commands: `search` (grep-like content search), `find` (file discovery), `replace` (regex find-and-replace), and `extract` (capture-group extraction). All four respect `.navigatorignore` and the built-in noise filter by default.
+CodeCartographer provides four complementary search commands: `search` (grep-like content search), `find` (file discovery), `replace` (regex find-and-replace), and `extract` (capture-group extraction). All four respect `.codecartographerignore` and the built-in noise filter by default.
 
 ## search — content search
 
 ```bash
-navigator search PATTERN [OPTIONS]
+codecartographer search PATTERN [OPTIONS]
 ```
 
 Grep-like search across file contents. Supports both regex and literal matching.
 
 ```bash
-navigator search "AuthService"
-navigator search "fn verify_token" --glob "*.rs"
-navigator search "TODO|FIXME" -i
-navigator search "^import" --path src/api
+codecartographer search "AuthService"
+codecartographer search "fn verify_token" --glob "*.rs"
+codecartographer search "TODO|FIXME" -i
+codecartographer search "^import" --path src/api
 ```
 
 **Key flags:**
@@ -30,37 +30,37 @@ navigator search "^import" --path src/api
 | `--glob PATTERN` | | Restrict to files matching a glob (e.g., `*.rs`, `src/**/*.ts`) |
 | `--path DIR` | | Restrict to files under a directory |
 | `--literal` | | Treat PATTERN as a literal string, not a regex |
-| `--no-ignore` | | Bypass `.navigatorignore` and noise filter |
+| `--no-ignore` | | Bypass `.codecartographerignore` and noise filter |
 
 **Output:** File path, line number, and matched line — same format as `grep`.
 
 ### Search inside a symbol
 
 ```bash
-navigator search-in-symbol --file FILE --symbol SYMBOL --pattern PATTERN [--context-lines N]
+codecartographer search-in-symbol --file FILE --symbol SYMBOL --pattern PATTERN [--context-lines N]
 ```
 
 Scopes the search to the body of a named function or method. Useful for finding a pattern that appears in many places but you only care about one function.
 
 ```bash
-navigator search-in-symbol --file src/auth.rs --symbol verify_token --pattern "unwrap"
+codecartographer search-in-symbol --file src/auth.rs --symbol verify_token --pattern "unwrap"
 ```
 
 ## find — file discovery
 
 ```bash
-navigator find PATTERN [OPTIONS]
+codecartographer find PATTERN [OPTIONS]
 ```
 
 Glob-based file discovery. Finds files by path pattern rather than content.
 
 ```bash
-navigator find "*.rs"
-navigator find "src/**/*.test.ts"
-navigator find "**/*auth*"
-navigator find "*.toml" --max-depth 2
-navigator find "*.log" --modified-since 24h
-navigator find "*.rs" --min-size 10kb
+codecartographer find "*.rs"
+codecartographer find "src/**/*.test.ts"
+codecartographer find "**/*auth*"
+codecartographer find "*.toml" --max-depth 2
+codecartographer find "*.log" --modified-since 24h
+codecartographer find "*.rs" --min-size 10kb
 ```
 
 **Key flags:**
@@ -77,32 +77,32 @@ navigator find "*.rs" --min-size 10kb
 ## replace — regex find-and-replace
 
 ```bash
-navigator replace PATTERN REPLACEMENT [OPTIONS]
+codecartographer replace PATTERN REPLACEMENT [OPTIONS]
 ```
 
 Regex find-and-replace across all scanned files. Supports capture groups (`$0` = full match, `$1`, `$2`, etc.).
 
 ```bash
 # Preview changes before applying
-navigator replace "AuthService" "AuthenticationService" --dry-run
+codecartographer replace "AuthService" "AuthenticationService" --dry-run
 
 # Apply the change
-navigator replace "AuthService" "AuthenticationService"
+codecartographer replace "AuthService" "AuthenticationService"
 
 # Use capture groups
-navigator replace "fn (\w+)\(ctx: Context\)" "fn $1(ctx: RequestContext)"
+codecartographer replace "fn (\w+)\(ctx: Context\)" "fn $1(ctx: RequestContext)"
 
 # Restrict to specific files
-navigator replace "console.log" "logger.debug" --glob "*.ts"
+codecartographer replace "console.log" "logger.debug" --glob "*.ts"
 
 # Backup originals before replacing
-navigator replace "old_api" "new_api" --backup
+codecartographer replace "old_api" "new_api" --backup
 
 # Limit replacements per file
-navigator replace "TODO" "FIXME" --max-per-file 1
+codecartographer replace "TODO" "FIXME" --max-per-file 1
 
 # Show context around each replacement
-navigator replace "old" "new" --dry-run --context-lines 3
+codecartographer replace "old" "new" --dry-run --context-lines 3
 ```
 
 **Key flags:**
@@ -124,32 +124,32 @@ navigator replace "old" "new" --dry-run --context-lines 3
 ## extract — capture-group extraction
 
 ```bash
-navigator extract PATTERN [OPTIONS]
+codecartographer extract PATTERN [OPTIONS]
 ```
 
 Awk-like extraction of regex capture groups from file contents. Collects all matches and outputs the captured values.
 
 ```bash
 # Extract all function names from Rust files
-navigator extract "pub fn (\w+)" --glob "*.rs"
+codecartographer extract "pub fn (\w+)" --glob "*.rs"
 
 # Extract all import paths from TypeScript
-navigator extract "from ['\"](.+)['\"]" --glob "*.ts"
+codecartographer extract "from ['\"](.+)['\"]" --glob "*.ts"
 
 # Count occurrences (frequency table)
-navigator extract "use (\w+)::" --glob "*.rs" --count
+codecartographer extract "use (\w+)::" --glob "*.rs" --count
 
 # Deduplicate results
-navigator extract "import .+ from ['\"](.+)['\"]" --dedup
+codecartographer extract "import .+ from ['\"](.+)['\"]" --dedup
 
 # Sort alphabetically
-navigator extract "pub (\w+)" --sort
+codecartographer extract "pub (\w+)" --sort
 
 # Specific capture groups (when pattern has multiple)
-navigator extract "fn (\w+)\(([^)]+)\)" --groups 1,2
+codecartographer extract "fn (\w+)\(([^)]+)\)" --groups 1,2
 
 # Output as JSON
-navigator extract "(\w+)=(\w+)" --groups 1,2 --format json
+codecartographer extract "(\w+)=(\w+)" --groups 1,2 --format json
 ```
 
 **Key flags:**
@@ -169,7 +169,7 @@ navigator extract "(\w+)=(\w+)" --groups 1,2 --format json
 **Frequency table example:**
 
 ```bash
-navigator extract "use (\w+)::" --glob "*.rs" --count --sort
+codecartographer extract "use (\w+)::" --glob "*.rs" --count --sort
 ```
 
 Output:
@@ -187,10 +187,10 @@ All four commands are also available as MCP tools for use inside Claude Code or 
 
 | CLI | MCP tool |
 |-----|----------|
-| `navigator search` | `search_content` |
-| `navigator find` | `find_files` |
-| `navigator replace` | `replace_content` |
-| `navigator extract` | `extract_content` |
-| `navigator search-in-symbol` | `search_in_symbol` |
+| `codecartographer search` | `search_content` |
+| `codecartographer find` | `find_files` |
+| `codecartographer replace` | `replace_content` |
+| `codecartographer extract` | `extract_content` |
+| `codecartographer search-in-symbol` | `search_in_symbol` |
 
 The MCP tools expose the same parameters as the CLI flags. See [MCP Tools](mcp-tools.md) for the full parameter reference.

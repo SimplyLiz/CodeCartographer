@@ -10,7 +10,7 @@ Three follow-up diagram formats identified after shipping sequence + class diagr
 
 ### What it is
 
-`navigator diagram --format quadrant` plots every file as a point on a churn × complexity plane. Top-right quadrant = high churn + high complexity = the files that hurt most and are changed most often. Gives teams an immediate, visual answer to "where should we refactor?"
+`codecartographer diagram --format quadrant` plots every file as a point on a churn × complexity plane. Top-right quadrant = high churn + high complexity = the files that hurt most and are changed most often. Gives teams an immediate, visual answer to "where should we refactor?"
 
 ```
               │ High complexity
@@ -70,7 +70,7 @@ Coordinates are normalised to `[0, 1]` across the included node set. Nodes witho
 
 ### What it is
 
-`navigator diagram --entry src/main.rs::diagram_mode --format sequence --depth 3` follows call edges *across* file boundaries from an entry point, producing a `sequenceDiagram` that shows how a request flows through the system. This is the thing developers actually want when onboarding: "trace this code path."
+`codecartographer diagram --entry src/main.rs::diagram_mode --format sequence --depth 3` follows call edges *across* file boundaries from an entry point, producing a `sequenceDiagram` that shows how a request flows through the system. This is the thing developers actually want when onboarding: "trace this code path."
 
 The current `--format sequence` is file-local by design (documented limitation in `call_graph.rs`). Cross-file traces require a project-wide call index.
 
@@ -125,7 +125,7 @@ Before committing to implementation: verify that simple-name + import-graph reso
 
 ### What it is
 
-`navigator diagram --call-graph FILE --format er` produces a Mermaid `erDiagram` by treating struct fields whose type names match other known structs as foreign-key relationships. Useful for files that define a data layer — ORM models, Prisma schemas, SQLx row types, TypeScript DTO interfaces.
+`codecartographer diagram --call-graph FILE --format er` produces a Mermaid `erDiagram` by treating struct fields whose type names match other known structs as foreign-key relationships. Useful for files that define a data layer — ORM models, Prisma schemas, SQLx row types, TypeScript DTO interfaces.
 
 ```mermaid
 erDiagram

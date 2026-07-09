@@ -7,7 +7,7 @@
 //!     ("shape of the neighborhood I'm editing").
 //!
 //! Used by both the CLI (`diagram_mode`) and the FFI
-//! (`navigator_render_architecture`) so CLI output and MCP output stay in
+//! (`codecartographer_render_architecture`) so CLI output and MCP output stay in
 //! lock-step.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -649,7 +649,7 @@ fn render_dot(
     overlays: &Overlays,
     color_by_owner: bool,
 ) -> String {
-    let mut out = String::from("digraph navigator {\n    rankdir=LR;\n");
+    let mut out = String::from("digraph codecartographer {\n    rankdir=LR;\n");
     for module_id in included {
         let Some(node) = node_by_id.get(module_id.as_str()) else { continue };
         let label = node.path.rsplit('/').next().unwrap_or(&node.path);
@@ -1772,7 +1772,7 @@ mod tests {
             group_by_folder_depth: None,
             color_by_owner: false,
         }).unwrap();
-        assert!(r.diagram.starts_with("digraph navigator {"));
+        assert!(r.diagram.starts_with("digraph codecartographer {"));
         assert!(r.diagram.contains("#9cf")); // core color present for node a
     }
 

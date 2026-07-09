@@ -2,11 +2,11 @@
 #
 # Smoke test for scripts/localize-tree-sitter-symbols.sh.
 #
-# Builds a small static archive that mirrors libnavigator.a's symbol
+# Builds a small static archive that mirrors libcode_cartographer.a's symbol
 # shape — a tree-sitter runtime object, a grammar object, and a wrapper
-# object that references them and exposes navigator_* entry points —
+# object that references them and exposes codecartographer_* entry points —
 # runs the script, and asserts ts_*/tree_sitter_* are no longer global
-# while navigator_* still is.
+# while codecartographer_* still is.
 
 set -euo pipefail
 
@@ -33,8 +33,8 @@ EOF
 cat > wrapper.c <<'EOF'
 extern int ts_parser_new(void);
 extern int tree_sitter_rust(void);
-int navigator_version(void) { return ts_parser_new() + tree_sitter_rust(); }
-int navigator_render_architecture(void) { return 0; }
+int codecartographer_version(void) { return ts_parser_new() + tree_sitter_rust(); }
+int codecartographer_render_architecture(void) { return 0; }
 EOF
 
 "$CC" -c -fPIC runtime.c -o runtime.o
@@ -65,11 +65,11 @@ rm -f runtime.o grammar.o wrapper.o
 
 GLOBAL_TS="$("$NM" -g combined.o | grep -cE " T ${U}ts_" || true)"
 GLOBAL_TSL="$("$NM" -g combined.o | grep -cE " T ${U}tree_sitter_" || true)"
-GLOBAL_CARTO="$("$NM" -g combined.o | grep -cE " T ${U}navigator_" || true)"
+GLOBAL_CARTO="$("$NM" -g combined.o | grep -cE " T ${U}codecartographer_" || true)"
 
 [[ "$GLOBAL_TS" -eq 0 ]]     || fail "ts_* still global ($GLOBAL_TS)"
 [[ "$GLOBAL_TSL" -eq 0 ]]    || fail "tree_sitter_* still global ($GLOBAL_TSL)"
-[[ "$GLOBAL_CARTO" -ge 2 ]]  || fail "navigator_* lost exports (got $GLOBAL_CARTO, want >= 2)"
+[[ "$GLOBAL_CARTO" -ge 2 ]]  || fail "codecartographer_* lost exports (got $GLOBAL_CARTO, want >= 2)"
 
 # And the localized symbols should still be present as local (t), i.e. the
 # definitions weren't stripped — just made invisible to the global resolver.
@@ -78,4 +78,4 @@ LOCAL_TSL="$("$NM" combined.o | grep -cE " t ${U}tree_sitter_" || true)"
 [[ "$LOCAL_TS" -ge 1 ]]  || fail "ts_* definitions missing post-localization"
 [[ "$LOCAL_TSL" -ge 1 ]] || fail "tree_sitter_* definitions missing post-localization"
 
-echo "PASS: ts_* and tree_sitter_* localized; navigator_* still exported ($GLOBAL_CARTO symbols)"
+echo "PASS: ts_* and tree_sitter_* localized; codecartographer_* still exported ($GLOBAL_CARTO symbols)"

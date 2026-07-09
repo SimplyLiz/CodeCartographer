@@ -1,5 +1,5 @@
-// MCP Server - Exposes Project Nyx.Navigator via Model Context Protocol
-// This allows AI tools and agents to interact with Nyx.Navigator using MCP
+// MCP Server - Exposes Project CodeCartographer via Model Context Protocol
+// This allows AI tools and agents to interact with CodeCartographer using MCP
 
 use crate::api::{ApiState, ModuleContextRequest};
 use serde::{Deserialize, Serialize};
@@ -165,8 +165,8 @@ pub struct McpServerInfo {
 impl Default for McpServerInfo {
     fn default() -> Self {
         Self {
-            name: "Project Nyx.Navigator MCP Server".to_string(),
-            title: Some("Nyx Navigator".to_string()),
+            name: "Project CodeCartographer MCP Server".to_string(),
+            title: Some("CodeCartographer".to_string()),
             description: Some(
                 "Code intelligence and architectural analysis server. Provides dependency \
                  graph analysis, skeleton views, git intelligence, architectural health \
@@ -1185,7 +1185,7 @@ impl McpServer {
     fn create_resources() -> Vec<McpResource> {
         vec![
             McpResource {
-                uri: "navigator://project-graph".to_string(),
+                uri: "codecartographer://project-graph".to_string(),
                 name: "project_graph".to_string(),
                 description: "Complete project dependency graph as JSON. Prefer get_project_graph \
                               for on-demand retrieval; use this resource for polling or caching."
@@ -1193,7 +1193,7 @@ impl McpServer {
                 mime_type: Some("application/json".to_string()),
             },
             McpResource {
-                uri: "navigator://module-index".to_string(),
+                uri: "codecartographer://module-index".to_string(),
                 name: "module_index".to_string(),
                 description: "Flat index of all project modules with their public signatures. \
                               Useful for enumeration before targeted get_module_context calls."
@@ -1742,7 +1742,7 @@ impl McpServer {
             }
 
             "watch_status" => {
-                let state_path = self.api_state.root_path.join(".navigator_watch_state.json");
+                let state_path = self.api_state.root_path.join(".codecartographer_watch_state.json");
                 let content = match std::fs::read_to_string(&state_path) {
                     Ok(s) => s,
                     Err(_) => r#"{"watching":false}"#.to_string(),
@@ -3139,11 +3139,11 @@ impl McpServer {
 
     pub fn get_resource(&self, uri: &str) -> Result<String, String> {
         match uri {
-            "navigator://project-graph" => {
+            "codecartographer://project-graph" => {
                 let graph = self.api_state.rebuild_graph()?;
                 Ok(serde_json::to_string_pretty(&graph).unwrap_or_default())
             }
-            "navigator://module-index" => {
+            "codecartographer://module-index" => {
                 let files = self
                     .api_state
                     .mapped_files
@@ -3570,7 +3570,7 @@ mod tests {
     #[test]
     fn test_mcp_server_info() {
         let info = McpServerInfo::default();
-        assert_eq!(info.name, "Project Nyx.Navigator MCP Server");
+        assert_eq!(info.name, "Project CodeCartographer MCP Server");
         assert_eq!(info.version, "1.0.0");
     }
 

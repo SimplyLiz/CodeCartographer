@@ -17,7 +17,7 @@ Two new primitives: `reach` and `answer`.
 ### `reach`
 
 ```bash
-navigator reach SYMBOL [--depth N] [--budget TOKENS] [--file FILE]
+codecartographer reach SYMBOL [--depth N] [--budget TOKENS] [--file FILE]
 ```
 
 MCP: `reach_symbol` tool.
@@ -51,7 +51,7 @@ Walks the call graph + import graph from a starting symbol and returns a **conte
 ### `answer`
 
 ```bash
-navigator answer "QUESTION"
+codecartographer answer "QUESTION"
 ```
 
 MCP: `answer_question` tool.
@@ -91,7 +91,7 @@ The format is the core bet. Design goals:
 | Format | verify_token full reach | Ratio |
 |--------|------------------------|-------|
 | JSON | ~480 tokens | 1× |
-| XML (Navigator current) | ~420 tokens | 0.87× |
+| XML (CodeCartographer current) | ~420 tokens | 0.87× |
 | Reach compact | ~180 tokens | 0.37× |
 
 Estimate based on encoding overhead. Will measure against actual tokenizer in experiments.
@@ -159,7 +159,7 @@ Phase 2 depends on Phase 1 being stable first.
 ## Experiments to run
 
 ### Experiment 1: format comparison
-Run `reach` on 3–5 representative symbols from this repo, produce the output in JSON, current Navigator XML, and the proposed compact format. Count tokens with `tiktoken`. Target: compact format ≤ 40% of JSON for equivalent information.
+Run `reach` on 3–5 representative symbols from this repo, produce the output in JSON, current CodeCartographer XML, and the proposed compact format. Count tokens with `tiktoken`. Target: compact format ≤ 40% of JSON for equivalent information.
 
 ### Experiment 2: caller precision
 Compare Option A (text search) vs Option B (inverted call graph) on the Rust files in this repo. Measure: false positive rate (lines flagged as callers that aren't), false negative rate (actual callers missed). Hypothesis: Option A has ~10% false positive rate from substring matches; Option B is near-zero for in-file calls but misses cross-file calls not in the import graph.

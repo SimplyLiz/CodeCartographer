@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const MEMORY_FILE: &str = ".navigator_memory.json";
+const MEMORY_FILE: &str = ".codecartographer_memory.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {

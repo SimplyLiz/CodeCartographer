@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 #
-# Post-process libnavigator.a so its bundled tree-sitter runtime and
+# Post-process libcode_cartographer.a so its bundled tree-sitter runtime and
 # grammar symbols are internal, not externally visible. Consumers that also
 # link tree-sitter (e.g. Go projects using github.com/smacker/go-tree-sitter)
 # would otherwise trip "duplicate symbol" errors at link time and — worse —
-# risk Nyx.Navigator's Rust code binding to the consumer's tree-sitter copy
+# risk CodeCartographer's Rust code binding to the consumer's tree-sitter copy
 # if the linker resolved `ts_*` cross-archive. If the two tree-sitter
 # versions drift, that route produces silent memory corruption.
 #
 # Approach: partial-link every .o inside the archive into one combined
-# relocatable object so Nyx.Navigator's internal ts_*/tree_sitter_* refs
+# relocatable object so CodeCartographer's internal ts_*/tree_sitter_* refs
 # resolve within the archive, then mark those symbols local so they no
-# longer participate in global symbol resolution. Only the navigator_*
+# longer participate in global symbol resolution. Only the codecartographer_*
 # FFI entry points stay exported.
 #
 # Requires a C compiler whose linker supports `-r`, an `ar`, and an
 # objcopy-style tool. `rust-objcopy` from rustup's llvm-tools-preview
 # component works on both Linux (ELF) and macOS (Mach-O).
 #
-# Usage: localize-tree-sitter-symbols.sh <path/to/libnavigator.a>
+# Usage: localize-tree-sitter-symbols.sh <path/to/libcode_cartographer.a>
 
 set -euo pipefail
 
-ARCHIVE="${1:?usage: $0 <libnavigator.a>}"
+ARCHIVE="${1:?usage: $0 <libcode_cartographer.a>}"
 case "$ARCHIVE" in
   /*) ARCHIVE_ABS="$ARCHIVE" ;;
   *)  ARCHIVE_ABS="$PWD/$ARCHIVE" ;;
@@ -73,7 +73,7 @@ cp "$ARCHIVE_ABS" "$WORK/input.a"
   cd "$WORK"
 
   # Partial link (`ld -r`) merges every archive member into a single
-  # relocatable object so Nyx.Navigator's internal ts_*/tree_sitter_* refs
+  # relocatable object so CodeCartographer's internal ts_*/tree_sitter_* refs
   # resolve within the combined object. We feed the archive directly to
   # the linker with a force-load flag rather than `ar x`-extracting first,
   # because Cargo emits multiple `.o` members with identical names (each

@@ -24,10 +24,10 @@ def setup():
         f.write("// This should be ignored\nexport const bloat = true;")
 
 def build():
-    print("Building navigator binary...")
+    print("Building codecartographer binary...")
     result = subprocess.run(
         ["cargo", "build", "--release"],
-        cwd="mapper-core/nyx-navigator",
+        cwd="mapper-core/CodeCartographer",
         capture_output=True,
         text=True
     )
@@ -37,11 +37,11 @@ def build():
     print("Build successful.")
 
 def execute():
-    print("Running navigator against test_env...")
+    print("Running codecartographer against test_env...")
     if platform.system() == "Windows":
-        binary = os.path.join("mapper-core", "navigator", "target", "release", "navigator.exe")
+        binary = os.path.join("mapper-core", "codecartographer", "target", "release", "codecartographer.exe")
     else:
-        binary = os.path.join("mapper-core", "navigator", "target", "release", "navigator")
+        binary = os.path.join("mapper-core", "codecartographer", "target", "release", "codecartographer")
     
     result = subprocess.run(
         [binary],

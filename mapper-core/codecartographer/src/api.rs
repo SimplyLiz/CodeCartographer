@@ -1,4 +1,4 @@
-// API Service - Exposes Project Nyx.Navigator via HTTP API
+// API Service - Exposes Project CodeCartographer via HTTP API
 // This provides endpoints for AI tools like ShellAI to query module context
 
 use crate::layers::{detect_layer_violations, LayerConfig, LayerViolation};
@@ -1533,7 +1533,7 @@ impl ApiState {
         let config = LayerConfig::from_file(&self.root_path.join("layers.toml"))
             .or_else(|_| {
                 LayerConfig::from_file(
-                    &self.root_path.join(".navigator").join("layers.toml"),
+                    &self.root_path.join(".codecartographer").join("layers.toml"),
                 )
             })
             .unwrap_or_default();
@@ -1679,7 +1679,7 @@ impl ApiState {
         // the same commit SHA, update it in-place rather than appending.
         // This prevents rapid FFI calls on the same codebase state from
         // inflating the history with meaningless same-second entries.
-        let history_path = self.root_path.join(".navigator_history.json");
+        let history_path = self.root_path.join(".codecartographer_history.json");
         let mut all_snapshots: Vec<ArchitectureSnapshot> =
             std::fs::read_to_string(&history_path)
                 .ok()

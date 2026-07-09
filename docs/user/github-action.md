@@ -1,6 +1,6 @@
-# Adding Nyx.Navigator to GitHub CI
+# Adding CodeCartographer to GitHub CI
 
-The Nyx.Navigator GitHub Action runs on every pull request and posts a health-delta comment — architecture score before and after, hotspots the PR touched, and optional gate checks that fail the build on cycles or regressions.
+The CodeCartographer GitHub Action runs on every pull request and posts a health-delta comment — architecture score before and after, hotspots the PR touched, and optional gate checks that fail the build on cycles or regressions.
 
 ---
 
@@ -9,7 +9,7 @@ The Nyx.Navigator GitHub Action runs on every pull request and posts a health-de
 Every PR gets a comment like this:
 
 ```
-🟡 Nyx.Navigator Health — 72.4/100
+🟡 CodeCartographer Health — 72.4/100
 
 | Metric           | Base | Head | Delta  |
 |------------------|-----:|-----:|-------:|
@@ -19,7 +19,7 @@ Every PR gets a comment like this:
 | God Modules      |    1 |    1 |     0  |
 | Layer Violations |    0 |    0 |     0  |
 
-> ⚠️ 1 dependency cycle detected. Run `navigator health` locally to see details.
+> ⚠️ 1 dependency cycle detected. Run `codecartographer health` locally to see details.
 
 Hotspots touched by this PR:
 
@@ -37,7 +37,7 @@ The comment is updated in-place on each push — no spam. It also appears in the
 
 ### 1. Create the workflow file
 
-Add `.github/workflows/navigator.yml` to your repository:
+Add `.github/workflows/codecartographer.yml` to your repository:
 
 ```yaml
 name: Architecture Health
@@ -51,14 +51,14 @@ permissions:
   pull-requests: write
 
 jobs:
-  navigator:
+  codecartographer:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # required — see note below
 
-      - uses: anthropics/navigator@v3
+      - uses: anthropics/codecartographer@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -73,7 +73,7 @@ Push the file to any branch, open a PR, and the check will run. The first run ha
 
 ## The `fetch-depth: 0` requirement
 
-By default, `actions/checkout` fetches only the last commit (a shallow clone). Nyx.Navigator's health comparison reads the base branch's source files using `git show <base-sha>:<file>`, which requires that commit to be present in local history.
+By default, `actions/checkout` fetches only the last commit (a shallow clone). CodeCartographer's health comparison reads the base branch's source files using `git show <base-sha>:<file>`, which requires that commit to be present in local history.
 
 Without full history, the action skips the delta table and posts a warning. Add `fetch-depth: 0` to your checkout step to get the full diff.
 
@@ -97,12 +97,12 @@ If your repo is large and full-history checkout is too slow, fetch the merge bas
 All inputs are optional beyond `github-token`.
 
 ```yaml
-- uses: anthropics/navigator@v3
+- uses: anthropics/codecartographer@v3
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 
     # Pin to a specific release instead of "latest".
-    navigator-version: v3.1.0
+    codecartographer-version: v3.1.0
 
     # Subdirectory to analyse (monorepos with a single-language subfolder).
     working-directory: backend/
@@ -162,35 +162,35 @@ The action saves a snapshot of the current architecture state after each run and
 
 ```bash
 # Download the artifact from the GitHub UI or via gh:
-gh run download <run-id> --name navigator-snapshot-<sha>
+gh run download <run-id> --name codecartographer-snapshot-<sha>
 
 # Diff two snapshots:
-navigator snapshot diff v2.0.0 v3.0.0
+codecartographer snapshot diff v2.0.0 v3.0.0
 ```
 
 To pin a named snapshot before a major refactor:
 
 ```yaml
-- uses: anthropics/navigator@v3
+- uses: anthropics/codecartographer@v3
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 
 - name: Save named snapshot
-  run: navigator snapshot save pre-auth-rewrite
+  run: codecartographer snapshot save pre-auth-rewrite
 ```
 
 Then after the refactor merges:
 
 ```bash
-navigator snapshot diff pre-auth-rewrite post-auth-rewrite
+codecartographer snapshot diff pre-auth-rewrite post-auth-rewrite
 ```
 
 ---
 
 ## Troubleshooting
 
-**The action can't find the Nyx.Navigator binary**
-The binary is downloaded from the GitHub Release for the tag specified in `navigator-version`. If the release doesn't include a binary for `ubuntu-latest` (`x86_64-unknown-linux-gnu`), the install step will fail. Check that the release tag exists and includes a `navigator-binary-navigator-x86_64-unknown-linux-gnu.tar.gz` asset.
+**The action can't find the CodeCartographer binary**
+The binary is downloaded from the GitHub Release for the tag specified in `codecartographer-version`. If the release doesn't include a binary for `ubuntu-latest` (`x86_64-unknown-linux-gnu`), the install step will fail. Check that the release tag exists and includes a `codecartographer-binary-codecartographer-x86_64-unknown-linux-gnu.tar.gz` asset.
 
 **No delta table in the comment**
 The base SHA wasn't in local history. Add `fetch-depth: 0` to your checkout step or fetch the base branch explicitly (see above).

@@ -1,6 +1,6 @@
 # Context Modes
 
-Navigator offers several ways to capture and deliver codebase context to an AI. Pick the one that matches what the AI needs to do.
+CodeCartographer offers several ways to capture and deliver codebase context to an AI. Pick the one that matches what the AI needs to do.
 
 ## Mode comparison
 
@@ -17,10 +17,10 @@ Navigator offers several ways to capture and deliver codebase context to an AI. 
 ## `map` — skeleton mode
 
 ```bash
-navigator map [PATH]
+codecartographer map [PATH]
 ```
 
-Extracts imports and public symbol signatures from every file. Produces `navigator_map.xml`.
+Extracts imports and public symbol signatures from every file. Produces `codecartographer_map.xml`.
 
 **What's in a skeleton:**
 - File path and language
@@ -41,10 +41,10 @@ Extracts imports and public symbol signatures from every file. Produces `navigat
 ## `source` — full source mode
 
 ```bash
-navigator source [PATH]
+codecartographer source [PATH]
 ```
 
-Writes complete file content for every scanned file to `navigator_source.xml`. Use this when the AI needs to read specific implementation logic, not just signatures.
+Writes complete file content for every scanned file to `codecartographer_source.xml`. Use this when the AI needs to read specific implementation logic, not just signatures.
 
 **When skeleton isn't enough:**
 - Debugging a crash where the logic is inside a function body
@@ -55,7 +55,7 @@ Writes complete file content for every scanned file to `navigator_source.xml`. U
 ## `copy` — clipboard-only snapshot
 
 ```bash
-navigator copy [PATH]
+codecartographer copy [PATH]
 ```
 
 Captures full source (same as `source` mode) and puts it directly on the clipboard. Nothing is written to disk. Use this for a quick one-off paste into a chat window.
@@ -63,7 +63,7 @@ Captures full source (same as `source` mode) and puts it directly on the clipboa
 ## `context` — budget-aware focused context
 
 ```bash
-navigator context --focus FILE [--budget TOKENS]
+codecartographer context --focus FILE [--budget TOKENS]
 ```
 
 Builds a token-budget-aware context bundle centered on a seed file. The algorithm:
@@ -74,8 +74,8 @@ Builds a token-budget-aware context bundle centered on a seed file. The algorith
 4. Return the skeleton for the surviving files
 
 ```bash
-navigator context --focus src/auth.rs --budget 12000
-navigator context --focus src/api.rs src/models.rs --budget 8000
+codecartographer context --focus src/auth.rs --budget 12000
+codecartographer context --focus src/api.rs src/models.rs --budget 8000
 ```
 
 **When to use it:** When you're working in a specific area of the codebase and don't want to dump the entire project skeleton. The PageRank weighting means the files that matter most to your seed file survive the budget cut.
@@ -83,25 +83,25 @@ navigator context --focus src/api.rs src/models.rs --budget 8000
 ## `query` — question-driven context
 
 ```bash
-navigator query QUESTION
+codecartographer query QUESTION
 ```
 
 Full pipeline in one step: BM25 + regex search → PageRank → skeleton → context health check.
 
 ```bash
-navigator query "how does authentication work?"
-navigator query "where is the rate limiter implemented?"
-navigator query "what calls the database migration code?"
+codecartographer query "how does authentication work?"
+codecartographer query "where is the rate limiter implemented?"
+codecartographer query "what calls the database migration code?"
 ```
 
-Navigator searches the codebase for files relevant to your question, ranks them by PageRank-weighted relevance, assembles a skeleton within the default token budget, and outputs context health metadata alongside the bundle.
+CodeCartographer searches the codebase for files relevant to your question, ranks them by PageRank-weighted relevance, assembles a skeleton within the default token budget, and outputs context health metadata alongside the bundle.
 
-**When to use it:** When you don't know which files to focus on and want Navigator to figure it out. The output is ready to paste directly into a chat prompt.
+**When to use it:** When you don't know which files to focus on and want CodeCartographer to figure it out. The output is ready to paste directly into a chat prompt.
 
 ## `sync` — incremental update
 
 ```bash
-navigator sync [PATH]
+codecartographer sync [PATH]
 ```
 
 Re-processes only files that changed since the last snapshot. Much faster than a full `map` on large repos. The output is a delta patch that clients can merge into the existing context.
@@ -111,7 +111,7 @@ Use `sync` during a long editing session to keep the context current without re-
 ## `watch` — live watcher
 
 ```bash
-navigator watch [PATH]
+codecartographer watch [PATH]
 ```
 
 Stays running and re-processes changed files automatically when they are saved. Updates are debounced at 500ms to avoid thrashing. The skeleton map is rewritten on each change cycle.
@@ -123,12 +123,12 @@ Stays running and re-processes changed files automatically when they are saved. 
 All modes accept `--target` to control output format:
 
 ```bash
-navigator map --target claude    # formatted XML with token budget metadata (default)
-navigator map --target cursor    # Cursor-optimized format
-navigator map --target raw       # plain output, no wrappers
+codecartographer map --target claude    # formatted XML with token budget metadata (default)
+codecartographer map --target cursor    # Cursor-optimized format
+codecartographer map --target raw       # plain output, no wrappers
 ```
 
-Set the default globally with `navigator config --default-target TARGET`.
+Set the default globally with `codecartographer config --default-target TARGET`.
 
 ## Token efficiency
 
@@ -140,7 +140,7 @@ Set the default globally with `navigator config --default-target TARGET`.
 `context_health` — available as a CLI command and MCP tool — scores any context bundle on six metrics: signal density, compression density, position health, entity density, utilization headroom, and dedup ratio. Composite grade A–F.
 
 ```bash
-navigator context-health navigator_map.xml
+codecartographer context-health codecartographer_map.xml
 ```
 
 See [Architecture Analysis](architecture-analysis.md) for the full context-health metric breakdown.

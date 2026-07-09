@@ -1,6 +1,6 @@
-# Nyx.Navigator — Implementation Reference
+# CodeCartographer — Implementation Reference
 
-Current version: `1.6.0` (Rust, `mapper-core/nyx-navigator/`)
+Current version: `1.6.0` (Rust, `mapper-core/CodeCartographer/`)
 
 ---
 
@@ -121,7 +121,7 @@ Adam Tornhill's formula: `count / min(churn_a, churn_b)` where `count` is the nu
 
 ### Hidden coupling
 
-`navigator_hidden_coupling` returns co-change pairs that have **no** static import edge between them. These files change together but are not explicitly linked in code — a useful architectural smell.
+`codecartographer_hidden_coupling` returns co-change pairs that have **no** static import edge between them. These files change together but are not explicitly linked in code — a useful architectural smell.
 
 ---
 
@@ -133,14 +133,14 @@ Adam Tornhill's formula: `count / min(churn_a, churn_b)` where `count` is the nu
 WalkDir
   → skip ignored dirs (node_modules, .git, target, dist, …)
   → skip security-blocked files (.env, *.pem, credentials.json, …)
-  → skip .navigatorignore patterns
+  → skip .codecartographerignore patterns
   → skip noise files (lock files, *.log, *.map, minified *.min.js, large SVG)
   → collect clean files
 ```
 
 Noise files are tracked separately (not silently dropped) so the CLI can report how many tokens were saved by excluding them.
 
-### `.navigatorignore`
+### `.codecartographerignore`
 
 Parsed as gitignore-style glob patterns. Patterns without `/` match filename only. `!pattern` negates. Compiled to `Regex` at load time.
 
@@ -152,17 +152,17 @@ All FFI functions follow this contract:
 
 ```rust
 #[no_mangle]
-pub extern "C" fn navigator_foo(path: *const c_char) -> *mut c_char {
+pub extern "C" fn codecartographer_foo(path: *const c_char) -> *mut c_char {
     // 1. Convert C string inputs to Rust paths/strings
     // 2. Run the operation
     // 3. Serialize result to JSON
-    // 4. Return heap-allocated C string (caller frees with navigator_free_string)
+    // 4. Return heap-allocated C string (caller frees with codecartographer_free_string)
 }
 ```
 
 All outputs are `{"ok": true, "data": ...}` on success or `{"ok": false, "error": "..."}` on failure. The `result_to_json_ptr` helper handles this pattern.
 
-`navigator_free_string(ptr)` reconstructs the `CString` and drops it, freeing the memory.
+`codecartographer_free_string(ptr)` reconstructs the `CString` and drops it, freeing the memory.
 
 ---
 

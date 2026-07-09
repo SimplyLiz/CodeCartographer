@@ -1,15 +1,15 @@
 # Diagrams
 
-`navigator diagram` turns the import graph into a diagram you can paste
+`codecartographer diagram` turns the import graph into a diagram you can paste
 into docs, open in a browser, or read in the terminal. One subcommand, three
 dials: **format** (how the bytes look), **destination** (where they go), and
 **selection** (which nodes make it in).
 
 ```
-navigator diagram [OPTIONS]
+codecartographer diagram [OPTIONS]
 ```
 
-All options are optional — calling `navigator diagram` with no flags
+All options are optional — calling `codecartographer diagram` with no flags
 prints a Mermaid top-60-by-degree view of the current project to stdout.
 
 ---
@@ -26,7 +26,7 @@ prints a Mermaid top-60-by-degree view of the current project to stdout.
 | `quadrant` | "Where should we refactor?" — visual risk map | Mermaid `quadrantChart` plotting every file on a churn × complexity plane. Automatically triggers git enrichment. No `--call-graph` needed. |
 | `er` (aliases: `entity`, `erd`) | Data-model docs, ORM schemas, API DTOs | Mermaid `erDiagram` with entities and relationships inferred from struct field types. Requires `--call-graph FILE`. |
 
-The format controls the **source** navigator emits. The destination
+The format controls the **source** codecartographer emits. The destination
 (below) controls whether that source gets written as-is, rendered to an
 image, or wrapped in an interactive page.
 
@@ -46,7 +46,7 @@ With no `--output`, the diagram source prints to stdout. With `-o`, the
 | `.svg`, `.png` *(with* `--format dot`*)* | Shell out to `dot` | `brew install graphviz` (or distro equivalent) |
 | `.html` | Render a self-contained interactive explorer | none (no CDN, no build step) |
 
-If the required binary isn't on `$PATH`, navigator errors out with the
+If the required binary isn't on `$PATH`, codecartographer errors out with the
 install command instead of writing a broken file.
 
 ASCII output can't be rendered to `.svg`/`.png` — pick `mermaid` or `dot`
@@ -55,7 +55,7 @@ for images, or write ASCII to any text extension.
 ### Interactive HTML
 
 ```bash
-navigator diagram -o architecture.html
+codecartographer diagram -o architecture.html
 ```
 
 Produces a single file with a sidebar filter, click-to-select, and neighbor
@@ -67,17 +67,17 @@ host.
 
 ```bash
 # Mermaid → SVG (requires mmdc)
-navigator diagram -o architecture.svg
+codecartographer diagram -o architecture.svg
 
 # DOT → PNG (requires Graphviz)
-navigator diagram --format dot -o architecture.png
+codecartographer diagram --format dot -o architecture.png
 ```
 
 ---
 
 ## Selection — which nodes make it in
 
-Nyx.Navigator picks a subset of nodes to render because whole-project graphs
+CodeCartographer picks a subset of nodes to render because whole-project graphs
 quickly become unreadable. Selection precedence from highest to lowest:
 
 `--blast-radius` → `--focus` → `--docs-only` → top-N by degree *(default)*.
@@ -89,7 +89,7 @@ nodes are skipped. Raise the cap when you want more, lower it when the
 output is noisy:
 
 ```bash
-navigator diagram --max-nodes 20
+codecartographer diagram --max-nodes 20
 ```
 
 A `(truncated to 60 nodes — raise --max-nodes for more)` notice prints when
@@ -102,7 +102,7 @@ because the neighborhood you care about when editing a file includes both
 what it imports *and* what imports it.
 
 ```bash
-navigator diagram --focus src/parser.rs --depth 2
+codecartographer diagram --focus src/parser.rs --depth 2
 ```
 
 `MODULE` accepts a `module_id`, an exact path, or a path suffix —
@@ -115,7 +115,7 @@ Target node renders as a bold red "epicenter". Useful for code review /
 change-impact analysis: *"If I touch this, what will I affect?"*
 
 ```bash
-navigator diagram --blast-radius src/api/auth.rs -o blast.svg
+codecartographer diagram --blast-radius src/api/auth.rs -o blast.svg
 ```
 
 ### `--docs-only` — doc-map view
@@ -126,7 +126,7 @@ docs (doc with no referenced code) and orphan code (code with no
 documentation).
 
 ```bash
-navigator diagram --docs-only -o doc-map.html
+codecartographer diagram --docs-only -o doc-map.html
 ```
 
 ---
@@ -139,7 +139,7 @@ These are always on when the data is present. No flags required.
 - **Dashed red border** — pivot node (the cycle's highest-coupling entry).
 - **Red edges** — edges inside a cycle.
 - **Dashed / dotted red, orange, yellow edges** — layer violations
-  (back-call, skip-call, direct-foreign-import — see `navigator layers`).
+  (back-call, skip-call, direct-foreign-import — see `codecartographer layers`).
 - **Orange border + larger size (DOT)** — hotspot (`hotspot_score ≥ 70`).
 - **Role fill colours** — `core` blue, `bridge` orange, `dead` grey,
   `entry` green (Mermaid / DOT only; overridden by `--color-by-owner`).
@@ -157,7 +157,7 @@ Adds dotted purple edges between files that co-change (both touched in the
 same commits) with a `coupling_score ≥ F`. Requires git history.
 
 ```bash
-navigator diagram --cochange-threshold 0.6
+codecartographer diagram --cochange-threshold 0.6
 ```
 
 Rough guide for the threshold: `0.3` is noisy, `0.6` catches suspicious
@@ -175,7 +175,7 @@ top-level directory (`src/`, `tests/`, …); `2` groups one level deeper
 inter-folder edges are summed.
 
 ```bash
-navigator diagram --group-by-folder 2 -o folders.svg
+codecartographer diagram --group-by-folder 2 -o folders.svg
 ```
 
 Combines with `--focus` / `--blast-radius`, but the anchor has to match a
@@ -190,7 +190,7 @@ overlaid on the import graph. Nodes without an inferred owner stay white.
 Requires git history.
 
 ```bash
-navigator diagram --color-by-owner -o ownership.svg
+codecartographer diagram --color-by-owner -o ownership.svg
 ```
 
 Bot commits and pure-formatting commits are filtered before ranking, so CI
@@ -228,7 +228,7 @@ Supported languages for `--call-graph`:
 ### Call graph (`--format mermaid|dot|ascii`)
 
 ```bash
-navigator diagram --call-graph src/parser.rs --format ascii
+codecartographer diagram --call-graph src/parser.rs --format ascii
 ```
 
 - Nodes are functions / methods. Qualified names follow language convention:
@@ -253,8 +253,8 @@ external calls appear as a note so you can tell how much behaviour lives
 outside the file.
 
 ```bash
-navigator diagram --call-graph src/render.rs --format sequence
-navigator diagram --call-graph src/render.rs --format sequence -o calls.svg
+codecartographer diagram --call-graph src/render.rs --format sequence
+codecartographer diagram --call-graph src/render.rs --format sequence -o calls.svg
 ```
 
 ```mermaid
@@ -275,8 +275,8 @@ Extracts the type structure of a file and renders it as a Mermaid
 architecture docs, or reviewing a PR's structural changes at a glance.
 
 ```bash
-navigator diagram --call-graph src/models.rs --format class
-navigator diagram --call-graph src/models.rs --format class -o models.svg
+codecartographer diagram --call-graph src/models.rs --format class
+codecartographer diagram --call-graph src/models.rs --format class -o models.svg
 ```
 
 What's extracted per language:
@@ -323,8 +323,8 @@ Plots every file in the project as a point on a churn × complexity plane.
 No `--call-graph` flag needed — this runs on the full project graph.
 
 ```bash
-navigator diagram --format quadrant
-navigator diagram --format quadrant -o hotmap.svg
+codecartographer diagram --format quadrant
+codecartographer diagram --format quadrant -o hotmap.svg
 ```
 
 Quadrant key:
@@ -346,7 +346,7 @@ The quadrant chart automatically triggers git enrichment, so `--color-by-owner`
 and `--cochange-threshold` can be combined freely.
 
 ```bash
-navigator diagram --format quadrant --max-nodes 30 -o quadrant.svg
+codecartographer diagram --format quadrant --max-nodes 30 -o quadrant.svg
 ```
 
 ### ER diagrams (`--format er`)
@@ -355,8 +355,8 @@ Produces a Mermaid `erDiagram` from the struct/class field definitions in a
 single file. Works on the same files as `--format class`.
 
 ```bash
-navigator diagram --call-graph src/models.rs --format er
-navigator diagram --call-graph src/models.rs --format er -o models.svg
+codecartographer diagram --call-graph src/models.rs --format er
+codecartographer diagram --call-graph src/models.rs --format er -o models.svg
 ```
 
 Relationship detection: for each field whose stripped base type matches
@@ -398,62 +398,62 @@ ER mode ignores the import-graph-only options (`--cochange-threshold`,
 
 ```bash
 # Quick architecture snapshot to paste into a PR
-navigator diagram --max-nodes 30
+codecartographer diagram --max-nodes 30
 
 # Blast radius of a file, as a shareable image
-navigator diagram --blast-radius src/api/auth.rs -o blast.svg
+codecartographer diagram --blast-radius src/api/auth.rs -o blast.svg
 
 # Interactive explorer for the whole project, with ownership colours
-navigator diagram --color-by-owner --max-nodes 200 -o architecture.html
+codecartographer diagram --color-by-owner --max-nodes 200 -o architecture.html
 
 # Folder-level bird's-eye view
-navigator diagram --group-by-folder 2 --format dot -o folders.dot
+codecartographer diagram --group-by-folder 2 --format dot -o folders.dot
 
 # Doc-map: which docs point to which code
-navigator diagram --docs-only -o doc-map.html
+codecartographer diagram --docs-only -o doc-map.html
 
 # ASCII tree rooted on the file you're about to edit (read in the terminal)
-navigator diagram --focus src/parser.rs --depth 2 --format ascii
+codecartographer diagram --focus src/parser.rs --depth 2 --format ascii
 
 # Function-level call graph of one file
-navigator diagram --call-graph src/parser.rs --format mermaid -o calls.mmd
+codecartographer diagram --call-graph src/parser.rs --format mermaid -o calls.mmd
 
 # Temporal coupling overlay on a focused view
-navigator diagram --focus src/api --cochange-threshold 0.6 -o coupling.svg
+codecartographer diagram --focus src/api --cochange-threshold 0.6 -o coupling.svg
 
 # Sequence diagram of a file's internal call flow (paste into a PR for reviewers)
-navigator diagram --call-graph src/handler.rs --format sequence
+codecartographer diagram --call-graph src/handler.rs --format sequence
 
 # Sequence diagram rendered to SVG (requires mmdc)
-navigator diagram --call-graph src/handler.rs --format sequence -o flow.svg
+codecartographer diagram --call-graph src/handler.rs --format sequence -o flow.svg
 
 # Class diagram of a data-model file
-navigator diagram --call-graph src/models.rs --format class
+codecartographer diagram --call-graph src/models.rs --format class
 
 # Class diagram of a TypeScript service
-navigator diagram --call-graph src/services/auth.ts --format class -o auth.svg
+codecartographer diagram --call-graph src/services/auth.ts --format class -o auth.svg
 
 # Class diagram of a Go package
-navigator diagram --call-graph internal/storage/repo.go --format class
+codecartographer diagram --call-graph internal/storage/repo.go --format class
 
 # Quadrant chart — "where do we refactor?" overview
-navigator diagram --format quadrant
+codecartographer diagram --format quadrant
 
 # Quadrant chart as a shareable SVG
-navigator diagram --format quadrant --max-nodes 40 -o quadrant.svg
+codecartographer diagram --format quadrant --max-nodes 40 -o quadrant.svg
 
 # ER diagram of a data-model file
-navigator diagram --call-graph src/models.rs --format er
+codecartographer diagram --call-graph src/models.rs --format er
 
 # ER diagram of a TypeScript DTO file
-navigator diagram --call-graph src/types/api.ts --format er -o api-er.svg
+codecartographer diagram --call-graph src/types/api.ts --format er -o api-er.svg
 ```
 
 ---
 
 ## Programmatic access
 
-The same renderer is reachable via FFI (`navigator_render_architecture`)
+The same renderer is reachable via FFI (`codecartographer_render_architecture`)
 and the MCP tool `renderArchitecture`, so MCP-aware clients get the same
 Mermaid / DOT / ASCII output without shelling out. CLI and MCP are
 lock-step — if you see it in one, you see it in the other.

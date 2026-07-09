@@ -9,7 +9,7 @@ def inject_state():
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     session_id = secrets.token_hex(4) + "-" + secrets.token_hex(2)
 
-    print('<navigator_protocol version="0.1">')
+    print('<codecartographer_protocol version="0.1">')
     print("<meta>")
     print(f"<session_id>{session_id}</session_id>")
     print(f"<timestamp>{timestamp}</timestamp>")
@@ -17,7 +17,7 @@ def inject_state():
     print("<state_key>")
     print(state_content)
     print("</state_key>")
-    print("</navigator_protocol>")
+    print("</codecartographer_protocol>")
 
 
 if __name__ == "__main__":

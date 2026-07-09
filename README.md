@@ -1,12 +1,12 @@
-# Nyx.Navigator
+# CodeCartographer
 
 > Deterministic codebase mapper for AI context injection.
 
-Nyx.Navigator packages your repository into a structured snapshot an AI can reason about. It sits between your codebase and your AI assistant — Claude, Cursor, GPT-4, or any model with a context window.
+CodeCartographer packages your repository into a structured snapshot an AI can reason about. It sits between your codebase and your AI assistant — Claude, Cursor, GPT-4, or any model with a context window.
 
 ## How it works
 
-1. Run `navigator` in any repo
+1. Run `codecartographer` in any repo
 2. Pick a mode — map (skeletons) or source (full content)
 3. The snapshot is written to disk and optionally copied to clipboard
 4. Paste it into your AI chat, or let the MCP server inject it automatically
@@ -26,93 +26,93 @@ What would you like to do? [map/source/diagram/query/quit]:
 
 ```bash
 # Build and install
-cd mapper-core/nyx-navigator && cargo build --release
-cp target/release/navigator ~/.local/bin/navigator
+cd mapper-core/CodeCartographer && cargo build --release
+cp target/release/codecartographer ~/.local/bin/codecartographer
 
 # Initialise project config
-navigator init
+codecartographer init
 
 # Interactive overview — shows token estimates, lets you pick a mode
-navigator
+codecartographer
 
 # Or go directly
-navigator map      # skeleton only (~90% fewer tokens than full source)
-navigator source   # full source code
-navigator query "how does authentication work?"
+codecartographer map      # skeleton only (~90% fewer tokens than full source)
+codecartographer source   # full source code
+codecartographer query "how does authentication work?"
 ```
 
 ## Context Modes
 
 | Command | What it sends | When to use |
 |---------|--------------|-------------|
-| `navigator map` | Imports + signatures only | Daily use, architecture questions |
-| `navigator source` | Full file content | Debugging, implementation review |
-| `navigator copy` | Full source to clipboard only (no disk write) | One-shot paste |
-| `navigator context --focus <FILE> --budget 8000` | PageRank-ranked skeleton pruned to token budget | Targeted deep dives |
-| `navigator query <QUESTION>` | Search → PageRank → skeleton in one step | Specific questions |
-| `navigator sync` | Incremental update (changed files only) | Keep snapshot fresh |
-| `navigator watch` | Live watcher, updates skeleton on save | Ongoing sessions |
+| `codecartographer map` | Imports + signatures only | Daily use, architecture questions |
+| `codecartographer source` | Full file content | Debugging, implementation review |
+| `codecartographer copy` | Full source to clipboard only (no disk write) | One-shot paste |
+| `codecartographer context --focus <FILE> --budget 8000` | PageRank-ranked skeleton pruned to token budget | Targeted deep dives |
+| `codecartographer query <QUESTION>` | Search → PageRank → skeleton in one step | Specific questions |
+| `codecartographer sync` | Incremental update (changed files only) | Keep snapshot fresh |
+| `codecartographer watch` | Live watcher, updates skeleton on save | Ongoing sessions |
 
 ## Architecture & Analysis
 
 | Command | Description |
 |---------|-------------|
-| `navigator health` | Health score 0–100 (cycles, bridges, god modules, violations) |
-| `navigator simulate --module <FILE>` | Predict ripple effects before making a change |
-| `navigator check` | CI gate — exits non-zero on cycles or layer violations |
-| `navigator dead` | Dead code candidates (in-degree = 0) |
-| `navigator symbols --unreferenced` | Public exports not referenced anywhere |
-| `navigator hotspots` | High churn × high complexity files |
-| `navigator cochange --min-count 3` | Temporal coupling — files that always change together |
-| `navigator shotgun` | Shotgun surgery candidates (high co-change dispersion) |
-| `navigator semidiff HEAD~1` | Function-level semantic diff between two commits |
-| `navigator evolution --days 30` | Architectural trends over time |
-| `navigator path --from <A> --to <B>` | Shortest import path between two modules |
-| `navigator deps <MODULE>` | Dependencies of a module as JSON |
-| `navigator todo` | TODO/FIXME/HACK density across source files |
-| `navigator languages` | Languages detected and their file counts |
+| `codecartographer health` | Health score 0–100 (cycles, bridges, god modules, violations) |
+| `codecartographer simulate --module <FILE>` | Predict ripple effects before making a change |
+| `codecartographer check` | CI gate — exits non-zero on cycles or layer violations |
+| `codecartographer dead` | Dead code candidates (in-degree = 0) |
+| `codecartographer symbols --unreferenced` | Public exports not referenced anywhere |
+| `codecartographer hotspots` | High churn × high complexity files |
+| `codecartographer cochange --min-count 3` | Temporal coupling — files that always change together |
+| `codecartographer shotgun` | Shotgun surgery candidates (high co-change dispersion) |
+| `codecartographer semidiff HEAD~1` | Function-level semantic diff between two commits |
+| `codecartographer evolution --days 30` | Architectural trends over time |
+| `codecartographer path --from <A> --to <B>` | Shortest import path between two modules |
+| `codecartographer deps <MODULE>` | Dependencies of a module as JSON |
+| `codecartographer todo` | TODO/FIXME/HACK density across source files |
+| `codecartographer languages` | Languages detected and their file counts |
 
 ## Diagram
 
 | Command | Description |
 |---------|-------------|
-| `navigator diagram` | Dependency graph (Mermaid by default) |
-| `navigator diagram --format dot\|ascii` | Graphviz DOT or ASCII tree |
-| `navigator diagram -o graph.html` | Interactive self-contained HTML explorer |
-| `navigator diagram -o graph.svg\|.png` | SVG/PNG via `mmdc` or `dot` |
-| `navigator diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python/Go/C/C++) |
-| `navigator diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
-| `navigator diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
-| `navigator diagram --format quadrant` | Mermaid `quadrantChart` — churn × complexity scatter (top-right = refactor now) |
-| `navigator diagram --call-graph FILE --format er` | Mermaid `erDiagram` — entity-relationship view inferred from struct fields and type annotations |
-| `navigator diagram --blast-radius MODULE` | Target + direct deps + direct dependents |
-| `navigator diagram --focus FILE [--depth N]` | BFS neighborhood around a module |
-| `navigator diagram --group-by-folder DEPTH` | Collapse graph to folder granularity |
-| `navigator diagram --color-by-owner` | Node fill by dominant git author |
-| `navigator diagram --cochange-threshold N` | Overlay co-change edges |
-| `navigator diagram --docs-only` | Doc-map: Markdown/YAML/TOML/JSON + referenced code |
+| `codecartographer diagram` | Dependency graph (Mermaid by default) |
+| `codecartographer diagram --format dot\|ascii` | Graphviz DOT or ASCII tree |
+| `codecartographer diagram -o graph.html` | Interactive self-contained HTML explorer |
+| `codecartographer diagram -o graph.svg\|.png` | SVG/PNG via `mmdc` or `dot` |
+| `codecartographer diagram --call-graph FILE` | Function-level call graph for a single file (Rust/Python/Go/C/C++) |
+| `codecartographer diagram --call-graph FILE --format sequence` | Mermaid `sequenceDiagram` — function call order within a file |
+| `codecartographer diagram --call-graph FILE --format class` | Mermaid `classDiagram` — structs, classes, interfaces with fields and relationships |
+| `codecartographer diagram --format quadrant` | Mermaid `quadrantChart` — churn × complexity scatter (top-right = refactor now) |
+| `codecartographer diagram --call-graph FILE --format er` | Mermaid `erDiagram` — entity-relationship view inferred from struct fields and type annotations |
+| `codecartographer diagram --blast-radius MODULE` | Target + direct deps + direct dependents |
+| `codecartographer diagram --focus FILE [--depth N]` | BFS neighborhood around a module |
+| `codecartographer diagram --group-by-folder DEPTH` | Collapse graph to folder granularity |
+| `codecartographer diagram --color-by-owner` | Node fill by dominant git author |
+| `codecartographer diagram --cochange-threshold N` | Overlay co-change edges |
+| `codecartographer diagram --docs-only` | Doc-map: Markdown/YAML/TOML/JSON + referenced code |
 
 Sequence, class, quadrant, and ER formats all output Mermaid syntax, so `--output out.svg` works via `mmdc` and IDEs that render Mermaid inline get diagrams without extra tooling.
 
 ### Examples — this repo
 
-**Full module dependency graph** (`navigator diagram --format dot -o graph.svg`)
+**Full module dependency graph** (`codecartographer diagram --format dot -o graph.svg`)
 
 ![Module dependency graph](docs/images/module-graph.svg)
 
-**Blast radius of `api.rs`** — the central hub and everything it pulls (`navigator diagram --blast-radius src/api.rs --format dot -o blast.svg`)
+**Blast radius of `api.rs`** — the central hub and everything it pulls (`codecartographer diagram --blast-radius src/api.rs --format dot -o blast.svg`)
 
 ![Blast radius of api.rs](docs/images/blast-radius-api.svg)
 
-**Focus neighborhood of `main.rs`** — direct imports only (`navigator diagram --focus src/main.rs --depth 1 --format dot -o focus.svg`)
+**Focus neighborhood of `main.rs`** — direct imports only (`codecartographer diagram --focus src/main.rs --depth 1 --format dot -o focus.svg`)
 
 ![Focus neighborhood of main.rs](docs/images/main-focus.svg)
 
-**Function-level call graph for `diagram.rs`** (`navigator diagram --call-graph src/diagram.rs --format dot -o calls.svg`)
+**Function-level call graph for `diagram.rs`** (`codecartographer diagram --call-graph src/diagram.rs --format dot -o calls.svg`)
 
 ![Call graph for diagram.rs](docs/images/call-graph-diagram.svg)
 
-**Sequence diagram of `diagram.rs`** — function call order within the renderer (`navigator diagram --call-graph src/diagram.rs --format sequence`)
+**Sequence diagram of `diagram.rs`** — function call order within the renderer (`codecartographer diagram --call-graph src/diagram.rs --format sequence`)
 
 ```mermaid
 sequenceDiagram
@@ -145,7 +145,7 @@ sequenceDiagram
     render_dot->>role_color_dot: call
 ```
 
-**Class diagram of `class_graph.rs`** — the UML extraction data model (`navigator diagram --call-graph src/class_graph.rs --format class`)
+**Class diagram of `class_graph.rs`** — the UML extraction data model (`codecartographer diagram --call-graph src/class_graph.rs --format class`)
 
 ```mermaid
 classDiagram
@@ -196,7 +196,7 @@ classDiagram
     MethodDef --> Vis : visibility
 ```
 
-**Quadrant chart — churn × complexity** (`navigator diagram --format quadrant`)
+**Quadrant chart — churn × complexity** (`codecartographer diagram --format quadrant`)
 
 > Bottom-left = stable (leave it). Top-right = danger zone (refactor now). Top-left = risky debt (complex but rarely touched — schedule a refactor). Bottom-right = hotspots (high churn but simple — add tests).
 
@@ -219,7 +219,7 @@ quadrantChart
     webhooks.rs: [0.01, 0.37]
 ```
 
-**ER diagram of `call_graph.rs`** — entity-relationship view of the call-graph data model (`navigator diagram --call-graph src/call_graph.rs --format er`)
+**ER diagram of `call_graph.rs`** — entity-relationship view of the call-graph data model (`codecartographer diagram --call-graph src/call_graph.rs --format er`)
 
 ```mermaid
 erDiagram
@@ -248,23 +248,23 @@ Two commands for AI-optimised, symbol-level context — much tighter than a full
 
 | Command | Description |
 |---------|-------------|
-| `navigator reach <SYMBOL>` | Context tree from a named symbol: callers with snippets, callees with sigs, depth-2 types. 135–500 tokens. |
-| `navigator reach <A> <B>` | Intersection view: merged callers, shared callees annotated, shared depth-2 types promoted. |
-| `navigator answer "<QUESTION>"` | Evidence chain: minimum symbols that answer the question, in reading order with inter-item connections. |
-| `navigator answer "<QUESTION>" --then N` | Drill into evidence item #N via `reach`, appended below the chain. |
+| `codecartographer reach <SYMBOL>` | Context tree from a named symbol: callers with snippets, callees with sigs, depth-2 types. 135–500 tokens. |
+| `codecartographer reach <A> <B>` | Intersection view: merged callers, shared callees annotated, shared depth-2 types promoted. |
+| `codecartographer answer "<QUESTION>"` | Evidence chain: minimum symbols that answer the question, in reading order with inter-item connections. |
+| `codecartographer answer "<QUESTION>" --then N` | Drill into evidence item #N via `reach`, appended below the chain. |
 
 ```bash
 # Single symbol — who calls it, what it calls, what types it touches
-navigator reach verify_token
+codecartographer reach verify_token
 
 # Two symbols — shared context between them
-navigator reach verify_token decode_jwt
+codecartographer reach verify_token decode_jwt
 
 # Question → ranked evidence chain
-navigator answer "how does rate limiting work?"
+codecartographer answer "how does rate limiting work?"
 
 # Drill into item #2 for more detail
-navigator answer "how does the call graph work?" --then 2
+codecartographer answer "how does the call graph work?" --then 2
 ```
 
 Callee resolution uses AST call graphs for Rust, Python, Go, C, and C++; other languages fall back to import-graph heuristics.
@@ -273,31 +273,31 @@ Callee resolution uses AST call graphs for Rust, Python, Go, C, and C++; other l
 
 | Command | Description |
 |---------|-------------|
-| `navigator search <PATTERN>` | Grep-like content search (`-i -v -w -A -B -C`, `--glob`, `--path`) |
-| `navigator find <PATTERN>` | File find by glob (`--modified-since 24h`, `--min-size`, `--max-depth`) |
-| `navigator replace <PATTERN> <REPLACEMENT>` | Regex find-and-replace (`--dry-run`, `--backup`, capture groups) |
-| `navigator extract <PATTERN>` | Capture-group extraction (`--format text\|json\|csv\|tsv`) |
+| `codecartographer search <PATTERN>` | Grep-like content search (`-i -v -w -A -B -C`, `--glob`, `--path`) |
+| `codecartographer find <PATTERN>` | File find by glob (`--modified-since 24h`, `--min-size`, `--max-depth`) |
+| `codecartographer replace <PATTERN> <REPLACEMENT>` | Regex find-and-replace (`--dry-run`, `--backup`, capture groups) |
+| `codecartographer extract <PATTERN>` | Capture-group extraction (`--format text\|json\|csv\|tsv`) |
 
 ## Context Quality
 
 | Command | Description |
 |---------|-------------|
-| `navigator context-health [FILE]` | Score a context bundle: signal density, entropy, position health (A–F) |
-| `navigator llmstxt` | Generate `llms.txt` project index |
-| `navigator claudemd` | Generate `CLAUDE.md` architecture guide |
+| `codecartographer context-health [FILE]` | Score a context bundle: signal density, entropy, position health (A–F) |
+| `codecartographer llmstxt` | Generate `llms.txt` project index |
+| `codecartographer claudemd` | Generate `CLAUDE.md` architecture guide |
 
 ## Layers & Snapshots
 
 | Command | Description |
 |---------|-------------|
-| `navigator layers` | Manage architectural layer definitions (`layers.toml`) |
-| `navigator snapshot` | Save or compare architecture snapshots |
-| `navigator status` | Show project status |
+| `codecartographer layers` | Manage architectural layer definitions (`layers.toml`) |
+| `codecartographer snapshot` | Save or compare architecture snapshots |
+| `codecartographer status` | Show project status |
 
 ## MCP Server
 
 ```bash
-navigator serve   # stdio JSON-RPC 2.0 — connects to Claude Code, Cursor, etc.
+codecartographer serve   # stdio JSON-RPC 2.0 — connects to Claude Code, Cursor, etc.
 ```
 
 Exposes 40 tools over Model Context Protocol. Skeleton tools:
@@ -385,7 +385,7 @@ graph LR
     memory --> sync
 ```
 
-### How `navigator map` flows
+### How `codecartographer map` flows
 
 ```mermaid
 sequenceDiagram
@@ -403,7 +403,7 @@ sequenceDiagram
     MP-->>CLI: Vec<MappedFile>
     CLI->>FM: format output (token budget, target)
     FM-->>CLI: compressed skeleton XML
-    CLI-->>User: navigator_map.xml + token report
+    CLI-->>User: codecartographer_map.xml + token report
 ```
 
 ## Token Efficiency
@@ -414,24 +414,24 @@ sequenceDiagram
 
 `context-health` scores bundles on six metrics: signal density, compression density, position health, entity density, utilisation headroom, dedup ratio. Composite score A–F.
 
-## Nyx.Navigator vs CKB
+## CodeCartographer vs CKB
 
-| Aspect | Nyx.Navigator | CKB |
+| Aspect | CodeCartographer | CKB |
 |--------|--------------|-----|
 | View | Macro (file/module) | Micro (symbol/AST) |
 | Speed | Fast (regex + tree-sitter) | Deep (AST) |
 | Purpose | Map, warn, predict, inject context | Analyze, refactor |
 | Output | Skeleton XML / source context | Call graphs, refs |
 
-**The handoff:** Nyx.Navigator identifies where to look; CKB does deep analysis there.
+**The handoff:** CodeCartographer identifies where to look; CKB does deep analysis there.
 
 ```mermaid
 graph LR
-    Nyx.Navigator["Nyx.Navigator\nmacro view — file/module\nfast · regex + tree-sitter"]
+    CodeCartographer["CodeCartographer\nmacro view — file/module\nfast · regex + tree-sitter"]
     CKB["CKB\nmicro view — symbol/AST\ndeep · full parse"]
 
-    Nyx.Navigator -->|"webhook on graph change\n+ blast radius hint"| CKB
-    CKB -->|"deep symbol analysis\nat identified hotspots"| Nyx.Navigator
+    CodeCartographer -->|"webhook on graph change\n+ blast radius hint"| CKB
+    CKB -->|"deep symbol analysis\nat identified hotspots"| CodeCartographer
 ```
 
 ## Author

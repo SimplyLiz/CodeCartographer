@@ -1,6 +1,6 @@
-# The Stack — Nyx.Navigator, CKB, TruthKeeper, TurboQuant, ContextCompressionEngine, LLMRouter
+# The Stack — CodeCartographer, CKB, TruthKeeper, TurboQuant, ContextCompressionEngine, LLMRouter
 
-Nyx.Navigator is one layer in a broader set of complementary tools. This document explains what each system does, where the boundaries are, and how a client consumes them together.
+CodeCartographer is one layer in a broader set of complementary tools. This document explains what each system does, where the boundaries are, and how a client consumes them together.
 
 ---
 
@@ -15,7 +15,7 @@ Nyx.Navigator is one layer in a broader set of complementary tools. This documen
      │ structural context               │ long-term knowledge               │
      ▼                                  ▼                                  │
 ┌────────────────┐          ┌──────────────────────────┐                  │
-│  Nyx.Navigator  │          │       TruthKeeper         │                  │
+│  CodeCartographer  │          │       TruthKeeper         │                  │
 │                │          │                           │   tool output    │
 │  What the code │          │  What we know about the   │   feeds back up  │
 │  looks like    │          │  code — and whether it's  │                  │
@@ -49,11 +49,11 @@ Nyx.Navigator is one layer in a broader set of complementary tools. This documen
 
 ## What each system does
 
-### Nyx.Navigator
+### CodeCartographer
 
 **Question it answers:** _What is the code's shape right now?_
 
-Nyx.Navigator builds a semantic map of a codebase — not full source, but the shape: public API surfaces, imports, symbol kinds, dependency graph, git history signals. It is fast (sub-100ms on a full repo) and deliberately approximate. It does not require compilation.
+CodeCartographer builds a semantic map of a codebase — not full source, but the shape: public API surfaces, imports, symbol kinds, dependency graph, git history signals. It is fast (sub-100ms on a full repo) and deliberately approximate. It does not require compilation.
 
 **Outputs:**
 - Dependency graph (nodes = files, edges = imports)
@@ -62,7 +62,7 @@ Nyx.Navigator builds a semantic map of a codebase — not full source, but the s
 - Architectural layer violation detection
 - Dead-code and god-module detection
 
-**Consumed by:** CKB via a C FFI (`libnavigator.a`), and directly via MCP server (26 tools over JSON-RPC stdio).
+**Consumed by:** CKB via a C FFI (`libcode_cartographer.a`), and directly via MCP server (26 tools over JSON-RPC stdio).
 
 **Does NOT do:** Long-term memory, truth maintenance, embedding storage, or context window management.
 
@@ -72,9 +72,9 @@ Nyx.Navigator builds a semantic map of a codebase — not full source, but the s
 
 **Question it answers:** _What does this symbol mean, and who uses it?_
 
-CKB is the compiler-accurate layer. It builds a SCIP index from source — actual type information, call graphs, reference chains — and exposes it as an MCP server consumed by AI assistants. Where Nyx.Navigator gives you the skeleton in 100ms, CKB gives you compiler truth in seconds.
+CKB is the compiler-accurate layer. It builds a SCIP index from source — actual type information, call graphs, reference chains — and exposes it as an MCP server consumed by AI assistants. Where CodeCartographer gives you the skeleton in 100ms, CKB gives you compiler truth in seconds.
 
-CKB consumes Nyx.Navigator for:
+CKB consumes CodeCartographer for:
 - Blast-radius pre-filtering before deep graph traversal
 - Git churn and co-change signals for hotspot prioritization
 - Semantic diffs between commits
@@ -92,12 +92,12 @@ TruthKeeper is an LLM memory system with dependency-aware truth maintenance. It 
 
 **States a fact can be in:** `SUPPORTED`, `OUTDATED`, `CONTESTED`, `HYPOTHESIS`
 
-**Use cases alongside Nyx.Navigator:**
+**Use cases alongside CodeCartographer:**
 - "This module owns authentication" — fact stored in TruthKeeper, invalidated when `auth.rs` changes significantly
 - "We deprecated `old_api.rs` in favour of `new_api.rs`" — tracked with provenance, surfaced when an AI tries to reference the old module
 - Architecture decision records (ADRs) linked to the files they govern — when the file structure drifts, the ADR is flagged as `OUTDATED`
 
-TruthKeeper does not parse code itself. Nyx.Navigator provides the structural signals (what changed, what's coupled) that TruthKeeper's source watchers can subscribe to.
+TruthKeeper does not parse code itself. CodeCartographer provides the structural signals (what changed, what's coupled) that TruthKeeper's source watchers can subscribe to.
 
 **Does NOT do:** Structural analysis, dependency graphs, symbol extraction, or context window management.
 
@@ -134,10 +134,10 @@ ContextCompressionEngine (CCE) manages the LLM message history itself — the co
 
 **Measured performance:** 1.3–6.1× compression on synthetic scenarios; 1.5× on real Claude Code sessions (11.7M chars / 8,004 messages). Zero API calls, zero external dependencies.
 
-**Relevant to Nyx.Navigator specifically:**
-- When Nyx.Navigator returns a symbol graph or dependency tree as a tool response, CCE's agent pre-pass strips the verbose diagnostic noise while preserving the structured JSON payload
-- Symbol names and file paths extracted by Nyx.Navigator are tracked as entities — CCE keeps them in future turns even if the original tool response is compressed away
-- Nyx.Navigator's `ranked_skeleton` output (token-budget-aware) pairs naturally with CCE: Nyx.Navigator controls what goes in, CCE controls how long it stays
+**Relevant to CodeCartographer specifically:**
+- When CodeCartographer returns a symbol graph or dependency tree as a tool response, CCE's agent pre-pass strips the verbose diagnostic noise while preserving the structured JSON payload
+- Symbol names and file paths extracted by CodeCartographer are tracked as entities — CCE keeps them in future turns even if the original tool response is compressed away
+- CodeCartographer's `ranked_skeleton` output (token-budget-aware) pairs naturally with CCE: CodeCartographer controls what goes in, CCE controls how long it stays
 
 **Does NOT do:** Code analysis, memory maintenance, or embedding storage — it operates on messages, not source.
 
@@ -159,11 +159,11 @@ LLMRouter (published as `frugalroute`) is an OpenAI-compatible proxy that sits i
 
 **Supported providers:** Ollama (local), OpenAI, Anthropic, Google, Groq, Mistral, Kimi, DeepSeek, and any OpenAI-compatible endpoint.
 
-**Relevant to Nyx.Navigator specifically:**
-- Nyx.Navigator's MCP server (27 tools) can be registered in LLMRouter's MCP registry — any agent routed through FrugalRoute automatically inherits Nyx.Navigator's tools without separate configuration
-- Nyx.Navigator's `context_health` score (signal density, token count) can inform LLMRouter's model tier selection: a dense, well-structured context may not need the most capable model; a fragmented one should be escalated
+**Relevant to CodeCartographer specifically:**
+- CodeCartographer's MCP server (27 tools) can be registered in LLMRouter's MCP registry — any agent routed through FrugalRoute automatically inherits CodeCartographer's tools without separate configuration
+- CodeCartographer's `context_health` score (signal density, token count) can inform LLMRouter's model tier selection: a dense, well-structured context may not need the most capable model; a fragmented one should be escalated
 - `ranked_skeleton --budget N` produces a known token count that feeds directly into LLMRouter's context-window constraint check before dispatch, preventing silent truncation
-- Code analysis tasks where Nyx.Navigator's structural context was sufficient for a local model to answer correctly are ideal distillation candidates — the router's learning loop makes these cheaper over time
+- Code analysis tasks where CodeCartographer's structural context was sufficient for a local model to answer correctly are ideal distillation candidates — the router's learning loop makes these cheaper over time
 
 **Does NOT do:** Code parsing, memory, embeddings, or context compression — it is a routing and cost-optimization layer only.
 
@@ -173,10 +173,10 @@ LLMRouter (published as `frugalroute`) is an OpenAI-compatible proxy that sits i
 
 | Question | System |
 |----------|--------|
-| What files and symbols exist right now? | Nyx.Navigator |
+| What files and symbols exist right now? | CodeCartographer |
 | What are the exact types and call chains? | CKB |
-| Which files change together? | Nyx.Navigator (`git_cochange`) |
-| What's the blast radius of touching module X? | Nyx.Navigator + CKB |
+| Which files change together? | CodeCartographer (`git_cochange`) |
+| What's the blast radius of touching module X? | CodeCartographer + CKB |
 | What do we know about this system's design? | TruthKeeper |
 | Is our understanding of module X still accurate? | TruthKeeper |
 | How do we store semantic embeddings cheaply? | TurboQuant |
@@ -197,10 +197,10 @@ A fully-equipped LLM dev assistant uses all six layers:
 2. LLMRouter (routing, cost):
    → classifies as "coding / reasoning" task
    → checks semantic cache — no hit
-   → estimates token budget: Nyx.Navigator context will be ~4K tokens
+   → estimates token budget: CodeCartographer context will be ~4K tokens
    → selects cheapest model that covers reasoning + code at this context size
 
-3. Nyx.Navigator (fast, structural):
+3. CodeCartographer (fast, structural):
    → blast radius: 12 files import auth.rs
    → hotspot score: 87 (high churn × high complexity)
    → context_health: grade B (signal density 38%, position health good)
@@ -220,7 +220,7 @@ A fully-equipped LLM dev assistant uses all six layers:
 
 7. ContextCompressionEngine (conversation layer):
    → Earlier turns compressed: probe messages, verbose tool echoes, build log noise
-   → Preserved verbatim: Nyx.Navigator's dependency JSON, CKB symbol data, TruthKeeper facts
+   → Preserved verbatim: CodeCartographer's dependency JSON, CKB symbol data, TruthKeeper facts
    → "AuthService", "verifyToken", "session_v2.rs" tracked as entities across all future turns
    → If user asks a follow-up, originals can be restored from verbatim store
 
@@ -232,9 +232,9 @@ the conversation window stays clean, and the call was routed to the cheapest via
 
 ---
 
-## What Nyx.Navigator is NOT trying to replace
+## What CodeCartographer is NOT trying to replace
 
-Nyx.Navigator is intentionally scoped to fast structural analysis. It will not grow into:
+CodeCartographer is intentionally scoped to fast structural analysis. It will not grow into:
 - A persistent memory store (that's TruthKeeper)
 - A compiler or type checker (that's CKB / SCIP)
 - An embedding store (that's TurboQuant + a vector DB)

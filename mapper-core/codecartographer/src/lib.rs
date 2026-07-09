@@ -1,4 +1,4 @@
-//! C-FFI interface for Nyx.Navigator — consumed by CKB via CGo.
+//! C-FFI interface for CodeCartographer — consumed by CKB via CGo.
 //!
 //! Every function uses `extern "C"`, takes/returns `*const c_char` (C strings),
 //! and never panics across the FFI boundary. Errors are returned as JSON error objects.
@@ -6,7 +6,7 @@
 //! Memory contract:
 //!   - Input strings are borrowed (caller owns them).
 //!   - Output strings are allocated by Rust and MUST be freed by the caller
-//!     via `navigator_free_string()`.
+//!     via `codecartographer_free_string()`.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -38,13 +38,13 @@ use scanner::{is_ignored_path, scan_files_with_noise_tracking};
 // Memory management
 // ---------------------------------------------------------------------------
 
-/// Free a string returned by any `navigator_*` function.
+/// Free a string returned by any `codecartographer_*` function.
 ///
 /// # Safety
-/// `ptr` must be a valid pointer returned by a Nyx.Navigator FFI function,
+/// `ptr` must be a valid pointer returned by a CodeCartographer FFI function,
 /// and must not have been freed already.
 #[no_mangle]
-pub unsafe extern "C" fn navigator_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn codecartographer_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
@@ -95,7 +95,7 @@ fn git_head(root: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Persistent cache envelope stored at `<root>/.navigator_cache.json`.
+/// Persistent cache envelope stored at `<root>/.codecartographer_cache.json`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MapCache {
     head: String,
@@ -103,7 +103,7 @@ struct MapCache {
 }
 
 fn cache_path(root: &Path) -> PathBuf {
-    root.join(".navigator_cache.json")
+    root.join(".codecartographer_cache.json")
 }
 
 fn load_cache(root: &Path, current_head: &str) -> Option<HashMap<String, MappedFile>> {
@@ -170,7 +170,7 @@ pub(crate) fn build_mapped_files(root: &Path) -> Result<HashMap<String, MappedFi
 /// Scan a project directory and return the full project graph as JSON.
 ///
 /// Input:  `path` — absolute path to project root (C string)
-/// Output: JSON string (must be freed with `navigator_free_string`)
+/// Output: JSON string (must be freed with `codecartographer_free_string`)
 ///
 /// Response shape:
 /// ```json
@@ -187,7 +187,7 @@ pub(crate) fn build_mapped_files(root: &Path) -> Result<HashMap<String, MappedFi
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_map_project(path: *const c_char) -> *mut c_char {
+pub extern "C" fn codecartographer_map_project(path: *const c_char) -> *mut c_char {
     let path = match c_str_to_path(path) {
         Ok(p) => p,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
@@ -229,7 +229,7 @@ pub extern "C" fn navigator_map_project(path: *const c_char) -> *mut c_char {
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_health(path: *const c_char) -> *mut c_char {
+pub extern "C" fn codecartographer_health(path: *const c_char) -> *mut c_char {
     let path = match c_str_to_path(path) {
         Ok(p) => p,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
@@ -293,7 +293,7 @@ pub extern "C" fn navigator_health(path: *const c_char) -> *mut c_char {
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_check_layers(
+pub extern "C" fn codecartographer_check_layers(
     path: *const c_char,
     layers_path: *const c_char,
 ) -> *mut c_char {
@@ -377,7 +377,7 @@ pub extern "C" fn navigator_check_layers(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_simulate_change(
+pub extern "C" fn codecartographer_simulate_change(
     path: *const c_char,
     module_id: *const c_char,
     new_signature: *const c_char,
@@ -467,7 +467,7 @@ pub extern "C" fn navigator_simulate_change(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_skeleton_map(
+pub extern "C" fn codecartographer_skeleton_map(
     path: *const c_char,
     detail: *const c_char,
 ) -> *mut c_char {
@@ -556,7 +556,7 @@ pub extern "C" fn navigator_skeleton_map(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_module_context(
+pub extern "C" fn codecartographer_module_context(
     path: *const c_char,
     module_id: *const c_char,
     depth: u32,
@@ -625,11 +625,11 @@ pub extern "C" fn navigator_module_context(
 // FFI: Version
 // ---------------------------------------------------------------------------
 
-/// Return the Nyx.Navigator library version string (e.g. "9.0.0").
+/// Return the CodeCartographer library version string (e.g. "9.0.0").
 ///
-/// Output: raw C string — must be freed with `navigator_free_string`.
+/// Output: raw C string — must be freed with `codecartographer_free_string`.
 #[no_mangle]
-pub extern "C" fn navigator_version() -> *mut c_char {
+pub extern "C" fn codecartographer_version() -> *mut c_char {
     let version = env!("CARGO_PKG_VERSION");
     match CString::new(version) {
         Ok(cs) => cs.into_raw(),
@@ -659,7 +659,7 @@ pub extern "C" fn navigator_version() -> *mut c_char {
 /// ```
 /// Returns an empty object when the directory is not a git repo.
 #[no_mangle]
-pub extern "C" fn navigator_git_churn(path: *const c_char, limit: u32) -> *mut c_char {
+pub extern "C" fn codecartographer_git_churn(path: *const c_char, limit: u32) -> *mut c_char {
     let path = match c_str_to_path(path) {
         Ok(p) => p,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
@@ -696,7 +696,7 @@ pub extern "C" fn navigator_git_churn(path: *const c_char, limit: u32) -> *mut c
 /// ```
 /// Returns an empty array when the directory is not a git repo.
 #[no_mangle]
-pub extern "C" fn navigator_git_cochange(
+pub extern "C" fn codecartographer_git_cochange(
     path: *const c_char,
     limit: u32,
     min_count: u32,
@@ -756,7 +756,7 @@ pub extern "C" fn navigator_git_cochange(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_semidiff(
+pub extern "C" fn codecartographer_semidiff(
     path: *const c_char,
     commit1: *const c_char,
     commit2: *const c_char,
@@ -862,10 +862,10 @@ pub extern "C" fn navigator_semidiff(
 ///   `limit`     — commits to analyse (0 → 500)
 ///   `min_count` — minimum co-change count to include (0 → 2)
 ///
-/// Response shape: same as `navigator_git_cochange` (array of CoChangePair).
+/// Response shape: same as `codecartographer_git_cochange` (array of CoChangePair).
 /// Returns an empty array when the directory is not a git repo.
 #[no_mangle]
-pub extern "C" fn navigator_hidden_coupling(
+pub extern "C" fn codecartographer_hidden_coupling(
     path: *const c_char,
     limit: u32,
     min_count: u32,
@@ -967,7 +967,7 @@ pub extern "C" fn navigator_hidden_coupling(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_ranked_skeleton(
+pub extern "C" fn codecartographer_ranked_skeleton(
     path: *const c_char,
     focus_json: *const c_char,
     budget: u32,
@@ -1048,7 +1048,7 @@ pub extern "C" fn navigator_ranked_skeleton(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_unreferenced_symbols(path: *const c_char) -> *mut c_char {
+pub extern "C" fn codecartographer_unreferenced_symbols(path: *const c_char) -> *mut c_char {
     let path = match c_str_to_path(path) {
         Ok(p) => p,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
@@ -1137,7 +1137,7 @@ pub extern "C" fn navigator_unreferenced_symbols(path: *const c_char) -> *mut c_
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_search_content(
+pub extern "C" fn codecartographer_search_content(
     path: *const c_char,
     pattern: *const c_char,
     opts_json: *const c_char,
@@ -1187,7 +1187,7 @@ pub extern "C" fn navigator_search_content(
 /// { "ok": true, "data": { "files": [...], "totalMatches": N, "truncated": false } }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_find_files(
+pub extern "C" fn codecartographer_find_files(
     path: *const c_char,
     pattern: *const c_char,
     limit: u32,
@@ -1250,7 +1250,7 @@ pub extern "C" fn navigator_find_files(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_blast_radius(
+pub extern "C" fn codecartographer_blast_radius(
     path: *const c_char,
     target: *const c_char,
     max_related: u32,
@@ -1359,14 +1359,14 @@ pub extern "C" fn navigator_blast_radius(
 /// ```
 ///
 /// `snapshots` is ordered newest-first; `snapshots[0]` is always the current
-/// reading and carries the same health score as `navigator_health`.
+/// reading and carries the same health score as `codecartographer_health`.
 ///
 /// `trendAvailable` is `false` when the window contains fewer than two
 /// snapshots from distinct git commits (or, for non-git roots, when the
 /// window spans less than one hour).  Callers should suppress directional
 /// trend UI when this field is `false`.
 #[no_mangle]
-pub extern "C" fn navigator_evolution(
+pub extern "C" fn codecartographer_evolution(
     path: *const c_char,
     days: u32,
 ) -> *mut c_char {
@@ -1408,7 +1408,7 @@ pub extern "C" fn navigator_evolution(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_poll_changes(
+pub extern "C" fn codecartographer_poll_changes(
     path: *const c_char,
     since_ms: u64,
 ) -> *mut c_char {
@@ -1493,7 +1493,7 @@ pub extern "C" fn navigator_poll_changes(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_replace_content(
+pub extern "C" fn codecartographer_replace_content(
     path: *const c_char,
     pattern: *const c_char,
     replacement: *const c_char,
@@ -1578,7 +1578,7 @@ pub extern "C" fn navigator_replace_content(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_extract_content(
+pub extern "C" fn codecartographer_extract_content(
     path: *const c_char,
     pattern: *const c_char,
     opts_json: *const c_char,
@@ -1645,7 +1645,7 @@ pub extern "C" fn navigator_extract_content(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_context_health(
+pub extern "C" fn codecartographer_context_health(
     content: *const c_char,
     opts_json: *const c_char,
 ) -> *mut c_char {
@@ -1729,7 +1729,7 @@ pub extern "C" fn navigator_context_health(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_bm25_search(
+pub extern "C" fn codecartographer_bm25_search(
     path: *const c_char,
     query: *const c_char,
     opts_json: *const c_char,
@@ -1808,7 +1808,7 @@ pub extern "C" fn navigator_bm25_search(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_query_context(
+pub extern "C" fn codecartographer_query_context(
     path: *const c_char,
     query: *const c_char,
     opts_json: *const c_char,
@@ -1942,7 +1942,7 @@ pub extern "C" fn navigator_query_context(
 ///   "totalCochanges": 47, "entropy": 3.58, "dispersionScore": 87.0 }] }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_shotgun_surgery(
+pub extern "C" fn codecartographer_shotgun_surgery(
     path: *const c_char,
     limit: u32,
     min_partners: u32,
@@ -1984,7 +1984,7 @@ pub extern "C" fn navigator_shotgun_surgery(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_doc_index(path: *const c_char) -> *mut c_char {
+pub extern "C" fn codecartographer_doc_index(path: *const c_char) -> *mut c_char {
     let path = match c_str_to_path(path) {
         Ok(p) => p,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
@@ -2027,7 +2027,7 @@ pub extern "C" fn navigator_doc_index(path: *const c_char) -> *mut c_char {
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_doc_context(
+pub extern "C" fn codecartographer_doc_context(
     path: *const c_char,
     doc_path: *const c_char,
     budget: u32,
@@ -2138,7 +2138,7 @@ pub extern "C" fn navigator_doc_context(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_query_docs(
+pub extern "C" fn codecartographer_query_docs(
     path: *const c_char,
     query: *const c_char,
     opts_json: *const c_char,
@@ -2316,7 +2316,7 @@ pub extern "C" fn navigator_query_docs(
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn navigator_render_architecture(
+pub extern "C" fn codecartographer_render_architecture(
     path: *const c_char,
     format: *const c_char,
     focus: *const c_char,

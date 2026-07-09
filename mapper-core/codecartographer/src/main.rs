@@ -40,7 +40,7 @@ use sync::SyncService;
 const WATCH_DEBOUNCE_MS: u64 = 500;
 
 #[derive(Parser)]
-#[command(name = "navigator")]
+#[command(name = "codecartographer")]
 #[command(about = "Memory Unit - Deterministic codebase mapper for AI context injection")]
 #[command(version)]
 struct Cli {
@@ -106,12 +106,12 @@ enum Commands {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Initialize Nyx.Navigator in the current project
+    /// Initialize CodeCartographer in the current project
     Init {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Initialize Nyx.Navigator with CKB integration
+    /// Initialize CodeCartographer with CKB integration
     InitCkb {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
@@ -179,7 +179,7 @@ enum Commands {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Manage global navigator configuration
+    /// Manage global codecartographer configuration
     Config {
         /// Set the default output target globally (claude, cursor, raw)
         #[arg(long, value_name = "TARGET")]
@@ -705,7 +705,7 @@ enum LayerCommands {
     },
     /// Validate source files against layers.toml and report violations
     Validate {
-        /// Path to layers.toml (default: ./layers.toml or .navigator/layers.toml)
+        /// Path to layers.toml (default: ./layers.toml or .codecartographer/layers.toml)
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
         /// Emit machine-readable JSON
@@ -732,7 +732,7 @@ enum LayerCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
-    // Resolve target: CLI flag > per-repo .navigator/config.toml > global config > claude
+    // Resolve target: CLI flag > per-repo .codecartographer/config.toml > global config > claude
     let target = resolve_target(cli.target, &cwd);
     let ignore_set: HashSet<String> = cli.ignore_files.into_iter().collect();
 
@@ -1006,7 +1006,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
     println!("============================================");
     println!("  Mode: Skeleton Map ONLY (lightweight)");
     println!("  Debounce: {}ms", WATCH_DEBOUNCE_MS);
-    println!("  Full source: Use 'navigator copy' when needed");
+    println!("  Full source: Use 'codecartographer copy' when needed");
     println!("============================================");
     println!("Press Ctrl+C to stop\n");
 
@@ -1022,11 +1022,11 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
 
     // Write lightweight map file
     let formatter = get_formatter(target);
-    let map_filename = format!("navigator_map.{}", formatter.extension());
+    let map_filename = format!("codecartographer_map.{}", formatter.extension());
     let map_path = output_dir.join(&map_filename);
     fs::write(&map_path, &output)?;
 
-    print_navigator_report(mapped_files.len(), &ignored, tokens, &map_filename);
+    print_codecartographer_report(mapped_files.len(), &ignored, tokens, &map_filename);
     println!("  Watching for changes...\n");
 
     // Setup file watcher with 500ms debounce
@@ -1041,7 +1041,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                 let relevant = events.iter().any(|e| {
                     e.kind == DebouncedEventKind::Any
                         && !e.path.ends_with(&map_filename)
-                        && !e.path.ends_with(".navigator_memory.json")
+                        && !e.path.ends_with(".codecartographer_memory.json")
                         && !e.path.ends_with("context.xml")
                         && !e.path.ends_with("context.md")
                         && !e.path.ends_with("context.json")
@@ -1083,7 +1083,7 @@ fn live_watch_mode(root: &Path, output_dir: &Path, target: OutputTarget) -> Resu
                                 "changedFiles": changed_paths,
                             });
                             let _ = fs::write(
-                                root.join(".navigator_watch_state.json"),
+                                root.join(".codecartographer_watch_state.json"),
                                 serde_json::to_string_pretty(&sentinel).unwrap_or_default(),
                             );
                         }
@@ -1307,7 +1307,7 @@ fn copy_mode(root: &Path, target: OutputTarget, ignore_set: &HashSet<String>) ->
     let formatter = get_formatter(target);
     let output = formatter.format(&memory);
     let tokens = estimate_tokens(&output);
-    print_navigator_report(memory.files.len(), &ignored, tokens, "(clipboard)");
+    print_codecartographer_report(memory.files.len(), &ignored, tokens, "(clipboard)");
 
     println!(
         "  Tokens  : {}  (API input cost ~${:.2} if billed per token)",
@@ -1421,10 +1421,10 @@ fn map_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) ->
     let tokens = estimate_tokens(&output);
 
     let formatter = get_formatter(target);
-    let filename = format!("navigator_map.{}", formatter.extension());
+    let filename = format!("codecartographer_map.{}", formatter.extension());
     fs::write(output_dir.join(&filename), &output)?;
 
-    print_navigator_report(mapped_files.len(), &ignored, tokens, &filename);
+    print_codecartographer_report(mapped_files.len(), &ignored, tokens, &filename);
     handle_token_budget_copy(&output, tokens, copy)?;
     Ok(())
 }
@@ -1461,7 +1461,7 @@ fn source_mode(
     let formatter = get_formatter(target);
     let filename = format!("context.{}", formatter.extension());
 
-    print_navigator_report(memory.files.len(), &ignored, tokens, &filename);
+    print_codecartographer_report(memory.files.len(), &ignored, tokens, &filename);
     handle_token_budget_copy(&output, tokens, copy)?;
     Ok(())
 }
@@ -1485,7 +1485,7 @@ fn sync_mode(root: &Path, output_dir: &Path, target: OutputTarget, copy: bool) -
     let tokens = estimate_tokens(&output);
     let formatter = get_formatter(target);
     let filename = format!("context.{}", formatter.extension());
-    print_navigator_report(memory.files.len(), &ignored, tokens, &filename);
+    print_codecartographer_report(memory.files.len(), &ignored, tokens, &filename);
     handle_token_budget_copy(&output, tokens, copy)?;
     Ok(())
 }
@@ -1539,10 +1539,10 @@ fn format_map_json(files: &[MappedFile]) -> String {
 }
 
 // =============================================================================
-// Nyx.Navigator Report
+// CodeCartographer Report
 // =============================================================================
 
-fn print_navigator_report(included_count: usize, ignored: &[IgnoredFile], tokens: usize, filename: &str) {
+fn print_codecartographer_report(included_count: usize, ignored: &[IgnoredFile], tokens: usize, filename: &str) {
     println!(
         "  {} files · {} · {}",
         included_count,
@@ -1666,7 +1666,7 @@ fn resolve_target(cli_target: Option<Target>, cwd: &Path) -> OutputTarget {
         return t.into();
     }
     // Per-repo config
-    let repo_cfg_path = cwd.join(".navigator").join("config.toml");
+    let repo_cfg_path = cwd.join(".codecartographer").join("config.toml");
     if let Ok(content) = fs::read_to_string(repo_cfg_path) {
         if let Ok(cfg) = toml::from_str::<RepoConfigFile>(&content) {
             if let Some(ref t) = cfg.defaults.target {
@@ -1688,7 +1688,7 @@ fn resolve_target(cli_target: Option<Target>, cwd: &Path) -> OutputTarget {
 
 
 fn init_local_mode(root: &Path) -> Result<()> {
-    let config_path = root.join(".navigator").join("config.toml");
+    let config_path = root.join(".codecartographer").join("config.toml");
     if config_path.exists() {
         println!("Config already exists at: {}", config_path.display());
         println!("Edit it directly to adjust defaults and layer config.");
@@ -1703,7 +1703,7 @@ fn init_local_mode(root: &Path) -> Result<()> {
         .unwrap_or("my-project");
 
     let config_content = format!(
-        r#"# Nyx.Navigator Configuration
+        r#"# CodeCartographer Configuration
 version = "1.0.0"
 project = "{}"
 
@@ -1727,17 +1727,17 @@ target = "claude"
     );
 
     fs::write(&config_path, config_content)?;
-    println!("Initialized .navigator/config.toml");
+    println!("Initialized .codecartographer/config.toml");
     println!("Project: {}", project_name);
     println!();
     println!("Next steps:");
-    println!("  navigator source          — generate context");
+    println!("  codecartographer source          — generate context");
     println!("  Edit {} to configure layers and defaults", config_path.display());
     Ok(())
 }
 
 fn status_mode(root: &Path) -> Result<()> {
-    println!("Nyx.Navigator Status");
+    println!("CodeCartographer Status");
     println!("============================================");
     println!("Root: {}", root.display());
     println!();
@@ -1745,7 +1745,7 @@ fn status_mode(root: &Path) -> Result<()> {
     // Local memory
     let memory = Memory::load(root).unwrap_or_default();
     if memory.files.is_empty() {
-        println!("Local memory: not initialized (run 'navigator source')");
+        println!("Local memory: not initialized (run 'codecartographer source')");
     } else {
         println!("Tracked files:  {}", memory.files.len());
         println!("Memory version: {}", memory.version);
@@ -1765,24 +1765,24 @@ fn status_mode(root: &Path) -> Result<()> {
     println!("Global target:   {}", target_status);
 
     // Per-repo config
-    let repo_cfg = root.join(".navigator").join("config.toml");
+    let repo_cfg = root.join(".codecartographer").join("config.toml");
     if repo_cfg.exists() {
         println!("Repo config:     {}", repo_cfg.display());
     } else {
-        println!("Repo config:     not present (run 'navigator init')");
+        println!("Repo config:     not present (run 'codecartographer init')");
     }
 
-    // .navigatorignore
-    let ignore_path = root.join(".navigatorignore");
+    // .codecartographerignore
+    let ignore_path = root.join(".codecartographerignore");
     if ignore_path.exists() {
         let pattern_count = fs::read_to_string(&ignore_path)
             .unwrap_or_default()
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
             .count();
-        println!(".navigatorignore: {} pattern(s)", pattern_count);
+        println!(".codecartographerignore: {} pattern(s)", pattern_count);
     } else {
-        println!(".navigatorignore: not present");
+        println!(".codecartographerignore: not present");
     }
 
     println!("============================================");
@@ -1795,8 +1795,8 @@ fn config_mode(
 ) -> Result<()> {
     if default_target.is_none() && !show {
         println!("Usage:");
-        println!("  navigator config --show");
-        println!("  navigator config --default-target <claude|cursor|raw>");
+        println!("  codecartographer config --show");
+        println!("  codecartographer config --default-target <claude|cursor|raw>");
         return Ok(());
     }
 
@@ -1861,11 +1861,11 @@ fn format_timestamp(secs: u64) -> String {
 
 fn init_ckb_mode(root: &Path, ckb_url: Option<&str>, webhook_url: Option<&str>) -> Result<()> {
     println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║      Nyx.Navigator v1.0.0 - CKB Integration Setup           ║");
+    println!("║      CodeCartographer v1.0.0 - CKB Integration Setup           ║");
     println!("╚═══════════════════════════════════════════════════════════╝");
     println!();
 
-    let config_path = root.join(".navigator").join("config.toml");
+    let config_path = root.join(".codecartographer").join("config.toml");
     let config_dir = config_path.parent().unwrap();
     std::fs::create_dir_all(config_dir)?;
 
@@ -1873,7 +1873,7 @@ fn init_ckb_mode(root: &Path, ckb_url: Option<&str>, webhook_url: Option<&str>) 
     let webhook_url = webhook_url.unwrap_or("http://localhost:8081/webhook");
 
     let config_content = format!(
-        r#"# Nyx.Navigator Configuration
+        r#"# CodeCartographer Configuration
 version = "1.0.0"
 
 [ckb]
@@ -1907,14 +1907,14 @@ events = ["graph_updated", "module_changed", "layer_violation"]
     println!();
     println!("📋 Next steps:");
     println!("  1. Add layer definitions to {}", config_path.display());
-    println!("  2. Run 'navigator map' to generate initial graph");
-    println!("  3. Run 'navigator health' to see architectural health");
+    println!("  2. Run 'codecartographer map' to generate initial graph");
+    println!("  3. Run 'codecartographer health' to see architectural health");
     println!();
     println!("🔗 CKB Integration:");
     println!("  - CKB URL: {}", ckb_url);
     println!("  - Webhook URL: {}", webhook_url);
     println!();
-    println!("✅ Nyx.Navigator is ready to integrate with CKB!");
+    println!("✅ CodeCartographer is ready to integrate with CKB!");
 
     Ok(())
 }
@@ -1926,7 +1926,7 @@ fn health_mode(root: &Path, compare: Option<&str>, json_out: bool) -> Result<()>
 
     if !json_out {
         println!("╔═══════════════════════════════════════════════════════════╗");
-        println!("║         Nyx.Navigator - Architectural Health Report          ║");
+        println!("║         CodeCartographer - Architectural Health Report          ║");
         println!("╚═══════════════════════════════════════════════════════════╝");
         println!();
     }
@@ -2148,7 +2148,7 @@ fn health_mode(root: &Path, compare: Option<&str>, json_out: bool) -> Result<()>
 
     if score_now < 70.0 {
         println!("⚠️  Architectural health is below acceptable threshold.");
-        println!("   Run 'navigator map --detail extended' for more information.");
+        println!("   Run 'codecartographer map --detail extended' for more information.");
     } else {
         println!("✅ Architecture looks healthy!");
     }
@@ -2769,7 +2769,7 @@ fn cochange_mode(
     if filtered.is_empty() {
         println!("No co-change pairs found with count >= {}.", min_count);
         if min_count > 2 {
-            println!("Tip: try a lower threshold — e.g. `navigator cochange --min-count 2`");
+            println!("Tip: try a lower threshold — e.g. `codecartographer cochange --min-count 2`");
         }
         return Ok(());
     }
@@ -3591,8 +3591,8 @@ fn diagram_mode(
     let rendered = diagram::render(&graph, &opts).map_err(|e| anyhow::anyhow!(e))?;
 
     if rendered.node_count == 0 {
-        eprintln!("No nodes to diagram — run `navigator source` first to index this project.");
-        eprintln!("Or point at a specific path: navigator diagram <path>");
+        eprintln!("No nodes to diagram — run `codecartographer source` first to index this project.");
+        eprintln!("Or point at a specific path: codecartographer diagram <path>");
         return Ok(());
     }
 
@@ -3672,7 +3672,7 @@ fn llmstxt_mode(root: &Path, output: Option<&Path>) -> Result<()> {
 
     let total_files = mapped.len();
     let mut content = format!(
-        "# {}\n\n> Codebase index generated by Nyx.Navigator. {} modules.\n\n## Key Modules\n\n",
+        "# {}\n\n> Codebase index generated by CodeCartographer. {} modules.\n\n## Key Modules\n\n",
         project_name, total_files
     );
 
@@ -3690,7 +3690,7 @@ fn llmstxt_mode(root: &Path, output: Option<&Path>) -> Result<()> {
     }
 
     content.push_str("\n## Ignored\n\n");
-    content.push_str("Built with [Nyx.Navigator](https://github.com/SimplyLiz/Nyx.Navigator) v1.3.0\n");
+    content.push_str("Built with [CodeCartographer](https://github.com/SimplyLiz/CodeCartographer) v1.3.0\n");
 
     if let Some(out_path) = output {
         fs::write(out_path, &content)?;
@@ -3792,7 +3792,7 @@ fn claudemd_mode(root: &Path, output: Option<&Path>) -> Result<()> {
 
     let mut doc = format!(
         "# Architecture Guide — {}\n\
-         <!-- Auto-generated by Nyx.Navigator v1.3.0. Re-run: navigator claudemd -->\n\n\
+         <!-- Auto-generated by CodeCartographer v1.3.0. Re-run: codecartographer claudemd -->\n\n\
          ## Overview\n\
          - **Files**: {} | **Dependencies**: {} | **Health**: {:.0}/100\n\
          - **Languages**: {}\n\n",
@@ -3887,11 +3887,11 @@ fn claudemd_mode(root: &Path, output: Option<&Path>) -> Result<()> {
 
     // Quick reference
     doc.push_str("## Quick Reference\n```\n\
-        navigator serve       # Start MCP server\n\
-        navigator health      # Health report\n\
-        navigator hotspots    # Churn × complexity\n\
-        navigator dead        # Dead code candidates\n\
-        navigator semidiff HEAD~1  # What changed last commit\n\
+        codecartographer serve       # Start MCP server\n\
+        codecartographer health      # Health report\n\
+        codecartographer hotspots    # Churn × complexity\n\
+        codecartographer dead        # Dead code candidates\n\
+        codecartographer semidiff HEAD~1  # What changed last commit\n\
         ```\n");
 
     if let Some(out_path) = output {
@@ -3985,7 +3985,7 @@ fn semidiff_mode(root: &Path, commit1: &str, commit2: &str) -> Result<()> {
 // =============================================================================
 
 /// Scan and extract skeleton for every project file, with a parallel rayon scan
-/// and a git-HEAD-keyed persistent cache (.navigator_cache.json).
+/// and a git-HEAD-keyed persistent cache (.codecartographer_cache.json).
 fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, MappedFile>> {
     use rayon::prelude::*;
     use serde::{Deserialize, Serialize};
@@ -4004,7 +4004,7 @@ fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, Mapp
         .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
         .unwrap_or_default();
 
-    let cache_path = root.join(".navigator_cache.json");
+    let cache_path = root.join(".codecartographer_cache.json");
 
     // Try cache hit
     if !head.is_empty() {
@@ -4198,13 +4198,13 @@ fn load_layer_config(root: &Path, explicit: Option<&Path>) -> Result<crate::laye
     if let Some(p) = explicit {
         return LayerConfig::from_file(p).map_err(|e| anyhow::anyhow!(e));
     }
-    for candidate in &["layers.toml", ".navigator/layers.toml"] {
+    for candidate in &["layers.toml", ".codecartographer/layers.toml"] {
         let p = root.join(candidate);
         if p.exists() {
             return LayerConfig::from_file(&p).map_err(|e| anyhow::anyhow!(e));
         }
     }
-    anyhow::bail!("No layers.toml found. Run 'navigator layers init' to generate one.")
+    anyhow::bail!("No layers.toml found. Run 'codecartographer layers init' to generate one.")
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
@@ -4279,7 +4279,7 @@ fn layers_init(root: &Path, output: Option<&Path>) -> Result<()> {
 
     // Compose the layers.toml.
     let mut out = String::new();
-    out.push_str("# Generated by `navigator layers init`\n");
+    out.push_str("# Generated by `codecartographer layers init`\n");
     out.push_str("# Edit layer names and folder assignments to match your architecture.\n\n");
 
     out.push_str("[layers]\n");
@@ -4309,7 +4309,7 @@ fn layers_init(root: &Path, output: Option<&Path>) -> Result<()> {
         Some(p) => {
             std::fs::write(p, &out)?;
             println!("Wrote proposed layers.toml to {}", p.display());
-            println!("Review and edit, then run `navigator layers validate`.");
+            println!("Review and edit, then run `codecartographer layers validate`.");
         }
         None => {
             print!("{}", out);
@@ -5526,15 +5526,15 @@ fn context_health_mode(
     let content = if let Some(path) = file {
         fs::read_to_string(path).with_context(|| format!("Reading {}", path.display()))?
     } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        // No file arg and stdin is a terminal — fall back to navigator_map.xml in cwd.
-        let map_path = std::path::Path::new("navigator_map.xml");
+        // No file arg and stdin is a terminal — fall back to codecartographer_map.xml in cwd.
+        let map_path = std::path::Path::new("codecartographer_map.xml");
         if map_path.exists() {
-            eprintln!("(reading navigator_map.xml)");
-            fs::read_to_string(map_path).context("Reading navigator_map.xml")?
+            eprintln!("(reading codecartographer_map.xml)");
+            fs::read_to_string(map_path).context("Reading codecartographer_map.xml")?
         } else {
             anyhow::bail!(
-                "No input: pass a file (`navigator context-health FILE`) or pipe content, \
-                 or run `navigator map` first to generate navigator_map.xml"
+                "No input: pass a file (`codecartographer context-health FILE`) or pipe content, \
+                 or run `codecartographer map` first to generate codecartographer_map.xml"
             );
         }
     } else {
@@ -5642,7 +5642,7 @@ fn snapshot_mode(cwd: &Path, command: SnapshotCommands) -> Result<()> {
 }
 
 fn snapshot_dir(root: &Path) -> PathBuf {
-    root.join(".navigator").join("snapshots")
+    root.join(".codecartographer").join("snapshots")
 }
 
 fn snapshot_path(root: &Path, tag: &str) -> PathBuf {
@@ -6067,6 +6067,6 @@ fn update_mode() -> Result<()> {
 
     println!("install.sh not found next to this binary.");
     println!("To update manually, clone the repo and run: bash install.sh");
-    println!("Or run: cargo install --path mapper-core/nyx-navigator");
+    println!("Or run: cargo install --path mapper-core/CodeCartographer");
     Ok(())
 }
