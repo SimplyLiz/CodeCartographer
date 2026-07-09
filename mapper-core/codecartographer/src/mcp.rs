@@ -1269,24 +1269,14 @@ impl McpServer {
     }
 
     fn create_resources() -> Vec<McpResource> {
-        vec![
-            McpResource {
-                uri: "codecartographer://project-graph".to_string(),
-                name: "project_graph".to_string(),
-                description: "Complete project dependency graph as JSON. Prefer get_project_graph \
-                              for on-demand retrieval; use this resource for polling or caching."
-                    .to_string(),
-                mime_type: Some("application/json".to_string()),
-            },
-            McpResource {
-                uri: "codecartographer://module-index".to_string(),
-                name: "module_index".to_string(),
-                description: "Flat index of all project modules with their public signatures. \
-                              Useful for enumeration before targeted get_module_context calls."
-                    .to_string(),
-                mime_type: Some("application/json".to_string()),
-            },
-        ]
+        // Intentionally empty. The old `project-graph` and `module-index` resources each
+        // serialized the WHOLE graph / module map as a single JSON blob — the exact
+        // "dump everything" anti-pattern this tool exists to avoid. Worse, editors surface
+        // MCP resources in the `@`-mention menu, so selecting one tried to inline the entire
+        // repo into the prompt and failed with "too big for the index". Everything they
+        // offered is available on-demand and budget-aware via tools instead:
+        // `get_project_graph`, `skeleton_map`, `ranked_skeleton --budget N`.
+        vec![]
     }
 
     fn create_prompts() -> Vec<McpPrompt> {
