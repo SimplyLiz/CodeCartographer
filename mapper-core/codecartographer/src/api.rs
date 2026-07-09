@@ -1275,13 +1275,33 @@ impl<'a> ImportIndex<'a> {
     /// Pick the candidate whose module_id best matches the import path, preferring a
     /// path-suffix relationship ("core/object/object.h" → "object/object.h") and, among
     /// ties, the shortest (closest) path. Deterministic — never HashMap iteration order.
+    /// Number of leading DIRECTORY segments shared by two repo-relative paths. Used to
+    /// prefer the include target nearest the requesting file when a basename is ambiguous
+    /// (`#include "foo.h"` with `foo.h` in several directories → pick the closest one).
+    fn shared_dir_segments(a: &str, b: &str) -> usize {
+        let a_dirs: Vec<&str> = a.split('/').collect();
+        let b_dirs: Vec<&str> = b.split('/').collect();
+        let a_len = a_dirs.len().saturating_sub(1); // drop filename
+        let b_len = b_dirs.len().saturating_sub(1);
+        let mut n = 0;
+        for i in 0..a_len.min(b_len) {
+            if a_dirs[i] == b_dirs[i] {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
     fn best_suffix(cands: &[&'a str], norm: &str, source: &str) -> Option<String> {
-        let mut best: Option<(usize, &'a str)> = None;
+        // (suffix_score, proximity_to_source, candidate). Proximity breaks suffix-score ties
+        // so an ambiguous bare basename resolves to the nearest file, not an arbitrary one.
+        let mut best: Option<(usize, usize, &'a str)> = None;
         for &m in cands {
             if m == source {
                 continue;
             }
-            // How strongly `m` matches `norm`: exact, or one is a path-suffix of the other.
             let score = if m == norm {
                 norm.len() + 1
             } else if norm.ends_with(&format!("/{m}")) {
@@ -1291,19 +1311,33 @@ impl<'a> ImportIndex<'a> {
             } else {
                 continue;
             };
-            match best {
-                Some((bs, bm)) if bs > score || (bs == score && bm.len() <= m.len()) => {}
-                _ => best = Some((score, m)),
+            let prox = Self::shared_dir_segments(m, source);
+            let better = match best {
+                None => true,
+                Some((bs, bp, bm)) => {
+                    score > bs
+                        || (score == bs && prox > bp)
+                        || (score == bs && prox == bp && m.len() < bm.len())
+                }
+            };
+            if better {
+                best = Some((score, prox, m));
             }
         }
-        best.map(|(_, m)| m.to_string())
+        best.map(|(_, _, m)| m.to_string())
     }
 
     fn pick_deterministic(cands: &[&'a str], source: &str) -> Option<String> {
+        // Prefer the candidate closest to the source directory, then the shortest path.
         cands
             .iter()
             .filter(|m| **m != source)
-            .min_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)))
+            .max_by(|a, b| {
+                Self::shared_dir_segments(a, source)
+                    .cmp(&Self::shared_dir_segments(b, source))
+                    .then_with(|| b.len().cmp(&a.len())) // shorter path wins the tie
+                    .then_with(|| b.cmp(a))
+            })
             .map(|m| m.to_string())
     }
 
