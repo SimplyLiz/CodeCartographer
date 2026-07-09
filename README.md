@@ -53,6 +53,35 @@ codecartographer query "how does authentication work?"
 | `codecartographer sync` | Incremental update (changed files only) | Keep snapshot fresh |
 | `codecartographer watch` | Live watcher, updates skeleton on save | Ongoing sessions |
 
+## Language support
+
+Cartographer is a **lightweight, tree-sitter navigator** — it maps a repo fast so an AI can
+find its way. It is deliberately *not* a compiler: for macro-aware include resolution,
+type-resolved calls, or data-flow, it defers to CKB. Quality below is measured against the
+navigation bar ("point me at the right symbol/file"), not compiler precision.
+
+| Language | Symbols | Imports | Call graph¹ | Class diagram | Notes / caveats |
+|----------|:------:|:------:|:----------:|:------------:|-----------------|
+| Rust | Full | ✅ | ✅ | ✅ | enum variants & struct fields not itemised |
+| Python | Full | ✅ | ✅ | ✅ | decorators applied but not surfaced; module consts = ALL-CAPS only |
+| Go | Full | ✅ | ✅ | ✅ | struct fields / interface methods not itemised |
+| TypeScript | Full | ✅ | — | ✅ | generics/namespaces not itemised; const-arrow fns captured |
+| JavaScript | Full | ✅ | — | — | const-arrow fns captured |
+| C | Full | ✅ `#include` | ✅ | — | macros partial; fields not itemised |
+| C++ | Full | ✅ `#include` | ✅ | — | templates/macros partial; `#include` resolved heuristically (no `-I`/macro expansion — CKB's job) |
+| Java | Good | ✅ | — | — | classes/interfaces/enums/methods/fields |
+| C# | Good | ✅ | — | — | classes/structs/interfaces/enums/methods/properties |
+| Kotlin | Good | ✅ | — | — | classes/objects/functions/properties |
+| Swift | Good | ✅ | — | — | class/struct/enum all reported as types; protocols captured |
+| PHP | Good | ✅ | — | — | classes/interfaces/traits/enums/functions/methods |
+| Ruby | Good | ✅ `require` | — | — | classes/modules/methods (`def…end`) |
+
+**Full** = mature, extensively tested. **Good** = symbols + imports (skeleton, `ranked_skeleton`,
+`reach_symbol`, search all work); file-local call/class graphs not yet wired.
+
+¹ *Call graph* = file-local **callee** resolution. `reach_symbol` **callers** are found by text
+search and work for **every** language, new ones included.
+
 ## Architecture & Analysis
 
 | Command | Description |
