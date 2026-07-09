@@ -4,6 +4,16 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-07-09
+
+### Removed — the two MCP resources (`project-graph`, `module-index`)
+
+They each serialized the entire graph / module map as one JSON blob. Editors surface
+MCP resources in the `@`-mention menu, so selecting one tried to inline the whole repo
+into the prompt and failed with "too big for the index" — the exact "dump everything"
+anti-pattern this tool avoids. Everything they offered is available on-demand and
+budget-aware via tools: `get_project_graph`, `skeleton_map`, `ranked_skeleton --budget N`.
+
 ## [1.3.1] - 2026-07-09
 
 ### Added — call graphs & class diagrams for the six new languages
