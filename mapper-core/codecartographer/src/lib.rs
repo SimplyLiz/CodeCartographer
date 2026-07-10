@@ -1874,6 +1874,19 @@ pub extern "C" fn codecartographer_query_context(
     }
     focus_files.truncate(max_search);
 
+    // Code-question retrieval: bias focus seeds toward actual source files so
+    // raw-content BM25 doesn't latch onto data/doc files (e.g. Godot's
+    // doc/classes/*.xml) that mention the query terms but carry no code. Fall
+    // back to the unfiltered list if nothing source-like matched.
+    let code_seeds: Vec<String> = focus_files
+        .iter()
+        .filter(|p| scanner::is_source_file(std::path::Path::new(p.as_str())))
+        .cloned()
+        .collect();
+    if !code_seeds.is_empty() {
+        focus_files = code_seeds;
+    }
+
     // Step 2: ranked skeleton personalised to focus files
     let mapped_files = match build_mapped_files(&path) {
         Ok(m) => m,

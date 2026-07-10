@@ -260,10 +260,9 @@ fn resolve_symbol(
         .trim()
         .to_string();
 
-    let mut candidates: Vec<AmbiguousCandidate> = vec![];
-    let mut best: Option<RootSymbol> = None;
-
-    'outer: for mf in mapped {
+    // Gather every signature whose name matches, then rank.
+    let mut matches: Vec<RootSymbol> = vec![];
+    for mf in mapped {
         // Apply file filter if present.
         if let Some(ff) = file_filter {
             if !mf.path.contains(ff) {
@@ -272,12 +271,10 @@ fn resolve_symbol(
         }
 
         for sig in &mf.signatures {
-            let matches = sig_matches_query(sig, &name);
-            if !matches {
+            if !sig_matches_query(sig, &name) {
                 continue;
             }
-
-            let root = RootSymbol {
+            matches.push(RootSymbol {
                 file: mf.path.clone(),
                 line: sig.line_start as u32 + 1,
                 kind: sig.kind,
@@ -290,48 +287,61 @@ fn resolve_symbol(
                 qualified_name: sig.qualified_name.clone(),
                 doc_comment: sig.doc_comment.clone(),
                 visibility: detect_visibility(&sig.raw),
-            };
-
-            if best.is_none() {
-                best = Some(root);
-            } else {
-                // More than one — collect for ambiguity error.
-                if candidates.is_empty() {
-                    if let Some(ref b) = best {
-                        candidates.push(AmbiguousCandidate {
-                            file: b.file.clone(),
-                            line: b.line,
-                            sig: b.sig.clone(),
-                        });
-                    }
-                }
-                // Use mf.path directly — the root we built already holds it.
-                candidates.push(AmbiguousCandidate {
-                    file: root.file.clone(),
-                    line: root.line,
-                    sig: root.sig.clone(),
-                });
-                // Keep scanning to collect all candidates for the error message.
-                continue 'outer;
-            }
+            });
         }
     }
 
-    if !candidates.is_empty() {
-        // Add the best we found too.
-        if let Some(b) = best {
-            if !candidates.iter().any(|c| c.file == b.file && c.line == b.line) {
-                candidates.insert(0, AmbiguousCandidate {
-                    file: b.file,
-                    line: b.line,
-                    sig: b.sig,
-                });
-            }
-        }
-        return Err(ReachError::Ambiguous(candidates));
+    if matches.is_empty() {
+        return Err(ReachError::NotFound(name));
+    }
+    if matches.len() == 1 {
+        return Ok(matches.swap_remove(0));
     }
 
-    best.ok_or_else(|| ReachError::NotFound(name))
+    // Rank so a real definition wins over a mere declaration. In C/C++ the same
+    // name appears as a prototype / forward-decl (`void f();`, `class C;`) in
+    // headers and as the actual definition elsewhere; without ranking every
+    // lookup is reported "ambiguous" and the tool is unusable. Higher = more
+    // definition-like. Only when the top score ties across several candidates do
+    // we surface a genuine ambiguity.
+    let score = |r: &RootSymbol| -> i32 {
+        let mut s = 0;
+        // A line ending in ';' is a declaration/prototype, not a definition.
+        if !r.sig.trim_end().ends_with(';') {
+            s += 10;
+        }
+        s += match r.kind {
+            SymbolKind::Class
+            | SymbolKind::Struct
+            | SymbolKind::Interface
+            | SymbolKind::Enum
+            | SymbolKind::TypeAlias => 3,
+            SymbolKind::Function | SymbolKind::Method => 2,
+            SymbolKind::Constructor => 1,
+            _ => 0,
+        };
+        s
+    };
+
+    let scores: Vec<i32> = matches.iter().map(&score).collect();
+    let best_score = *scores.iter().max().unwrap();
+    let top_idxs: Vec<usize> = (0..matches.len()).filter(|&i| scores[i] == best_score).collect();
+
+    if top_idxs.len() == 1 {
+        return Ok(matches.swap_remove(top_idxs[0]));
+    }
+
+    // Genuinely ambiguous — report only the top-tier (equally definition-like)
+    // candidates, not every prototype and forward-declaration.
+    let candidates: Vec<AmbiguousCandidate> = top_idxs
+        .iter()
+        .map(|&i| AmbiguousCandidate {
+            file: matches[i].file.clone(),
+            line: matches[i].line,
+            sig: matches[i].sig.clone(),
+        })
+        .collect();
+    Err(ReachError::Ambiguous(candidates))
 }
 
 fn sig_matches_query(sig: &Signature, query: &str) -> bool {
@@ -386,7 +396,12 @@ fn find_callers(
     let search_opts = SearchOptions {
         word_regexp: true,
         case_sensitive: true,
-        max_results: opts.max_callers * 3, // over-fetch; we'll filter definitions
+        // Fetch every match (no truncation): search_content truncates globally in
+        // file-alphabetical order, so on a large tree a bounded window is entirely
+        // consumed by early-alphabet docs (CHANGELOG.md) and headers we filter out
+        // below — real .cpp/.h usages under scene/, editor/ never make the window
+        // and callers read as "none found". We trim to max_callers after filtering.
+        max_results: 0,
         context_lines: 0,
         ..Default::default()
     };
@@ -430,6 +445,15 @@ fn find_callers(
         // Skip lines that look like definitions, imports, or comments.
         let trimmed = m.line.trim();
         if is_definition_line(trimmed) || is_import_line(trimmed) || is_comment_line(trimmed) {
+            continue;
+        }
+
+        // Skip matches that occur only inside a string literal, e.g. `"Control"`
+        // or `insert("PopupMenu", …)`. Class names that are common English words
+        // (Control, Container, Range, Timer…) otherwise flood the caller list
+        // with string-constant false positives. If the name no longer appears as
+        // a word once string literals are stripped, it wasn't a real reference.
+        if !name_appears_outside_strings(trimmed, &root.name) {
             continue;
         }
 
@@ -478,6 +502,46 @@ fn find_callers(
     // If we're not including tests, the count is what we collapsed.
     let collapsed = if opts.include_tests { 0 } else { test_count };
     (callers, collapsed)
+}
+
+/// True if `name` appears as a whole word in `line` after double-quoted string
+/// literals are removed. Used to reject caller matches that are only string
+/// constants (e.g. `"Control"`), which are common for English-word class names.
+fn name_appears_outside_strings(line: &str, name: &str) -> bool {
+    let mut stripped = String::with_capacity(line.len());
+    let mut in_str = false;
+    let mut prev = '\0';
+    for c in line.chars() {
+        if c == '"' && prev != '\\' {
+            in_str = !in_str;
+            prev = c;
+            continue;
+        }
+        if !in_str {
+            stripped.push(c);
+        }
+        prev = c;
+    }
+    // Whole-word check without pulling in a regex: scan for `name` bounded by
+    // non-identifier characters on both sides.
+    let bytes = stripped.as_bytes();
+    let nlen = name.len();
+    if nlen == 0 {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while let Some(pos) = stripped[i..].find(name) {
+        let start = i + pos;
+        let end = start + nlen;
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
 }
 
 fn is_source_ext(path: &str) -> bool {

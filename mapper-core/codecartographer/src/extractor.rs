@@ -987,6 +987,10 @@ fn walk_c_cpp(
 
         // struct Foo { ... } / union Foo { ... }
         "struct_specifier" | "union_specifier" => {
+            // Skip forward declarations (`struct Foo;`) — name but no body.
+            if node.child_by_field_name("body").is_none() {
+                return;
+            }
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(&name_node, src).to_string();
                 if !name.is_empty() {
@@ -1061,6 +1065,13 @@ fn walk_c_cpp(
         // C++ only -------------------------------------------------------
         // class Foo { ... }
         "class_specifier" if is_cpp => {
+            // Forward declarations and elaborated type specifiers (`class Foo;`,
+            // `friend class Bar;`, `class Foo *p;`) have a name but no body. They
+            // are not definitions — recording them as classes makes every symbol
+            // resolve ambiguously and pollutes class diagrams. Skip them.
+            if node.child_by_field_name("body").is_none() {
+                return;
+            }
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(&name_node, src).to_string();
                 if !name.is_empty() {

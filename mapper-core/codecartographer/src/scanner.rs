@@ -10,6 +10,15 @@ pub const IGNORED_DIRS: &[&str] = &[
     "target",
     "dist",
     "vendor",
+    // Vendored / bundled third-party source. These are checked into many repos
+    // (e.g. Godot's `thirdparty/`) so .gitignore never excludes them, yet they
+    // dominate every structural metric with code the team does not own.
+    "thirdparty",
+    "third_party",
+    "third-party",
+    "3rdparty",
+    "external",
+    "externals",
     ".next",
     "build",
     "out",
