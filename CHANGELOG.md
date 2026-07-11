@@ -4,6 +4,28 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Added — directory-level rollup (`health --rollup <depth>`)
+
+On a very large tree the file-level graph is too big to reason about (Godot:
+4336 files, 3182 bridges). Rollup folds every file into the folder formed by its
+first `<depth>` path components, aggregates cross-directory dependencies (drops
+intra-directory edges), and runs the full structural analysis on the folded
+graph — so bridges / cycles / god modules / health now describe **subsystems**,
+not files. Godot at depth 2: 160 subsystems, 139 bridges, with actionable hints
+like `core/variant — 72 callers across 8 domains → split by domain`. Exposed on
+the CLI (`--rollup`, mutually exclusive with `--compare`) and as
+`ApiState::rebuild_graph_rolled_up(depth)`.
+
+### Fixed — non-deterministic import resolution
+
+`ImportIndex` candidate lists were built by iterating a `HashMap`, so when an
+import had several equally-ranked resolution targets the resolver picked one by
+hash order — invisible at file level, but it flipped which directory an
+ambiguous import folded into (rollup edge counts drifted run-to-run). Candidate
+lists are now sorted at build time, and edge dedup breaks ties by resolution
+strength (exact < suffix < fuzzy) so the strongest edge always survives. Both
+make the graph fully deterministic.
+
 ### Performance — betweenness centrality (98% of a graph rebuild)
 
 Profiling `rebuild_graph` on Godot (~4.3k files) showed betweenness centrality
