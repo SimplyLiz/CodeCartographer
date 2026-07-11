@@ -411,21 +411,32 @@ fn find_callers(
         Err(_) => return (vec![], 0),
     };
 
-    // Scope-aware precision: when the root is a member (e.g. `Object.get_class`), a call
-    // site that explicitly type-qualifies the same name against a DIFFERENT capitalized
-    // type/namespace (`Node::get_class(`) is a different symbol — skip it. Bare and
-    // instance calls are kept (can't be attributed without types — that's CKB's job).
+    // Scope-aware precision. `root_scope` is the type/impl a method belongs to
+    // (`Object` for `Object::get_class`); `root_module` is the module the
+    // definition lives in, derived from its file path. Together they let us reject
+    // call sites that path-qualify the same bare name against a DIFFERENT owner
+    // (`Node::get_class`, or `trucks::spawn_attempts` when the root lives in
+    // `cars`). Bare calls and relative prefixes (crate/self/super) are kept —
+    // they can't be attributed to a different owner.
     let root_scope = root
         .qualified_name
         .as_deref()
         .and_then(scope_of_member);
-    let qual_re = root_scope.as_ref().and_then(|_| {
-        regex::Regex::new(&format!(
-            r"\b([A-Z][A-Za-z0-9_]*)\s*(?:::|\.)\s*{}\b",
-            regex::escape(&root.name)
-        ))
-        .ok()
-    });
+    let root_module = module_of_path(&root.file);
+    let root_is_callable = matches!(
+        root.kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
+    );
+    // Path qualifiers that legitimately name the root's own owner (its module and,
+    // for a method, its type). A `<qual>::name` call against anything else is a
+    // different symbol.
+    let mut our_quals: Vec<&str> = Vec::new();
+    if let Some(m) = root_module.as_deref() {
+        our_quals.push(m);
+    }
+    if let Some(s) = root_scope.as_deref() {
+        our_quals.push(s);
+    }
 
     let mut callers: Vec<CallerInfo> = vec![];
     let mut test_count = 0usize;
@@ -457,20 +468,13 @@ fn find_callers(
             continue;
         }
 
-        // Skip call sites qualified against a different type than the root's scope.
-        if let (Some(scope), Some(re)) = (&root_scope, &qual_re) {
-            let mut has_other = false;
-            let mut has_ours = false;
-            for c in re.captures_iter(trimmed) {
-                if &c[1] == scope {
-                    has_ours = true;
-                } else {
-                    has_other = true;
-                }
-            }
-            if has_other && !has_ours {
-                continue;
-            }
+        // Structural reference check: keep the line only if it genuinely refers to
+        // the root symbol — not a sibling in a same-named module (`undo::redo`), a
+        // field of the same name (`self.undo`, `undo: T`), an impl/def site, or a
+        // call qualified against a different owner (`trucks::spawn_attempts` when
+        // the root lives in `cars`).
+        if !line_references_symbol(trimmed, &root.name, root_is_callable, &our_quals) {
+            continue;
         }
 
         let is_test = is_test_path(&m.path)
@@ -502,6 +506,92 @@ fn find_callers(
     // If we're not including tests, the count is what we collapsed.
     let collapsed = if opts.include_tests { 0 } else { test_count };
     (callers, collapsed)
+}
+
+/// The module a source file defines, from its path: the file stem, or the parent
+/// directory for `mod.rs` / `lib.rs` / `main.rs`. Best-effort — used to reject
+/// caller matches qualified against a different module (`trucks::` vs `cars::`).
+fn module_of_path(path: &str) -> Option<String> {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    if matches!(stem, "mod" | "lib" | "main") {
+        path.rsplit('/').nth(1).map(|s| s.to_string())
+    } else if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+/// Does `line` contain a genuine reference to the root symbol `name`? Scans each
+/// whole-word occurrence and rejects the ones that aren't a use of the symbol:
+/// module path segments (`name::x`), field decls / struct-init labels (`name:`),
+/// field accesses (`recv.name` not called), and calls path-qualified against a
+/// different owner (`other::name`). `our` holds acceptable path qualifiers (the
+/// root's module + type scope); relative prefixes (crate/self/super/Self) pass.
+/// The module-segment and field checks apply only to callable roots — for a type
+/// root, `Type::assoc` and `Type` in a path are valid references.
+fn line_references_symbol(line: &str, name: &str, callable: bool, our: &[&str]) -> bool {
+    let bytes = line.as_bytes();
+    let nlen = name.len();
+    if nlen == 0 {
+        return false;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while let Some(pos) = line[i..].find(name) {
+        let start = i + pos;
+        let end = start + nlen;
+        i = start + 1;
+
+        // Whole-word only.
+        if start > 0 && is_ident(bytes[start - 1]) {
+            continue;
+        }
+        if end < bytes.len() && is_ident(bytes[end]) {
+            continue;
+        }
+
+        let after = bytes.get(end).copied();
+        let after2 = bytes.get(end + 1).copied();
+
+        // `name::x` — for a function root this is a module segment (a reference to
+        // a sibling item), not the function itself.
+        if callable && after == Some(b':') && after2 == Some(b':') {
+            continue;
+        }
+        // `name:` — struct field declaration or init label.
+        if callable && after == Some(b':') && after2 != Some(b':') {
+            continue;
+        }
+        // `recv.name` — member access. A field access (not followed by `(`) is not a
+        // call to a free function; a `recv.name(` method call is kept (ambiguous).
+        if start > 0 && bytes[start - 1] == b'.' {
+            if callable && after != Some(b'(') {
+                continue;
+            }
+            return true;
+        }
+        // `qualifier::name` — accept only when the immediate qualifier is ours or a
+        // relative prefix; a different module/type is a different symbol.
+        if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
+            let q_end = start - 2;
+            let mut q_start = q_end;
+            while q_start > 0 && is_ident(bytes[q_start - 1]) {
+                q_start -= 1;
+            }
+            if q_start < q_end {
+                let q = &line[q_start..q_end];
+                if matches!(q, "crate" | "self" | "super" | "Self") || our.contains(&q) {
+                    return true;
+                }
+                continue; // qualified against a different owner
+            }
+        }
+        // Bare occurrence — a real call or reference.
+        return true;
+    }
+    false
 }
 
 /// True if `name` appears as a whole word in `line` after double-quoted string
@@ -570,10 +660,17 @@ fn is_definition_line(line: &str) -> bool {
         || t.starts_with("enum ")
         || t.starts_with("trait ")
         || t.starts_with("interface ")
+        || t.starts_with("impl ") // impl blocks reference a type at its def, not a call
 }
 
 fn is_import_line(line: &str) -> bool {
-    let t = line.trim();
+    // Strip visibility so `pub mod x;` / `pub use x;` are recognised as imports.
+    let t = line
+        .trim()
+        .trim_start_matches("pub(crate) ")
+        .trim_start_matches("pub(super) ")
+        .trim_start_matches("pub ")
+        .trim_start();
     t.starts_with("use ")
         || t.starts_with("import ")
         || t.starts_with("from ")
@@ -1433,6 +1530,47 @@ fn truncate_snippet(s: &str, max_chars: usize) -> &str {
 mod tests {
     use super::*;
     use crate::mapper::{MappedFile, Signature, SymbolKind};
+
+    #[test]
+    fn line_reference_check_rejects_non_calls() {
+        // Callable root `undo` (module also named `undo`, and a field named `undo`).
+        let our = ["undo"];
+        let call = |l: &str| line_references_symbol(l, "undo", true, &our);
+        // Real qualified call — kept.
+        assert!(call("sim::undo::undo(&mut self.world, &mut self.undo_stack)"));
+        // Bare call — kept.
+        assert!(call("let x = undo(world, stack);"));
+        // Sibling item in the same-named module — rejected.
+        assert!(!call("sim::undo::redo(&mut self.world, &mut self.undo_stack)"));
+        assert!(!call("label: undo::label_for(&cmd),"));
+        // Field access / declaration / init label — rejected.
+        assert!(!call("self.undo.push_back(entry);"));
+        assert!(!call("pub undo: VecDeque<UndoEntry>,"));
+        assert!(!call("Self { undo: VecDeque::new(), cap }"));
+        // Different module's same-named function — rejected.
+        assert!(!line_references_symbol(
+            "for _ in 0..sim::trucks::spawn_attempts(c, n) {",
+            "spawn_attempts",
+            true,
+            &["cars"]
+        ));
+        // Same module — kept.
+        assert!(line_references_symbol(
+            "sim::cars::spawn_attempts(c, n)",
+            "spawn_attempts",
+            true,
+            &["cars"]
+        ));
+    }
+
+    #[test]
+    fn line_reference_check_keeps_type_uses() {
+        // Type root `UndoStack`: associated-fn and path uses are valid references.
+        let our = ["undo"];
+        let ty = |l: &str| line_references_symbol(l, "UndoStack", false, &our);
+        assert!(ty("undo_stack: sim::undo::UndoStack,"));
+        assert!(ty("undo_stack: sim::undo::UndoStack::default(),"));
+    }
 
     fn make_sig(name: &str, kind: SymbolKind, raw: &str, line: usize) -> Signature {
         Signature {
