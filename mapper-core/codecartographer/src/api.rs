@@ -141,6 +141,14 @@ pub struct GraphEdge {
     pub target: String,
     pub edge_type: String,
     pub at_range: Option<Range>,
+    /// How confidently this edge was resolved from the import text:
+    /// `"exact"`  — exact module-id or Go package-directory match;
+    /// `"suffix"` — path-suffix / unique-basename agreement (C/C++ includes, etc.);
+    /// `"fuzzy"`  — bare stem / segment / symbol guess with no path agreement.
+    /// Consumers should treat `fuzzy` edges as low-confidence (they are the ones
+    /// that historically fabricated cross-package edges and false cycles).
+    #[serde(default)]
+    pub resolution: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -589,7 +597,7 @@ impl ApiState {
 
         // Build the import-resolution index ONCE for the whole rebuild (O(N)); each import
         // then resolves via hash lookups instead of scanning every file (was O(N²)).
-        let import_index = ImportIndex::build(&files);
+        let import_index = ImportIndex::build(&files).with_go_module(&self.root_path);
 
         let mut nodes: Vec<GraphNode> = Vec::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
@@ -637,7 +645,7 @@ impl ApiState {
             for import in &file.imports {
                 // Resolve against the prebuilt index (O(1) per import) — building it once
                 // is what makes graph construction O(N) instead of O(N²) on large trees.
-                if let Some(target) = import_index.resolve(import, module_id) {
+                if let Some((target, resolution)) = import_index.resolve(import, module_id) {
                     // Reject cross-type edges: a source file importing "json" must not
                     // resolve to a fixture like testdata/review/json.json (doc), and a
                     // doc file like CHANGELOG.md must not appear as a dependent of a
@@ -653,6 +661,7 @@ impl ApiState {
                         target,
                         edge_type: source_kind.to_string(),
                         at_range: None,
+                        resolution: resolution.to_string(),
                     });
                 }
             }
@@ -665,7 +674,14 @@ impl ApiState {
         });
         edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
 
-        let bridge_analysis = self.analyze_bridges(&nodes, &edges);
+        // Structural analysis must not rest on low-confidence (fuzzy) edges — those
+        // are bare stem/segment guesses that fabricated false bridges, cycles, layer
+        // violations and god modules. The returned graph keeps every edge (tagged with
+        // its `resolution`); only the metrics below are restricted to exact/suffix.
+        let structural: Vec<GraphEdge> =
+            edges.iter().filter(|e| e.resolution != "fuzzy").cloned().collect();
+
+        let bridge_analysis = self.analyze_bridges(&nodes, &structural);
 
         for node in &mut nodes {
             if let Some(analysis) = bridge_analysis.get(&node.module_id) {
@@ -678,13 +694,13 @@ impl ApiState {
 
         let bridge_count = nodes.iter().filter(|n| n.is_bridge == Some(true)).count();
 
-        let cycles = self.detect_cycles(&nodes, &edges);
+        let cycles = self.detect_cycles(&nodes, &structural);
         let cycle_count = cycles.len();
 
-        let god_modules = self.detect_god_modules(&nodes, &edges, &files);
+        let god_modules = self.detect_god_modules(&nodes, &structural, &files);
         let god_module_count = god_modules.len();
 
-        let edge_tuples: Vec<(String, String)> = edges
+        let edge_tuples: Vec<(String, String)> = structural
             .iter()
             .map(|e| (e.source.clone(), e.target.clone()))
             .collect();
@@ -712,7 +728,7 @@ impl ApiState {
             out_degree.entry(node.module_id.clone()).or_insert(0);
             runtime_in_degree.entry(node.module_id.clone()).or_insert(0);
         }
-        for edge in &edges {
+        for edge in &structural {
             *out_degree.entry(edge.source.clone()).or_insert(0) += 1;
             *in_degree.entry(edge.target.clone()).or_insert(0) += 1;
             if edge.edge_type == "runtime" {
@@ -1228,6 +1244,32 @@ fn extract_js_import_symbol(lhs: &str) -> Option<String> {
     }
 }
 
+/// Strip the file extension from a repo-relative path, i.e. the trailing
+/// `.ext` of its last component only. `"a/b/foo.py"` → `"a/b/foo"`; a path with
+/// no dot in its last segment (`"a/b/foo"`) is returned unchanged.
+fn path_no_ext(p: &str) -> &str {
+    match p.rfind('.') {
+        Some(dot) if !p[dot..].contains('/') => &p[..dot],
+        _ => p,
+    }
+}
+
+/// Read the `module` path declared in `<root>/go.mod`, if present.
+/// e.g. a go.mod with `module github.com/acme/widget` → `Some("github.com/acme/widget")`.
+fn read_go_module(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("module ") {
+            let m = rest.trim().trim_matches('"').trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Return the last meaningful path component to use as a file-stem candidate.
 fn derive_module_stem(module_path: &str) -> String {
     let last = module_path
@@ -1260,6 +1302,13 @@ struct ImportIndex<'a> {
     by_segment: HashMap<String, Vec<&'a str>>,
     /// public symbol name → module_ids that define it (symbol-hint fallback).
     by_symbol: HashMap<String, Vec<&'a str>>,
+    /// repo-relative directory → module_ids in it. Backs Go package resolution,
+    /// where an import names a directory (package), not a file.
+    by_dir: HashMap<String, Vec<&'a str>>,
+    /// Go module path from go.mod (e.g. "github.com/acme/widget"), set when the
+    /// project root is a Go module. Enables namespace-exact import resolution:
+    /// internal imports resolve to their package directory, external ones to no edge.
+    go_module: Option<String>,
 }
 
 impl<'a> ImportIndex<'a> {
@@ -1269,10 +1318,15 @@ impl<'a> ImportIndex<'a> {
         let mut by_stem: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_segment: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_symbol: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut by_dir: HashMap<String, Vec<&'a str>> = HashMap::new();
 
         for (module_id, file) in files.iter() {
             let id = module_id.as_str();
             ids.insert(id);
+            // module_id is the repo-relative path; its parent is the package directory.
+            if let Some(dir) = Path::new(id).parent().and_then(|d| d.to_str()) {
+                by_dir.entry(dir.to_string()).or_default().push(id);
+            }
             let p = Path::new(&file.path);
             if let Some(bn) = p.file_name().and_then(|s| s.to_str()) {
                 by_basename.entry(bn.to_string()).or_default().push(id);
@@ -1300,7 +1354,14 @@ impl<'a> ImportIndex<'a> {
                 }
             }
         }
-        Self { ids, by_basename, by_stem, by_segment, by_symbol }
+        Self { ids, by_basename, by_stem, by_segment, by_symbol, by_dir, go_module: None }
+    }
+
+    /// Opt in to Go module-aware resolution by reading `<root>/go.mod`. No-op for
+    /// non-Go projects (leaves `go_module` as `None`, preserving generic behaviour).
+    fn with_go_module(mut self, root: &Path) -> Self {
+        self.go_module = read_go_module(root);
+        self
     }
 
     /// Pick the candidate whose module_id best matches the import path, preferring a
@@ -1372,8 +1433,133 @@ impl<'a> ImportIndex<'a> {
             .map(|m| m.to_string())
     }
 
-    fn resolve(&self, import: &str, source: &str) -> Option<String> {
+    /// Resolve an import to a target module_id plus a confidence tag
+    /// (`"exact"` | `"suffix"` | `"fuzzy"`). `None` means no internal edge.
+    /// Resolve an extensionless import that carries directory structure
+    /// (`foo/bar`) against the FULL path, not just its last stem. Tries a module
+    /// file whose extension-stripped path ends with `norm`, then a package
+    /// directory named `norm` (preferring an `__init__.py` / `index.*` / `mod.rs`
+    /// entry point). Returns `None` when nothing local matches — a qualified
+    /// import that resolves nowhere is external, not a reason to fuzzy-guess.
+    fn best_qualified_suffix(&self, norm: &str, source: &str) -> Option<String> {
+        // (a) Module file: a same-stem file whose path (minus extension) is `norm`
+        //     or ends with `/norm`.
+        let last = norm.rsplit('/').next().unwrap_or(norm);
+        if let Some(cands) = self.by_stem.get(last) {
+            let matches: Vec<&'a str> = cands
+                .iter()
+                .copied()
+                .filter(|&m| {
+                    let ne = path_no_ext(m);
+                    ne == norm || ne.ends_with(&format!("/{norm}"))
+                })
+                .collect();
+            if let Some(hit) = Self::pick_deterministic(&matches, source) {
+                return Some(hit);
+            }
+        }
+
+        // (b) Package directory named `norm` (or ending with `/norm`).
+        let dir_cands: Option<&Vec<&'a str>> = self.by_dir.get(norm).or_else(|| {
+            let suffix = format!("/{norm}");
+            self.by_dir
+                .iter()
+                .filter(|(d, _)| d.ends_with(&suffix))
+                .min_by_key(|(d, _)| d.len())
+                .map(|(_, v)| v)
+        });
+        if let Some(cands) = dir_cands {
+            // Prefer the package's entry point when present.
+            if let Some(entry) = cands.iter().copied().find(|&m| {
+                let bn = m.rsplit('/').next().unwrap_or(m);
+                bn == "__init__.py" || bn.starts_with("index.") || bn == "mod.rs"
+            }) {
+                if entry != source {
+                    return Some(entry.to_string());
+                }
+            }
+            if let Some(hit) = Self::pick_deterministic(cands, source) {
+                return Some(hit);
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a relative specifier (`./x`, `../y/z`) against the SOURCE file's
+    /// directory — the only correct anchor for JS/TS/relative-C imports. Joins
+    /// and normalises `.`/`..`, then matches a module file (any extension) or a
+    /// package directory (preferring an `index.*` / `__init__.py` / `mod.rs`
+    /// entry point). `None` means the target wasn't scanned — a relative import
+    /// always names something local, so we never fuzzy-fall-back here.
+    fn resolve_relative(&self, spec: &str, source: &str) -> Option<String> {
+        let mut parts: Vec<String> = Path::new(source)
+            .parent()
+            .map(|p| {
+                p.to_string_lossy()
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for seg in spec.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                s => parts.push(s.to_string()),
+            }
+        }
+        let joined = parts.join("/");
+        if joined.is_empty() {
+            return None;
+        }
+        // Exact module_id (specifier already carried an extension, e.g. C "./foo.h").
+        if joined != source && self.ids.contains(joined.as_str()) {
+            return Some(joined);
+        }
+        // Module file: a same-stem file whose extension-stripped path equals `joined`.
+        let joined_ne = path_no_ext(&joined);
+        let last = joined_ne.rsplit('/').next().unwrap_or(joined_ne);
+        if let Some(cands) = self.by_stem.get(last) {
+            if let Some(hit) = cands
+                .iter()
+                .copied()
+                .find(|&m| m != source && path_no_ext(m) == joined_ne)
+            {
+                return Some(hit.to_string());
+            }
+        }
+        // Package directory `joined` → its entry point, else any member.
+        if let Some(cands) = self.by_dir.get(joined_ne) {
+            if let Some(entry) = cands.iter().copied().find(|&m| {
+                let bn = m.rsplit('/').next().unwrap_or(m);
+                bn.starts_with("index.") || bn == "__init__.py" || bn == "mod.rs"
+            }) {
+                if entry != source {
+                    return Some(entry.to_string());
+                }
+            }
+            return Self::pick_deterministic(cands, source);
+        }
+        None
+    }
+
+    fn resolve(&self, import: &str, source: &str) -> Option<(String, &'static str)> {
         let (module_path, symbol_hint) = parse_import_parts(import);
+
+        // Relative specifier (JS/TS `./`, `../`; relative C includes): resolve
+        // against the source directory. Path-precise, and authoritative — a
+        // relative import names something local, so a miss is a dangling ref
+        // (no edge), never a reason to fuzzy-guess a same-name file elsewhere.
+        if module_path.starts_with("./") || module_path.starts_with("../") {
+            return self
+                .resolve_relative(&module_path, source)
+                .map(|hit| (hit, "exact"));
+        }
+
         let norm = module_path
             .trim_start_matches("./")
             .trim_start_matches('/')
@@ -1385,9 +1571,53 @@ impl<'a> ImportIndex<'a> {
             .map(str::to_string);
         let stem = derive_module_stem(&module_path);
 
+        // 0. Go module-aware resolution. Authoritative for .go sources when a go.mod
+        //    is present: an import is INTERNAL iff it lives under the module path, in
+        //    which case it names a package DIRECTORY — resolve to that directory's
+        //    files, never to a same-stem file in an unrelated package. Anything not
+        //    under the module path is stdlib/third-party and has NO internal edge.
+        //    This branch always returns, so Go imports never reach the fuzzy
+        //    basename/stem/segment fallbacks below (which fabricate cross-package edges).
+        if source.ends_with(".go") {
+            if let Some(module) = &self.go_module {
+                let internal_rel: Option<&str> = if norm == *module {
+                    Some("")
+                } else {
+                    norm.strip_prefix(module.as_str())
+                        .filter(|r| r.starts_with('/'))
+                        .map(|r| &r[1..])
+                };
+                match internal_rel {
+                    // The module root package itself — no single file to point at.
+                    Some("") => return None,
+                    Some(rel) => {
+                        // Exact package directory.
+                        if let Some(cands) = self.by_dir.get(rel) {
+                            return Self::pick_deterministic(cands, source).map(|t| (t, "exact"));
+                        }
+                        // Package dir not scanned as-is (nested module, generated code):
+                        // accept the shortest directory whose path ends with the suffix.
+                        let suffix = format!("/{rel}");
+                        if let Some((_, cands)) = self
+                            .by_dir
+                            .iter()
+                            .filter(|(d, _)| d.ends_with(&suffix))
+                            .min_by_key(|(d, _)| d.len())
+                        {
+                            return Self::pick_deterministic(cands, source).map(|t| (t, "suffix"));
+                        }
+                        // Internal by namespace but absent from the scan → honest miss.
+                        return None;
+                    }
+                    // Not under the module path → external (stdlib / third-party).
+                    None => return None,
+                }
+            }
+        }
+
         // 1. Exact module_id match.
         if norm != source && self.ids.contains(norm.as_str()) {
-            return Some(norm);
+            return Some((norm, "exact"));
         }
 
         // 2. Extension-bearing import (C/C++ #include, JS/TS with ext): match by basename,
@@ -1396,22 +1626,46 @@ impl<'a> ImportIndex<'a> {
         if let Some(bn) = &basename {
             if let Some(cands) = self.by_basename.get(bn) {
                 if let Some(hit) = Self::best_suffix(cands, &norm, source) {
-                    return Some(hit);
+                    let kind = if hit == norm { "exact" } else { "suffix" };
+                    return Some((hit, kind));
                 }
                 if has_ext {
                     let non_self: Vec<&str> = cands.iter().copied().filter(|m| *m != source).collect();
                     if non_self.len() == 1 {
-                        return Some(non_self[0].to_string());
+                        // Unique basename, no path agreement — confident but not exact.
+                        return Some((non_self[0].to_string(), "suffix"));
                     }
                 }
             }
+        }
+
+        // 2.5 Qualified path-suffix. An extensionless import that still carries
+        //     directory structure (Python `foo.bar` → foo/bar, monorepo/aliased
+        //     `components/Button`) is resolved against the FULL path, not the last
+        //     stem — the qualification disambiguates same-name files across
+        //     packages, the way go.mod does for Go. This is authoritative for such
+        //     imports: a qualified path that matches nothing local is external, so
+        //     we return no edge rather than falling through to the fuzzy stem/segment
+        //     guesses (which fabricated cross-package edges).
+        if !has_ext && norm.contains('/') {
+            // `from pkg.sub import name` may name a submodule `pkg/sub/name`; try the
+            // combined path first so it beats the package's own __init__.
+            if let Some(sym) = &symbol_hint {
+                let combined = format!("{norm}/{sym}");
+                if let Some(hit) = self.best_qualified_suffix(&combined, source) {
+                    return Some((hit, "suffix"));
+                }
+            }
+            return self
+                .best_qualified_suffix(&norm, source)
+                .map(|hit| (hit, "suffix"));
         }
 
         // 3. Extensionless import (Rust `mod`, Python `import`, Go package): match by stem.
         if !has_ext {
             if let Some(cands) = self.by_stem.get(&stem) {
                 if let Some(hit) = Self::pick_deterministic(cands, source) {
-                    return Some(hit);
+                    return Some((hit, "fuzzy"));
                 }
             }
         }
@@ -1420,7 +1674,7 @@ impl<'a> ImportIndex<'a> {
         if stem.len() >= 3 {
             if let Some(cands) = self.by_segment.get(&stem.to_lowercase()) {
                 if let Some(hit) = Self::pick_deterministic(cands, source) {
-                    return Some(hit);
+                    return Some((hit, "fuzzy"));
                 }
             }
         }
@@ -1430,7 +1684,7 @@ impl<'a> ImportIndex<'a> {
             if sym.len() >= 4 {
                 if let Some(cands) = self.by_symbol.get(sym) {
                     if let Some(hit) = Self::pick_deterministic(cands, source) {
-                        return Some(hit);
+                        return Some((hit, "fuzzy"));
                     }
                 }
             }
@@ -1719,7 +1973,7 @@ impl ApiState {
     fn resolve_import_target(&self, import: &str, source: &str) -> Option<String> {
         let files = self.mapped_files.lock().ok()?;
         let index = ImportIndex::build(&files);
-        index.resolve(import, source)
+        index.resolve(import, source).map(|(t, _)| t)
     }
 
     // Same lookup as `resolve_import_target` but takes the already-locked map.
@@ -1733,7 +1987,7 @@ impl ApiState {
         import: &str,
         source: &str,
     ) -> Option<String> {
-        ImportIndex::build(files).resolve(import, source)
+        ImportIndex::build(files).resolve(import, source).map(|(t, _)| t)
     }
 
     #[allow(dead_code)]
@@ -1758,7 +2012,11 @@ impl ApiState {
             graph.add_node(node.module_id.as_str());
         }
 
-        for edge in edges {
+        // Only structural (exact/suffix) edges define cycles. `fuzzy` edges are
+        // low-confidence stem/segment guesses — counting them fabricated the
+        // false import cycles this graph used to report (e.g. 22 "cycles" in a Go
+        // repo, which the language forbids).
+        for edge in edges.iter().filter(|e| e.resolution != "fuzzy") {
             graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
         }
 
@@ -1975,7 +2233,12 @@ impl ApiState {
     fn check_would_create_cycle(&self, edges: &[GraphEdge], target_module: &str) -> bool {
         let mut graph: DiGraphMap<&str, ()> = DiGraphMap::new();
 
-        for edge in edges {
+        // Predict cycles only from structural (non-fuzzy) edges, matching
+        // detect_cycles — a "will create a cycle" warning must not rest on a
+        // low-confidence stem guess.
+        let structural = || edges.iter().filter(|e| e.resolution != "fuzzy");
+
+        for edge in structural() {
             if edge.source != target_module && edge.target != target_module {
                 graph.add_node(edge.source.as_str());
                 graph.add_node(edge.target.as_str());
@@ -1985,7 +2248,7 @@ impl ApiState {
 
         graph.add_node(target_module);
 
-        for edge in edges {
+        for edge in structural() {
             if edge.source == target_module {
                 graph.add_edge(target_module, edge.target.as_str(), ());
             }
@@ -2192,6 +2455,111 @@ mod tests {
         assert_eq!(derive_module_stem("scanner"), "scanner");
         assert_eq!(derive_module_stem("react-dom"), "react");
         assert_eq!(derive_module_stem("src/api/handler"), "handler");
+    }
+
+    // Regression: a Go import names a PACKAGE (directory), not a file. Before the
+    // go.mod-aware branch, `internal/errors` fell to bare-stem matching and resolved
+    // to an unrelated `internal/a2a/errors.go`, and a stdlib `sync` fabricated an edge
+    // to `internal/federation/sync.go`. Both must now be correct.
+    #[test]
+    fn go_import_resolves_to_package_dir_not_same_stem_file() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in [
+            "internal/errors/errors.go",
+            "internal/a2a/errors.go",
+            "internal/federation/sync.go",
+            "internal/backends/orch.go",
+        ] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let mut idx = ImportIndex::build(&files);
+        idx.go_module = Some("github.com/acme/widget".to_string());
+        let src = "internal/backends/orch.go";
+
+        // Internal import → the CORRECT package directory (not internal/a2a/errors.go),
+        // tagged as an exact resolution.
+        assert_eq!(
+            idx.resolve("github.com/acme/widget/internal/errors", src),
+            Some(("internal/errors/errors.go".to_string(), "exact")),
+        );
+        // Stdlib import → no fabricated internal edge.
+        assert_eq!(idx.resolve("sync", src), None);
+        // Third-party import → no internal edge.
+        assert_eq!(idx.resolve("github.com/other/pkg", src), None);
+    }
+
+    // Qualified extensionless imports (Python dotted, monorepo pathed) resolve
+    // against the FULL path, not the last stem — so a same-named file in another
+    // package is not fabricated, and an unresolvable qualified import is external.
+    #[test]
+    fn qualified_import_resolves_by_full_path_not_stem() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in [
+            "app/services/auth.py",
+            "app/models/auth.py", // trap: same stem, different package
+            "app/services/__init__.py",
+            "app/main.py",
+            "packages/ui/Button.tsx",
+        ] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        let src = "app/main.py";
+
+        // `from app.services import auth` → the submodule, not app/models/auth.py.
+        assert_eq!(
+            idx.resolve("from app.services import auth", src),
+            Some(("app/services/auth.py".to_string(), "suffix")),
+        );
+        // `import app.services` (no symbol) → the package entry point.
+        assert_eq!(
+            idx.resolve("import app.services", src),
+            Some(("app/services/__init__.py".to_string(), "suffix")),
+        );
+        // Monorepo/aliased path import → the exact file by suffix.
+        assert_eq!(
+            idx.resolve("import Button from 'packages/ui/Button'", src),
+            Some(("packages/ui/Button.tsx".to_string(), "suffix")),
+        );
+        // A qualified import that matches nothing local is external → no edge
+        // (must NOT fuzzy-match app/models/auth.py on the bare `auth` stem).
+        assert_eq!(idx.resolve("from django.contrib import auth", src), None);
+    }
+
+    // JS/TS relative specifiers resolve against the SOURCE directory, not a
+    // same-name file elsewhere; `..` walks up; a package dir uses its index.
+    #[test]
+    fn relative_import_resolves_against_source_dir() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in [
+            "src/app/main.ts",
+            "src/app/bar.ts",
+            "src/models/user.ts",
+            "src/models/other/bar.ts", // trap: same stem in another dir
+            "src/widgets/index.ts",
+        ] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        let src = "src/app/main.ts";
+
+        // `./bar` → sibling, not src/models/other/bar.ts.
+        assert_eq!(
+            idx.resolve("./bar", src),
+            Some(("src/app/bar.ts".to_string(), "exact")),
+        );
+        // `../models/user` → walk up then down.
+        assert_eq!(
+            idx.resolve("../models/user", src),
+            Some(("src/models/user.ts".to_string(), "exact")),
+        );
+        // `../widgets` → package directory resolves to its index.
+        assert_eq!(
+            idx.resolve("../widgets", src),
+            Some(("src/widgets/index.ts".to_string(), "exact")),
+        );
+        // A relative path that isn't in the scan → dangling, no edge (not fuzzy).
+        assert_eq!(idx.resolve("./does_not_exist", src), None);
     }
 
     // Regression test: before the fix, rebuild_graph held the mapped_files

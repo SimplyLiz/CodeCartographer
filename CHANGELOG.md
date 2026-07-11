@@ -4,6 +4,32 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-11
+
+### Added — import-resolution confidence & non-fuzzy structural metrics
+
+- Edge resolution now carries a confidence signal; fuzzy (low-confidence) edges
+  are excluded from cycles, and all structural metrics (health, bridges, god
+  modules, layer checks) are computed on the non-fuzzy graph only.
+- Source-relative resolution for JS/TS imports, including captured re-exports.
+- Qualified path-suffix resolution for Python and other pathed imports.
+- `go.mod`-aware Go import resolution.
+
+### Fixed — large C++ codebase usability
+
+Verified against Godot (~4.3k first-party C++ files):
+
+- Exclude vendored source dirs (`thirdparty/`, `third_party/`, `3rdparty/`,
+  `external/`) that .gitignore never catches and that dominated every metric.
+- C/C++/Obj-C `.cpp` translation units with no importers are no longer flagged
+  as dead code.
+- Skip forward declarations (`class Foo;`) so symbols resolve to real
+  definitions; `reach` ranks a definition above a declaration/prototype and
+  returns real caller sites instead of string-literal or forward-decl noise.
+- Bias NL `query` seeds to source files so data/doc files stop crowding out code.
+- `cochange` drops mechanical mega-commits before pair generation, so it no
+  longer explodes on large snapshots.
+
 ## [1.3.3] - 2026-07-09
 
 ### Changed — `context_health` project preset file

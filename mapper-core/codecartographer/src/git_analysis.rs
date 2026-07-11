@@ -198,6 +198,14 @@ pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
         commits.push(current);
     }
 
+    // Drop mechanical mega-commits (mass reformats, license-header sweeps, large
+    // merges). They touch hundreds/thousands of files and carry no meaningful
+    // coupling signal, yet they dominate cost: one N-file commit yields
+    // N*(N-1)/2 pairs, so a few thousand-file commits explode into tens of
+    // millions of pairs and the analysis never completes on a large repo.
+    const MAX_FILES_PER_COMMIT: usize = 50;
+    commits.retain(|files| files.len() <= MAX_FILES_PER_COMMIT);
+
     // Build churn map.
     let mut churn: HashMap<String, usize> = HashMap::new();
     for files in &commits {

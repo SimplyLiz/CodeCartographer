@@ -2126,8 +2126,16 @@ fn health_mode(root: &Path, compare: Option<&str>, json_out: bool) -> Result<()>
                 .unwrap_or_default();
 
             let is_entry = crate::api::is_entry_point_path(&node.path);
+            // C/C++/Obj-C implementation units are compiled directly, never
+            // #included, so "0 importers" is the normal case — not dead code.
+            let is_impl_unit = matches!(
+                node.path.rsplit('.').next().unwrap_or(""),
+                "cpp" | "cc" | "cxx" | "c++" | "c" | "m" | "mm"
+            );
             let suggestion = if callers == 0 && is_entry {
                 "no callers — entry point; this is expected".to_string()
+            } else if callers == 0 && is_impl_unit {
+                "no importers — translation unit compiled directly, not #included; expected".to_string()
             } else if callers == 0 {
                 "no callers — likely dead bridge, consider removal".to_string()
             } else if caller_dirs.len() >= 2 {
@@ -5439,6 +5447,20 @@ fn query_mode(
             focus_files.push(m.path.clone());
         }
         if focus_files.len() >= max_seeds { break; }
+    }
+
+    // Code-question retrieval: bias focus seeds toward actual source files.
+    // Raw-content BM25 otherwise latches onto data/doc files (e.g. Godot's
+    // doc/classes/*.xml) that mention the query terms but carry no code — they
+    // seed the skeleton with 0-signature noise and bury the real implementation.
+    // Fall back to the unfiltered list if nothing source-like matched.
+    let code_seeds: Vec<String> = focus_files
+        .iter()
+        .filter(|p| crate::scanner::is_source_file(std::path::Path::new(p.as_str())))
+        .cloned()
+        .collect();
+    if !code_seeds.is_empty() {
+        focus_files = code_seeds;
     }
 
     eprintln!("Query: {:?}", query);

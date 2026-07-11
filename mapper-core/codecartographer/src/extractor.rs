@@ -633,21 +633,47 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
     for child in root.children(&mut cur) {
         match child.kind() {
             "import_statement" => {
-                // import os, import os.path
+                // import os, import os.path, import a.b as c
                 let mut c2 = child.walk();
                 for n in child.children(&mut c2) {
                     if matches!(n.kind(), "dotted_name" | "aliased_import") {
                         let name = n.child_by_field_name("name")
                             .map(|x| node_text(&x, src))
                             .unwrap_or_else(|| node_text(&n, src));
-                        imports.push(name.to_string());
+                        // Keep the `import ` keyword so parse_import_parts normalises the
+                        // dotted path (a.b.c → a/b/c) rather than misreading `.c` as a
+                        // file extension.
+                        imports.push(format!("import {name}"));
                     }
                 }
             }
             "import_from_statement" => {
-                // from os import path  /  from . import foo
+                // from a.b import c, d  /  from . import foo
                 if let Some(module) = child.child_by_field_name("module_name") {
-                    imports.push(node_text(&module, src).to_string());
+                    let module = node_text(&module, src).to_string();
+                    if module.starts_with('.') {
+                        // Relative import — source-relative, left best-effort as-is.
+                        imports.push(module);
+                    } else {
+                        // Emit one `from a.b import name` per imported name so
+                        // parse_import_parts yields (module=a/b, symbol=name) and the
+                        // resolver's qualified-suffix step lands on the submodule
+                        // a/b/name when it exists, else the package a/b — one precise
+                        // edge instead of a bare-stem guess.
+                        let mut names = child.walk();
+                        let mut emitted = false;
+                        for n in child.children_by_field_name("name", &mut names) {
+                            let raw = node_text(&n, src);
+                            let nm = raw.split(" as ").next().unwrap_or(raw).trim();
+                            if !nm.is_empty() && nm != "*" {
+                                imports.push(format!("from {module} import {nm}"));
+                                emitted = true;
+                            }
+                        }
+                        if !emitted {
+                            imports.push(module);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -771,7 +797,9 @@ fn collect_js_ts_imports(root: &Node, src: &[u8]) -> Vec<String> {
     let mut imports = Vec::new();
     let mut cur = root.walk();
     for child in root.children(&mut cur) {
-        if child.kind() == "import_statement" {
+        // `import … from 'x'` and re-exports `export … from 'x'` both name a
+        // dependency via a `source` field.
+        if matches!(child.kind(), "import_statement" | "export_statement") {
             if let Some(source_node) = child.child_by_field_name("source") {
                 let raw = node_text(&source_node, src);
                 let clean = raw.trim_matches('"').trim_matches('\'');
@@ -987,6 +1015,10 @@ fn walk_c_cpp(
 
         // struct Foo { ... } / union Foo { ... }
         "struct_specifier" | "union_specifier" => {
+            // Skip forward declarations (`struct Foo;`) — name but no body.
+            if node.child_by_field_name("body").is_none() {
+                return;
+            }
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(&name_node, src).to_string();
                 if !name.is_empty() {
@@ -1061,6 +1093,13 @@ fn walk_c_cpp(
         // C++ only -------------------------------------------------------
         // class Foo { ... }
         "class_specifier" if is_cpp => {
+            // Forward declarations and elaborated type specifiers (`class Foo;`,
+            // `friend class Bar;`, `class Foo *p;`) have a name but no body. They
+            // are not definitions — recording them as classes makes every symbol
+            // resolve ambiguously and pollutes class diagrams. Skip them.
+            if node.child_by_field_name("body").is_none() {
+                return;
+            }
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(&name_node, src).to_string();
                 if !name.is_empty() {
@@ -1611,8 +1650,9 @@ class MyClass:
         let method = out.signatures.iter().find(|s| s.symbol_name.as_deref() == Some("method")).unwrap();
         assert_eq!(method.kind, SymbolKind::Method);
         assert_eq!(method.qualified_name.as_deref(), Some("MyClass.method"));
-        assert!(out.imports.contains(&"os".to_string()));
-        assert!(out.imports.iter().any(|i| i.contains("pathlib")));
+        // Imports keep their keyword so the resolver can normalise dotted paths.
+        assert!(out.imports.contains(&"import os".to_string()));
+        assert!(out.imports.iter().any(|i| i.contains("pathlib") && i.contains("Path")));
     }
 
     #[cfg(feature = "lang-python")]
