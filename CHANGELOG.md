@@ -4,6 +4,20 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-11
+
+### Added — dynamic MCP project root (roots auto-follow + `switch_project`)
+
+The MCP server pinned its root at launch, so every tool answered about that one
+repo even when the session was working in another (silent wrong-repo). The
+running server can now retarget without a restart: if the client advertises the
+`roots` capability, the server requests its workspace root after `initialized`
+(server→client `roots/list`) and re-roots there automatically; and a new
+`switch_project` tool re-points the server at any absolute path on demand, for
+evaluating several repos in one session. State lives behind a swappable
+`RwLock<Arc<ApiState>>`; each request takes an `Arc` snapshot so a mid-flight
+switch can't change the root under a running handler.
+
 ### Added — directory-level rollup (`health --rollup <depth>`)
 
 On a very large tree the file-level graph is too big to reason about (Godot:
