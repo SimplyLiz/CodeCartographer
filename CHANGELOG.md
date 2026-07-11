@@ -4,6 +4,27 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — betweenness centrality (98% of a graph rebuild)
+
+Profiling `rebuild_graph` on Godot (~4.3k files) showed betweenness centrality
+was ~3.14s of a 3.2s rebuild. Two changes:
+
+- **Index-based, parallel Brandes.** Each sampled source's pass now runs over
+  dense `Vec` buffers keyed by node index instead of per-source
+  `HashMap<&str,_>` (which reallocated V-sized maps 800×), and the independent
+  sources run across cores. Contributions are summed in fixed source order, so
+  results are bit-identical regardless of core count — deterministic across
+  machines. Betweenness 3,140ms → 57ms; full rebuild 3,197ms → 76ms (~42×), with
+  identical output (3182 bridges / 68 god-modules / 0 cycles on Godot).
+- **Topology-keyed centrality cache.** Betweenness depends only on the graph
+  topology, so it's cached keyed by an order-independent fingerprint of the
+  structural node+edge set. An edit that doesn't change imports reuses it and
+  skips the Brandes pass entirely; the cache survives `invalidate_graph` and
+  self-invalidates only when an import edge changes. This is the incremental
+  win for long-lived `serve` sessions, and it grows with repo size — at 100×
+  scale, where sampled betweenness re-inflates to seconds, a body-only edit
+  stays near the rebuild floor.
+
 ## [1.4.0] - 2026-07-11
 
 ### Added — import-resolution confidence & non-fuzzy structural metrics
