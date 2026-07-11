@@ -4,6 +4,63 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-11
+
+### Added — dynamic MCP project root (roots auto-follow + `switch_project`)
+
+The MCP server pinned its root at launch, so every tool answered about that one
+repo even when the session was working in another (silent wrong-repo). The
+running server can now retarget without a restart: if the client advertises the
+`roots` capability, the server requests its workspace root after `initialized`
+(server→client `roots/list`) and re-roots there automatically; and a new
+`switch_project` tool re-points the server at any absolute path on demand, for
+evaluating several repos in one session. State lives behind a swappable
+`RwLock<Arc<ApiState>>`; each request takes an `Arc` snapshot so a mid-flight
+switch can't change the root under a running handler.
+
+### Added — directory-level rollup (`health --rollup <depth>`)
+
+On a very large tree the file-level graph is too big to reason about (Godot:
+4336 files, 3182 bridges). Rollup folds every file into the folder formed by its
+first `<depth>` path components, aggregates cross-directory dependencies (drops
+intra-directory edges), and runs the full structural analysis on the folded
+graph — so bridges / cycles / god modules / health now describe **subsystems**,
+not files. Godot at depth 2: 160 subsystems, 139 bridges, with actionable hints
+like `core/variant — 72 callers across 8 domains → split by domain`. Exposed on
+the CLI (`--rollup`, mutually exclusive with `--compare`) and as
+`ApiState::rebuild_graph_rolled_up(depth)`.
+
+### Fixed — non-deterministic import resolution
+
+`ImportIndex` candidate lists were built by iterating a `HashMap`, so when an
+import had several equally-ranked resolution targets the resolver picked one by
+hash order — invisible at file level, but it flipped which directory an
+ambiguous import folded into (rollup edge counts drifted run-to-run). Candidate
+lists are now sorted at build time, and edge dedup breaks ties by resolution
+strength (exact < suffix < fuzzy) so the strongest edge always survives. Both
+make the graph fully deterministic.
+
+### Performance — betweenness centrality (98% of a graph rebuild)
+
+Profiling `rebuild_graph` on Godot (~4.3k files) showed betweenness centrality
+was ~3.14s of a 3.2s rebuild. Two changes:
+
+- **Index-based, parallel Brandes.** Each sampled source's pass now runs over
+  dense `Vec` buffers keyed by node index instead of per-source
+  `HashMap<&str,_>` (which reallocated V-sized maps 800×), and the independent
+  sources run across cores. Contributions are summed in fixed source order, so
+  results are bit-identical regardless of core count — deterministic across
+  machines. Betweenness 3,140ms → 57ms; full rebuild 3,197ms → 76ms (~42×), with
+  identical output (3182 bridges / 68 god-modules / 0 cycles on Godot).
+- **Topology-keyed centrality cache.** Betweenness depends only on the graph
+  topology, so it's cached keyed by an order-independent fingerprint of the
+  structural node+edge set. An edit that doesn't change imports reuses it and
+  skips the Brandes pass entirely; the cache survives `invalidate_graph` and
+  self-invalidates only when an import edge changes. This is the incremental
+  win for long-lived `serve` sessions, and it grows with repo size — at 100×
+  scale, where sampled betweenness re-inflates to seconds, a body-only edit
+  stays near the rebuild floor.
+
 ## [1.4.0] - 2026-07-11
 
 ### Added — import-resolution confidence & non-fuzzy structural metrics
