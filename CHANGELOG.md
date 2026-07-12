@@ -19,8 +19,16 @@ and, when linked via FFI, took the host down with it:
   `check_would_create_cycle`) recursed once per node; a large, deep graph blew
   the main-thread stack. Replaced with an iterative, explicit-stack Tarjan SCC —
   depth-independent and deterministic.
+- **Hard depth ceiling on the walkers (belt to the big-stack braces).** The
+  256 MB stack absorbs any real nesting, but a bounded stack can still be blown
+  by adversarial/generated input; a small RAII depth guard now caps walker
+  recursion at 50,000. Justified by measurement: the guard, instrumented over the
+  full kernel, peaked at a real-world **3,348** — the cap sits ~15× above that
+  (real code is never clipped) and ~6× below the stack's capacity (~320k frames),
+  so it can never overflow yet never truncates genuine code. Covers all seven
+  tree-sitter walkers plus the recursive JSON-ref collector.
 
-Result: the kernel now analyzes cleanly in ~34 s (cold), health 30.0, 12862
+Result: the kernel now analyzes cleanly in ~26–34 s (cold), health 30.0, 12862
 bridges / 76 cycles / 145 god-modules, deterministic run-to-run; directory
 rollup folds it to 562 subsystems (depth 2). Godot output unchanged.
 
