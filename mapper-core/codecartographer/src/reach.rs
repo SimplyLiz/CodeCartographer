@@ -440,6 +440,10 @@ fn find_callers(
 
     let mut callers: Vec<CallerInfo> = vec![];
     let mut test_count = 0usize;
+    // Per-file cache of lines that begin inside a carried multi-line string /
+    // comment (read lazily, only for files that pass the cheaper filters).
+    let mut mask_cache: std::collections::HashMap<String, std::collections::HashSet<usize>> =
+        std::collections::HashMap::new();
 
     for m in &results.matches {
         // Skip the definition site itself.
@@ -451,6 +455,27 @@ fn find_callers(
         // contain source code as embedded strings).
         if !is_source_ext(&m.path) {
             continue;
+        }
+
+        // A caller must be in the same language as the definition — a bare
+        // `submit()` in a `.swift` file is not a call to a Rust `Gate::submit`.
+        if !same_lang_group(&m.path, &root.file) {
+            continue;
+        }
+
+        // Skip matches inside a carried multi-line string/comment (opening
+        // delimiter on an earlier line, so single-line stripping misses it —
+        // e.g. the symbol named in a multi-line LLM prompt string).
+        let ext = m.path.rsplit('.').next().unwrap_or("");
+        if matches!(ext, "rs" | "py") {
+            let masked = mask_cache.entry(m.path.clone()).or_insert_with(|| {
+                std::fs::read_to_string(root_path.join(&m.path))
+                    .map(|c| lines_starting_in_multiline(&c, ext))
+                    .unwrap_or_default()
+            });
+            if masked.contains(&m.line_number) {
+                continue;
+            }
         }
 
         // Skip lines that look like definitions, imports, or comments.
@@ -642,6 +667,192 @@ fn is_source_ext(path: &str) -> bool {
         | "cs" | "java" | "kt" | "rb" | "swift" | "zig" | "ex" | "exs"
         | "lua" | "php" | "dart" | "scala" | "clj" | "hs" | "ml" | "fs"
     )
+}
+
+/// Coarse language group for a path's extension. Caller search must stay within
+/// one language — a bare `submit()` in a `.swift` file is not a call to a Rust
+/// `Gate::submit`. C/C++ sources and headers share a group (a `.c` definition is
+/// legitimately called from `.cpp`/`.h`); JS/TS variants share a group; every
+/// other language is its own group (returns its extension).
+fn lang_group(path: &str) -> &str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "rs" => "rust",
+        "py" => "python",
+        "go" => "go",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "jsts",
+        "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hxx" => "cfamily",
+        "java" | "kt" | "kts" => "jvm",
+        other => other,
+    }
+}
+
+fn same_lang_group(a: &str, b: &str) -> bool {
+    lang_group(a) == lang_group(b)
+}
+
+/// Line numbers (1-based) that BEGIN inside a carried multi-line string literal
+/// or block comment — content continued from an earlier line. A caller match on
+/// such a line is inside a continued string/comment (single-line string
+/// stripping can't catch it, because the opening delimiter is on a previous
+/// line — e.g. a function name mentioned in a multi-line LLM prompt string).
+///
+/// Scoped to Rust and Python, the languages where this actually bites and where
+/// reach is call-graph-relevant: Rust string literals span lines and have
+/// `r#"…"#` raw strings; Python has `"""…"""` triple strings. Other extensions
+/// return an empty set (single-line stripping + the same-language filter still
+/// apply). Char literals / lifetimes (`'a`, `'"'`) are handled so a quote inside
+/// them doesn't spuriously open a string.
+fn lines_starting_in_multiline(content: &str, ext: &str) -> std::collections::HashSet<usize> {
+    use std::collections::HashSet;
+    enum St {
+        Code,
+        Block,
+        Str,
+        Raw(usize),
+        Triple(u8),
+    }
+    let rust = ext == "rs";
+    let py = ext == "py";
+    let mut out = HashSet::new();
+    if !rust && !py {
+        return out;
+    }
+    let b = content.as_bytes();
+    let mut st = St::Code;
+    let mut line = 1usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\n' {
+            line += 1;
+            match st {
+                St::Code => {}
+                // Python single-line "…"/'…' end at the newline; everything else
+                // (Rust "…" and raw strings, block comments, Python triples) carries.
+                St::Str if py => st = St::Code,
+                _ => {
+                    out.insert(line);
+                }
+            }
+            i += 1;
+            continue;
+        }
+        match st {
+            St::Code => {
+                if rust && c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if py && c == b'#' {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if rust && c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    st = St::Block;
+                    i += 2;
+                    continue;
+                }
+                if rust && c == b'\'' {
+                    // char literal 'x' / '\n' vs lifetime 'a — consume a char literal
+                    // whole so a quote inside it can't open a string.
+                    if b.get(i + 1) == Some(&b'\\') {
+                        let mut j = i + 2;
+                        while j < b.len() && b[j] != b'\'' && b[j] != b'\n' {
+                            j += 1;
+                        }
+                        i = if b.get(j) == Some(&b'\'') { j + 1 } else { i + 1 };
+                        continue;
+                    }
+                    if b.get(i + 2) == Some(&b'\'') {
+                        i += 3; // 'x'
+                        continue;
+                    }
+                    i += 1; // lifetime 'a
+                    continue;
+                }
+                if rust && c == b'r' {
+                    let prev_ident =
+                        i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+                    if !prev_ident {
+                        let mut j = i + 1;
+                        let mut h = 0usize;
+                        while b.get(j) == Some(&b'#') {
+                            h += 1;
+                            j += 1;
+                        }
+                        if b.get(j) == Some(&b'"') {
+                            st = St::Raw(h);
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+                if py && (c == b'"' || c == b'\'') && b.get(i + 1) == Some(&c)
+                    && b.get(i + 2) == Some(&c)
+                {
+                    st = St::Triple(c);
+                    i += 3;
+                    continue;
+                }
+                if c == b'"' || (py && c == b'\'') {
+                    st = St::Str;
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+            }
+            St::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    st = St::Code;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            St::Str => {
+                if c == b'\\' {
+                    i += 1;
+                    if i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == b'"' || (py && c == b'\'') {
+                    st = St::Code;
+                }
+                i += 1;
+            }
+            St::Raw(h) => {
+                if c == b'"' {
+                    let mut j = i + 1;
+                    let mut cnt = 0usize;
+                    while cnt < h && b.get(j) == Some(&b'#') {
+                        cnt += 1;
+                        j += 1;
+                    }
+                    if cnt == h {
+                        st = St::Code;
+                        i = j;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            St::Triple(q) => {
+                if c == q && b.get(i + 1) == Some(&q) && b.get(i + 2) == Some(&q) {
+                    st = St::Code;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn is_definition_line(line: &str) -> bool {
@@ -1530,6 +1741,45 @@ fn truncate_snippet(s: &str, max_chars: usize) -> &str {
 mod tests {
     use super::*;
     use crate::mapper::{MappedFile, Signature, SymbolKind};
+
+    #[test]
+    fn same_language_group_gates_cross_language_callers() {
+        // A Swift `submit()` is never a caller of a Rust `Gate::submit`.
+        assert!(!same_lang_group("indicator/x.swift", "src/action.rs"));
+        assert!(same_lang_group("src/a.rs", "src/b.rs"));
+        // C sources and headers share a group (a .c def is called from .cpp/.h).
+        assert!(same_lang_group("src/a.c", "include/a.h"));
+        assert!(same_lang_group("a.cpp", "b.hpp"));
+        // JS/TS variants share a group.
+        assert!(same_lang_group("a.ts", "b.tsx"));
+        assert!(!same_lang_group("a.py", "b.go"));
+    }
+
+    #[test]
+    fn multiline_string_lines_are_masked() {
+        // A function name mentioned inside a multi-line Rust string literal (an
+        // LLM prompt) must not read as a caller: the lines that BEGIN inside the
+        // continued string are masked; real code before/after is not.
+        let src = "fn f() {\n    let prompt = \"summarize this\n    do NOT re-judge the numbers\n    end of prompt\";\n    judge(x);\n}\n";
+        let masked = lines_starting_in_multiline(src, "rs");
+        assert!(masked.contains(&3), "line 3 is inside the string");
+        assert!(masked.contains(&4), "line 4 begins inside the string");
+        assert!(!masked.contains(&2), "line 2 opens the string but begins in code");
+        assert!(!masked.contains(&5), "line 5 (judge(x)) is real code");
+
+        // Rust lifetimes and char literals must not spuriously open a string.
+        let life = "fn g<'a>(x: &'a str) {\n    let q = '\"';\n    call_here();\n}\n";
+        assert!(lines_starting_in_multiline(life, "rs").is_empty());
+
+        // Python triple-quoted docstrings carry across lines.
+        let pysrc = "def f():\n    \"\"\"\n    mentions handler here\n    \"\"\"\n    handler()\n";
+        let pym = lines_starting_in_multiline(pysrc, "py");
+        assert!(pym.contains(&3));
+        assert!(!pym.contains(&5));
+
+        // Non-Rust/Python extensions are not masked.
+        assert!(lines_starting_in_multiline(src, "go").is_empty());
+    }
 
     #[test]
     fn line_reference_check_rejects_non_calls() {
