@@ -2353,8 +2353,17 @@ impl McpServer {
             "git_churn" => {
                 let limit = call.arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let churn = crate::git_analysis::git_churn(&api_state.root_path, limit);
+                // The tool contract is "sorted by churn count"; a HashMap serialises
+                // in arbitrary order, so emit an explicitly descending array (ties
+                // broken by path for determinism).
+                let mut ranked: Vec<(&String, &usize)> = churn.iter().collect();
+                ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                let out: Vec<serde_json::Value> = ranked
+                    .into_iter()
+                    .map(|(file, count)| serde_json::json!({ "file": file, "commits": count }))
+                    .collect();
                 Ok(McpToolResult {
-                    content: vec![McpContent::text(serde_json::to_string(&churn).unwrap_or_default())],
+                    content: vec![McpContent::text(serde_json::to_string(&out).unwrap_or_default())],
                     is_error: None,
                 })
             }
