@@ -748,6 +748,14 @@ enum LayerCommands {
 }
 
 fn main() -> Result<()> {
+    // Deeply nested ASTs (macro-generated C initializers, etc.) recurse the
+    // tree-sitter walkers far enough to overflow a worker's default ~2 MB stack —
+    // the Linux kernel aborts the whole process this way. Give rayon workers a
+    // large stack. Must run before any par_iter; best-effort (no-op if the global
+    // pool already exists).
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(256 * 1024 * 1024)
+        .build_global();
     let cli = Cli::parse();
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     // Resolve target: CLI flag > per-repo .codecartographer/config.toml > global config > claude

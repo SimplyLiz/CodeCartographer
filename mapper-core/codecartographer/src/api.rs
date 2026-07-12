@@ -2357,6 +2357,83 @@ impl ApiState {
             .unwrap_or(CompressionLevel::Standard)
     }
 
+    /// Iterative Tarjan strongly-connected components over a directed GraphMap.
+    /// petgraph 0.6's `tarjan_scc` recurses once per node, so on a very large,
+    /// deep graph the DFS overflows the stack and ABORTS the process — the Linux
+    /// kernel's ~64k-node include graph triggers exactly this. This explicit-stack
+    /// version is depth-independent. Same result shape as `petgraph::algo::tarjan_scc`
+    /// (one Vec per component). Node order comes from the GraphMap's insertion-ordered
+    /// node list, so output is deterministic.
+    fn tarjan_scc_iter<'a>(graph: &DiGraphMap<&'a str, ()>) -> Vec<Vec<&'a str>> {
+        let node_ids: Vec<&'a str> = graph.nodes().collect();
+        let n = node_ids.len();
+        let idx: HashMap<&str, usize> =
+            node_ids.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, &v) in node_ids.iter().enumerate() {
+            for w in graph.neighbors(v) {
+                if let Some(&j) = idx.get(w) {
+                    adj[i].push(j);
+                }
+            }
+        }
+
+        const UNVISITED: usize = usize::MAX;
+        let mut index = vec![UNVISITED; n];
+        let mut lowlink = vec![0usize; n];
+        let mut on_stack = vec![false; n];
+        let mut tstack: Vec<usize> = Vec::new(); // Tarjan's node stack
+        let mut sccs: Vec<Vec<&'a str>> = Vec::new();
+        let mut next = 0usize;
+        // Explicit DFS stack of (node, next-neighbor cursor) replacing recursion.
+        let mut call: Vec<(usize, usize)> = Vec::new();
+
+        for start in 0..n {
+            if index[start] != UNVISITED {
+                continue;
+            }
+            call.push((start, 0));
+            while let Some(&(v, ci)) = call.last() {
+                if index[v] == UNVISITED {
+                    index[v] = next;
+                    lowlink[v] = next;
+                    next += 1;
+                    tstack.push(v);
+                    on_stack[v] = true;
+                }
+                if ci < adj[v].len() {
+                    call.last_mut().unwrap().1 = ci + 1;
+                    let w = adj[v][ci];
+                    if index[w] == UNVISITED {
+                        call.push((w, 0));
+                    } else if on_stack[w] {
+                        lowlink[v] = lowlink[v].min(index[w]);
+                    }
+                } else {
+                    // v fully explored: if it's an SCC root, pop the component.
+                    if lowlink[v] == index[v] {
+                        let mut comp = Vec::new();
+                        loop {
+                            let w = tstack.pop().unwrap();
+                            on_stack[w] = false;
+                            comp.push(node_ids[w]);
+                            if w == v {
+                                break;
+                            }
+                        }
+                        sccs.push(comp);
+                    }
+                    call.pop();
+                    // Propagate lowlink to the parent (the recursive return step).
+                    if let Some(&(p, _)) = call.last() {
+                        lowlink[p] = lowlink[p].min(lowlink[v]);
+                    }
+                }
+            }
+        }
+        sccs
+    }
+
     fn detect_cycles(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<CycleInfo> {
         let mut graph: DiGraphMap<&str, ()> = DiGraphMap::new();
 
@@ -2372,7 +2449,7 @@ impl ApiState {
             graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
         }
 
-        let sccs = petgraph::algo::tarjan_scc(&graph);
+        let sccs = Self::tarjan_scc_iter(&graph);
 
         let hub_nodes: std::collections::HashSet<&str> = nodes
             .iter()
@@ -2609,7 +2686,7 @@ impl ApiState {
             }
         }
 
-        let sccs = petgraph::algo::tarjan_scc(&graph);
+        let sccs = Self::tarjan_scc_iter(&graph);
         sccs.iter()
             .any(|c| c.len() > 1 && c.contains(&target_module))
     }
