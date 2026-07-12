@@ -174,6 +174,8 @@ def action_build_install():
     install_binary()
     section("Verifying")
     verify()
+    section("Environment check")
+    _codecartographer(["doctor"])
 
 def action_build_only():
     section("Checking Rust")

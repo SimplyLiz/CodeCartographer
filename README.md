@@ -29,6 +29,11 @@ What would you like to do? [map/source/diagram/query/quit]:
 cd mapper-core/CodeCartographer && cargo build --release
 cp target/release/codecartographer ~/.local/bin/codecartographer
 
+# Optional: renderers for exporting diagrams to SVG/PNG (core features need neither)
+#   mmdc — Mermaid: npm install -g @mermaid-js/mermaid-cli
+#   dot  — Graphviz: brew install graphviz
+# Run `codecartographer doctor` any time to see what's installed.
+
 # Initialise project config
 codecartographer init
 

@@ -68,6 +68,11 @@ export PATH="$HOME/.local/bin:$PATH"
 if codecartographer --version &> /dev/null; then
     VERSION=$(codecartographer --version)
     echo "✓ CMP is working: $VERSION"
+
+    # Report which optional external tools (git, mmdc, dot) are available so the
+    # user knows up front what diagram-export / git-analysis features will work.
+    echo ""
+    codecartographer doctor || true
 else
     echo "⚠️  Please restart your terminal for PATH changes to take effect"
 fi

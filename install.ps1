@@ -65,6 +65,10 @@ Write-Host "Testing installation..." -ForegroundColor Yellow
 $version = & cmp --version 2>&1
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✓ CMP is working: $version" -ForegroundColor Green
+
+    # Report which optional external tools (git, mmdc, dot) are available.
+    Write-Host ""
+    & codecartographer doctor
 } else {
     Write-Host "⚠️  Please restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
 }

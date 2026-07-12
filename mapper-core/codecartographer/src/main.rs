@@ -6,6 +6,7 @@ mod class_graph;
 mod cross_call;
 mod diagram;
 mod diagram_export;
+mod doctor;
 mod extractor;
 mod formatter;
 mod html_export;
@@ -365,6 +366,13 @@ enum Commands {
     Check {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+    /// Check the environment for the external tools diagrams and git-analysis need
+    /// (git, mmdc, dot) and report anything missing with install hints.
+    Doctor {
+        /// Exit non-zero if a recommended tool (git) is missing — for CI.
+        #[arg(long)]
+        strict: bool,
     },
     /// Manage architectural layer definitions (layers.toml)
     Layers {
@@ -908,6 +916,13 @@ fn main() -> Result<()> {
         Some(Commands::Check { path }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
             check_mode(&root)
+        }
+        Some(Commands::Doctor { strict }) => {
+            let report = doctor::run();
+            if strict && report.missing_recommended > 0 {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Some(Commands::Path { path, from, to, json }) => {
             let root = resolve_path(&cwd, path.or(cli.path))?;
@@ -3627,8 +3642,16 @@ fn diagram_mode(
     let rendered = diagram::render(&graph, &opts).map_err(|e| anyhow::anyhow!(e))?;
 
     if rendered.node_count == 0 {
-        eprintln!("No nodes to diagram — run `codecartographer source` first to index this project.");
-        eprintln!("Or point at a specific path: codecartographer diagram <path>");
+        if graph.nodes.is_empty() {
+            eprintln!("No nodes to diagram — no source files were found under this path.");
+            eprintln!("Point at a directory that contains source: codecartographer diagram <path>");
+        } else {
+            eprintln!(
+                "No nodes to diagram — {} files were scanned but none share a rendered edge.",
+                graph.nodes.len()
+            );
+            eprintln!("The import graph has no resolvable relationships to draw at this granularity.");
+        }
         return Ok(());
     }
 
