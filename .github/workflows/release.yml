@@ -25,7 +25,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: mapper-core/CodeCartographer
+        working-directory: mapper-core/codecartographer
 
     steps:
       - uses: actions/checkout@v4
@@ -42,8 +42,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            mapper-core/CodeCartographer/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('mapper-core/CodeCartographer/Cargo.lock') }}
+            mapper-core/codecartographer/target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('mapper-core/codecartographer/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Install Linux dependencies
@@ -86,14 +86,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: mapper-core/CodeCartographer/${{ matrix.artifact }}.tar.gz
+          path: mapper-core/codecartographer/${{ matrix.artifact }}.tar.gz
           retention-days: 1
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: codecartographer-binary-${{ matrix.artifact }}
-          path: mapper-core/CodeCartographer/codecartographer-binary-${{ matrix.artifact }}.tar.gz
+          path: mapper-core/codecartographer/codecartographer-binary-${{ matrix.artifact }}.tar.gz
           retention-days: 1
 
   release:
