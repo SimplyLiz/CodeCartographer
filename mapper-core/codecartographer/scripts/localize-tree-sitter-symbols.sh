@@ -86,7 +86,19 @@ cp "$ARCHIVE_ABS" "$WORK/input.a"
   # `-nostdlib` prevents clang/gcc from pulling in CRT or libSystem.
   case "$(uname -s)" in
     Darwin)
-      "$CC" -nostdlib -Wl,-r -o combined.o -Wl,-force_load,input.a
+      # Pin the partial-link arch to the archive's actual arch. Native builds
+      # (arm64 lib on an arm64 host) don't need it, but when x86_64 is
+      # cross-built on Apple Silicon the driver's default arch is arm64 and the
+      # `-r` link would reject the x86_64 objects. `lipo -archs` reads it off the
+      # archive; empty result falls back to the driver default.
+      # Plain string (not an array): macOS runners ship bash 3.2, where an empty
+      # array expansion under `set -u` errors. ARCH is a single token
+      # (x86_64 / arm64), so unquoted word-splitting is exactly what we want.
+      ARCH="$(lipo -archs input.a 2>/dev/null | awk '{print $1}')"
+      ARCH_FLAG=""
+      [[ -n "$ARCH" ]] && ARCH_FLAG="-arch $ARCH"
+      # shellcheck disable=SC2086
+      "$CC" $ARCH_FLAG -nostdlib -Wl,-r -o combined.o -Wl,-force_load,input.a
       ;;
     *)
       # `-no-pie`: GCC on modern distros (Ubuntu) defaults to building PIE, and

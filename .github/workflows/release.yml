@@ -66,7 +66,11 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: codecartographer-aarch64-apple-darwin
-          - os: macos-13
+          # x86_64 cross-built on Apple Silicon (macos-latest) — the scarce/
+          # deprecated macos-13 Intel runners queue for hours. Rust cross-compiles
+          # x86_64-apple-darwin natively from arm64, and the localize step pins
+          # the partial-link arch via `lipo -archs`.
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact: codecartographer-x86_64-apple-darwin
           - os: ubuntu-latest
