@@ -28,6 +28,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: codecartographer-x86_64-unknown-linux-gnu
+          # linux-arm64 on a native ARM runner (no cross-toolchain needed): the
+          # -no-pie partial link and rust-objcopy localization are the same Unix
+          # mechanism as x86_64, just on aarch64. CKB ships a linux/arm64 build,
+          # so it needs this .a.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: codecartographer-aarch64-unknown-linux-gnu
           # Windows: binary only. The static lib (consumed by CKB) stays
           # macOS/Linux — the tree-sitter symbol-localization step is a Unix
           # linker mechanism (ld -r + objcopy on an ar archive) that has no MSVC
@@ -137,6 +144,14 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        # Single sha256 manifest over every released tarball. CKB pins the
+        # library artifact by this checksum when it fetches and links the .a,
+        # so a tampered or truncated download fails the build instead of
+        # linking silently.
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > checksums.txt
+
       - name: Extract changelog entry
         id: changelog
         shell: bash
@@ -157,5 +172,6 @@ jobs:
           body_path: release_notes.md
           files: |
             artifacts/*.tar.gz
+            artifacts/checksums.txt
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
