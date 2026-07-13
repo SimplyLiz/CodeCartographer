@@ -234,11 +234,20 @@ the conversation window stays clean, and the call was routed to the cheapest via
 
 ## What CodeCartographer is NOT trying to replace
 
-CodeCartographer is intentionally scoped to fast structural analysis. It will not grow into:
-- A persistent memory store (that's TruthKeeper)
-- A compiler or type checker (that's CKB / SCIP)
-- An embedding store (that's TurboQuant + a vector DB)
-- A context window manager (that's ContextCompressionEngine)
-- A model router or cost optimizer (that's LLMRouter / FrugalRoute)
+CodeCartographer is a **standalone** project. It ships and runs on its own — the
+other systems below are optional complements, never dependencies. It is
+intentionally scoped to fast, deterministic structural analysis and will not grow
+into:
+- A persistent memory store (pair with TruthKeeper)
+- A compiler or type checker (pair with CKB / SCIP for compiler-precise resolution)
+- An embedding store (pair with TurboQuant + a vector DB)
+- A context window manager (pair with ContextCompressionEngine)
+- A model router or cost optimizer (pair with LLMRouter / FrugalRoute)
 
-These are hard boundaries. The value of each system comes from staying in its lane.
+These are hard boundaries. But a boundary is not an excuse: within its own lane
+CodeCartographer must be correct on its own output, not lean on a downstream
+consumer to clean it up. Its resolution is heuristic and deterministic by design;
+where that heuristic can be made more precise without a full type-checker (e.g.
+rejecting a caller match that is really a different module's same-named symbol),
+that is CodeCartographer's job to get right — even though CKB, when present, would
+also catch it.

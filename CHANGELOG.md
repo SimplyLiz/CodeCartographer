@@ -4,6 +4,95 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — stack overflow (process abort) on very large repos
+
+Measured against a full Linux-kernel checkout (~64k C/H files, 362k edges), two
+unbounded recursions aborted the whole process (SIGABRT, "stack overflow") —
+and, when linked via FFI, took the host down with it:
+
+- **Recursive tree-sitter walkers overflowed on deep ASTs.** The per-language
+  walkers (`walk_c_cpp` et al.) recurse by AST depth; macro-generated C
+  initializers in the kernel nest deep enough to overflow a rayon worker's
+  default ~2 MB stack. Parse extraction now runs on a dedicated pool with a
+  256 MB per-worker stack (both the CLI and the FFI `build_mapped_files` path).
+- **`petgraph::algo::tarjan_scc` is recursive.** Cycle detection (and
+  `check_would_create_cycle`) recursed once per node; a large, deep graph blew
+  the main-thread stack. Replaced with an iterative, explicit-stack Tarjan SCC —
+  depth-independent and deterministic.
+- **Hard depth ceiling on the walkers (belt to the big-stack braces).** The
+  256 MB stack absorbs any real nesting, but a bounded stack can still be blown
+  by adversarial/generated input; a small RAII depth guard now caps walker
+  recursion at 50,000. Justified by measurement: the guard, instrumented over the
+  full kernel, peaked at a real-world **3,348** — the cap sits ~15× above that
+  (real code is never clipped) and ~6× below the stack's capacity (~320k frames),
+  so it can never overflow yet never truncates genuine code. Covers all seven
+  tree-sitter walkers plus the recursive JSON-ref collector.
+
+Result: the kernel now analyzes cleanly in ~26–34 s (cold), health 30.0, 12862
+bridges / 76 cycles / 145 god-modules, deterministic run-to-run; directory
+rollup folds it to 562 subsystems (depth 2). Godot output unchanged.
+
+### Fixed
+
+- **Structural analysis was blind to Rust code, measuring docs instead.** Rust
+  crate-internal `use crate::io::language::Foo` imports collapsed to the bare stem
+  `language` and fell through to the resolver's low-confidence `fuzzy` fallback.
+  Since bridges/cycles/health/roles run only on non-fuzzy edges, *every*
+  crate-internal edge was dropped — on a doc-heavy Rust repo the only edges left
+  were Markdown cross-references, so health, cycles and `ranked_skeleton` were
+  computed entirely from documentation and core modules were mislabeled `dead`.
+  Rust imports now resolve authoritatively against the full qualified path (a
+  branch mirroring the Go resolver), tagged `suffix`; external crates yield no
+  edge. Separately, the code-health metrics now exclude the documentation
+  subgraph and `ranked_skeleton` drops non-focused docs (docs have `doc_index` /
+  `doc_context`). On a 186-file Rust repo: 80 code edges now structural (was 0).
+- **MCP server crashed on non-ASCII indexed content.** `truncate_str` sliced a
+  string at a raw byte offset with no char-boundary check, so any repo carrying
+  multi-byte UTF-8 in a JSON string value (accented text, en/em-dashes, emoji)
+  panicked and took the whole server down on `switch_project` / indexing. It now
+  backs off to the nearest char boundary.
+- **reach — cross-language and multi-line-string false callers.** `reach_symbol`
+  caller search is text-based; it reported a bare `submit()` in a `.swift` file as
+  a caller of a Rust `Gate::submit`, and a symbol named inside a multi-line prompt
+  string (`…re-judge…`) as a real reference. Callers are now restricted to the
+  definition's language group, and lines that begin inside a carried
+  string/comment are masked (Rust/Python).
+- **answer_question ranked name coincidences over real code.** Query terms were
+  matched against symbol names by raw substring, so `converse_actionable` matched
+  "action" and outranked `Gate` / `execute_proposal` for an "action approval gate"
+  question. Matching is now token-aware (whole identifier words) with a cheap
+  inflection rule (approve~approval, execute~executes) that rejects lookalikes
+  (action~actionable).
+- **git churn/coupling counted noise and returned unsorted churn.** `git_churn`,
+  `git_cochange`, `hidden_coupling` and shotgun-surgery included lockfiles, images
+  and PDFs as first-class hotspots. The scanner's noise lists are now applied to
+  the git-history path (source/config/docs kept). `git_churn` also emits a sorted
+  `{file, commits}` array instead of an arbitrarily-ordered map, and the
+  documented `0 → 500` commit-limit default is now implemented (was `-n 0`).
+
+## [4.0.0] - 2026-07-12
+
+Version reconciliation: the crate had drifted to `1.5.0` in `Cargo.toml` while the
+only published git tag was `v3.0.0`. This release realigns the two under a single
+`4.0.0` that supersedes the orphaned `v3.0.0` tag.
+
+### Fixed
+
+- **reach — precise caller/callee references on Rust (and other languages).**
+  `reach_symbol` caller/callee edges were derived from text search and surfaced
+  incidental name matches as call edges. They are now resolved from the call graph,
+  eliminating the text-search noise.
+- **release pipeline — case-sensitive path break on Linux.** The release workflow
+  referenced `mapper-core/CodeCartographer` while the tracked directory is
+  `mapper-core/codecartographer`. This passed on case-insensitive macOS but failed
+  the Linux matrix leg, which failed the `build` job and skipped the `release`
+  publish. Paths are now lowercase so tagged releases publish across all targets.
+
+### Changed
+
+- **Docs — standalone positioning.** CodeCartographer is documented as a standalone
+  tool rather than a CKB-dependent component.
+
 ## [1.5.0] - 2026-07-11
 
 ### Added — dynamic MCP project root (roots auto-follow + `switch_project`)

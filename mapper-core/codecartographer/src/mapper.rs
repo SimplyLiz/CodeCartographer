@@ -2662,7 +2662,19 @@ fn json_walk(
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max]) }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        // `max` is a byte budget. Slicing a &str at an arbitrary byte offset
+        // panics if it lands inside a multi-byte UTF-8 char (e.g. an en-dash
+        // '–' or 'ü' in indexed JSON strings), so back off to the nearest
+        // char boundary at or below `max`.
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
 }
 
 /// Extract OpenAPI endpoints from a parsed JSON object.
@@ -2745,6 +2757,9 @@ fn extract_json_schema(
 }
 
 fn collect_json_refs(obj: &serde_json::Map<String, serde_json::Value>, imports: &mut Vec<String>) {
+    // Depth-guard: deeply nested JSON (adversarial or generated) could otherwise
+    // recurse the stack to overflow, same class as the tree-sitter walkers.
+    let _depth = match crate::extractor::DepthGuard::enter() { Some(g) => g, None => return };
     for (key, val) in obj {
         if key == "$ref" {
             if let Some(r) = val.as_str() {
