@@ -89,7 +89,11 @@ cp "$ARCHIVE_ABS" "$WORK/input.a"
       "$CC" -nostdlib -Wl,-r -o combined.o -Wl,-force_load,input.a
       ;;
     *)
-      "$CC" -nostdlib -Wl,-r -o combined.o \
+      # `-no-pie`: GCC on modern distros (Ubuntu) defaults to building PIE, and
+      # the driver then passes `-pie` to the linker — which errors out on a
+      # relocatable partial link ("-r and -pie may not be used together"). This
+      # is a relocatable object, not an executable, so disable PIE explicitly.
+      "$CC" -nostdlib -no-pie -Wl,-r -o combined.o \
         -Wl,--whole-archive input.a -Wl,--no-whole-archive
       ;;
   esac
