@@ -4,11 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  # Allow build-only validation runs (all targets, including the Windows leg)
+  # without cutting a release — the publish job below is gated to tags.
+  workflow_dispatch:
 
 jobs:
   build:
     name: Build — ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # The Windows leg is optional (marked `optional: true`): a failure there must
+    # not fail the build job and block the macOS/Linux release publish.
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +28,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: codecartographer-x86_64-unknown-linux-gnu
+          # Windows: binary only. The static lib (consumed by CKB) stays
+          # macOS/Linux — the tree-sitter symbol-localization step is a Unix
+          # linker mechanism (ld -r + objcopy on an ar archive) that has no MSVC
+          # COFF equivalent, and a standalone binary can't hit the symbol
+          # collision it guards against. Lib/header steps are skipped below.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: codecartographer-x86_64-pc-windows-msvc
+            optional: true
 
     defaults:
       run:
@@ -54,6 +69,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Localize tree-sitter symbols
+        if: runner.os != 'Windows'
         # Hides ts_* / tree_sitter_* symbols inside libcode_cartographer.a so
         # consumers that also link tree-sitter (e.g. Go projects using
         # go-tree-sitter) don't collide at link time. See script header
@@ -61,9 +77,11 @@ jobs:
         run: scripts/localize-tree-sitter-symbols.sh target/${{ matrix.target }}/release/libcode_cartographer.a
 
       - name: Regenerate header
+        if: runner.os != 'Windows'
         run: cargo install cbindgen --locked 2>/dev/null || true && cbindgen --config cbindgen.toml --output include/codecartographer.h
 
       - name: Package library artifact
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
@@ -79,10 +97,13 @@ jobs:
         run: |
           BINARY_ARTIFACT="codecartographer-binary-${{ matrix.artifact }}"
           mkdir -p "staging-bin/${BINARY_ARTIFACT}"
-          cp "target/${{ matrix.target }}/release/codecartographer" "staging-bin/${BINARY_ARTIFACT}/"
+          BIN="target/${{ matrix.target }}/release/codecartographer"
+          [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"   # Windows binary carries .exe
+          cp "$BIN" "staging-bin/${BINARY_ARTIFACT}/"
           tar -czf "${BINARY_ARTIFACT}.tar.gz" -C staging-bin "${BINARY_ARTIFACT}"
 
       - name: Upload library artifact
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -99,6 +120,8 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
+    # Publish only for real version tags; workflow_dispatch runs build-only.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
