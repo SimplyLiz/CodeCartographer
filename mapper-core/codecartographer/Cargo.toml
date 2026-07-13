@@ -1,9 +1,12 @@
 [package]
 name = "CodeCartographer"
-version = "4.0.0"
+version = "4.0.1"
 edition = "2021"
 description = "CodeCartographer for Architectural Intelligence"
 authors = ["SimplyLiz"]
+repository = "https://github.com/SimplyLiz/CodeCartographer"
+homepage = "https://github.com/SimplyLiz/CodeCartographer"
+license = "LicenseRef-CodeCartographer-FairUse"
 
 [[bin]]
 name = "codecartographer"

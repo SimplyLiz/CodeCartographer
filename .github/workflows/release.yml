@@ -5,13 +5,57 @@ on:
     tags:
       - "v*"
   # Allow build-only validation runs (all targets, including the Windows leg)
-  # without cutting a release — the publish job below is gated to tags.
+  # without cutting a release — the upload/publish steps below are gated to tags.
   workflow_dispatch:
 
+# Assets are uploaded straight to the GitHub Release from each build job
+# (`gh release upload`), never through actions/upload-artifact. Release assets
+# don't count against the Actions artifact storage quota, so a full quota can
+# never block a release.
 jobs:
+  create-release:
+    name: Create draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog entry
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk "/^## \[?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          [ -z "$NOTES" ] && NOTES="Release ${GITHUB_REF_NAME}"
+          echo "$NOTES" > release_notes.md
+
+      - name: Create draft release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PRE=""
+          [[ "$TAG" == *-* ]] && PRE="--prerelease"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — reusing it."
+          else
+            gh release create "$TAG" \
+              --draft $PRE \
+              --title "CodeCartographer $TAG" \
+              --notes-file release_notes.md
+          fi
+
   build:
     name: Build — ${{ matrix.target }}
+    needs: create-release
+    # Run whether create-release succeeded (tag push) or was skipped
+    # (workflow_dispatch validation) — only a real failure/cancel stops us.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     # The Windows leg is optional (marked `optional: true`): a failure there must
     # not fail the build job and block the macOS/Linux release publish.
     continue-on-error: ${{ matrix.optional == true }}
@@ -22,12 +66,23 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: codecartographer-aarch64-apple-darwin
-          - os: macos-13
+          # x86_64 cross-built on Apple Silicon (macos-latest) — the scarce/
+          # deprecated macos-13 Intel runners queue for hours. Rust cross-compiles
+          # x86_64-apple-darwin natively from arm64, and the localize step pins
+          # the partial-link arch via `lipo -archs`.
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact: codecartographer-x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: codecartographer-x86_64-unknown-linux-gnu
+          # linux-arm64 on a native ARM runner (no cross-toolchain needed): the
+          # -no-pie partial link and rust-objcopy localization are the same Unix
+          # mechanism as x86_64, just on aarch64. CKB ships a linux/arm64 build,
+          # so it needs this .a.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: codecartographer-aarch64-unknown-linux-gnu
           # Windows: binary only. The static lib (consumed by CKB) stays
           # macOS/Linux — the tree-sitter symbol-localization step is a Unix
           # linker mechanism (ld -r + objcopy on an ar archive) that has no MSVC
@@ -86,7 +141,6 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME}"
           ARTIFACT="${{ matrix.artifact }}"
           STAGING="staging/${ARTIFACT}"
           mkdir -p "${STAGING}/lib" "${STAGING}/include"
@@ -104,58 +158,39 @@ jobs:
           cp "$BIN" "staging-bin/${BINARY_ARTIFACT}/"
           tar -czf "${BINARY_ARTIFACT}.tar.gz" -C staging-bin "${BINARY_ARTIFACT}"
 
-      - name: Upload library artifact
-        if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: mapper-core/codecartographer/${{ matrix.artifact }}.tar.gz
-          retention-days: 1
+      # Upload straight to the release (tag runs only). --clobber makes re-runs
+      # idempotent. workflow_dispatch validation builds skip this and just prove
+      # the compile/localize path, using zero artifact storage.
+      - name: Upload assets to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILES=()
+          [ -f "${{ matrix.artifact }}.tar.gz" ] && FILES+=("${{ matrix.artifact }}.tar.gz")
+          FILES+=("codecartographer-binary-${{ matrix.artifact }}.tar.gz")
+          gh release upload "$TAG" "${FILES[@]}" --clobber
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: codecartographer-binary-${{ matrix.artifact }}
-          path: mapper-core/codecartographer/codecartographer-binary-${{ matrix.artifact }}.tar.gz
-          retention-days: 1
-
-  release:
-    name: Publish GitHub Release
+  finalize:
+    name: Checksums + publish
     needs: build
-    # Publish only for real version tags; workflow_dispatch runs build-only.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Extract changelog entry
-        id: changelog
+      - name: Checksum all release tarballs and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          # Pull the block for this version out of CHANGELOG.md
-          NOTES=$(awk "/^## \[?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
-          if [ -z "$NOTES" ]; then
-            NOTES="Release ${GITHUB_REF_NAME}"
-          fi
-          # Write to file to avoid quoting issues
-          echo "$NOTES" > release_notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: CodeCartographer ${{ github.ref_name }}
-          body_path: release_notes.md
-          files: |
-            artifacts/*.tar.gz
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dl && cd dl
+          # Release-asset download does not touch the Actions artifact quota.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir .
+          sha256sum *.tar.gz > checksums.txt
+          gh release upload "$TAG" checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
+          # Flip the draft live now that every asset + checksum is attached.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

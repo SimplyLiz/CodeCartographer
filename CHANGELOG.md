@@ -4,6 +4,27 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [4.0.1] — 2026-07-13
+
+First release to actually publish the C-ABI static-library artifacts (the
+`v4.0.0` tag's release run never produced them). Consumed by CKB, which fetches
+and links the prebuilt `.a` instead of vendoring the source.
+
+### Fixed — release pipeline produces the static-lib artifacts
+
+- **Linux partial link failed under PIE.** The tree-sitter symbol-localization
+  step (`ld -r`) collided with modern Ubuntu's default `-pie` (*"-r and -pie may
+  not be used together"*); the relocatable link now passes `-no-pie`, so the
+  Linux `.a` builds and localizes cleanly.
+- **linux-arm64 static library** — added `aarch64-unknown-linux-gnu` on a native
+  `ubuntu-24.04-arm` runner; CKB ships a linux/arm64 build and consumes this `.a`.
+- **Checksums** — the release now emits a `sha256` `checksums.txt` over every
+  tarball, so consumers (CKB) can pin the library artifact by checksum.
+- **Repository metadata** — homepage/repository/license updated after the
+  transfer to `github.com/SimplyLiz/CodeCartographer`.
+
+## [4.0.0] — 2026-07-13
+
 ### Fixed — stack overflow (process abort) on very large repos
 
 Measured against a full Linux-kernel checkout (~64k C/H files, 362k edges), two
