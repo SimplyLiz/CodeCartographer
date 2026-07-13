@@ -74,7 +74,9 @@ jobs:
         # consumers that also link tree-sitter (e.g. Go projects using
         # go-tree-sitter) don't collide at link time. See script header
         # for rationale and mechanism.
-        run: scripts/localize-tree-sitter-symbols.sh target/${{ matrix.target }}/release/libcode_cartographer.a
+        # Invoke via `bash` so a missing executable bit on the script can't fail
+        # the step (exit 126) — which broke the first tagged release.
+        run: bash scripts/localize-tree-sitter-symbols.sh target/${{ matrix.target }}/release/libcode_cartographer.a
 
       - name: Regenerate header
         if: runner.os != 'Windows'
