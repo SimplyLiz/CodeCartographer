@@ -146,6 +146,12 @@ jobs:
           mkdir -p "${STAGING}/lib" "${STAGING}/include"
           cp "target/${{ matrix.target }}/release/libcode_cartographer.a" "${STAGING}/lib/"
           cp "include/codecartographer.h" "${STAGING}/include/"
+          # License + third-party attribution must travel with the binary:
+          # Fair Use §3 requires the notice on redistribution, and the bundled
+          # MIT/Apache/BSD crates require their notices accompany the .a.
+          cp "${GITHUB_WORKSPACE}/LICENSE" "${STAGING}/"
+          cp "${GITHUB_WORKSPACE}/THIRD-PARTY-LICENSES" "${STAGING}/"
+          cp "${GITHUB_WORKSPACE}/README.md" "${STAGING}/"
           tar -czf "${ARTIFACT}.tar.gz" -C staging "${ARTIFACT}"
 
       - name: Package binary artifact
@@ -156,6 +162,11 @@ jobs:
           BIN="target/${{ matrix.target }}/release/codecartographer"
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"   # Windows binary carries .exe
           cp "$BIN" "staging-bin/${BINARY_ARTIFACT}/"
+          # Same license/attribution obligation applies to the standalone binary,
+          # which statically links the identical crate set.
+          cp "${GITHUB_WORKSPACE}/LICENSE" "staging-bin/${BINARY_ARTIFACT}/"
+          cp "${GITHUB_WORKSPACE}/THIRD-PARTY-LICENSES" "staging-bin/${BINARY_ARTIFACT}/"
+          cp "${GITHUB_WORKSPACE}/README.md" "staging-bin/${BINARY_ARTIFACT}/"
           tar -czf "${BINARY_ARTIFACT}.tar.gz" -C staging-bin "${BINARY_ARTIFACT}"
 
       # Upload straight to the release (tag runs only). --clobber makes re-runs
