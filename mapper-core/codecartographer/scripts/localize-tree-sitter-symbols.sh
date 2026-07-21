@@ -110,13 +110,20 @@ cp "$ARCHIVE_ABS" "$WORK/input.a"
       ;;
   esac
 
-  # Localize tree-sitter runtime (`ts_*`) and grammar init symbols
-  # (`tree_sitter_<lang>`, plus internal `tree_sitter_<lang>_external_scanner_*`
-  # helpers). Safe now that the combined object resolved internal refs.
+  # Keep ONLY the codecartographer_* FFI entry points global; localize every
+  # other defined symbol. This is deliberately broader than an allow-list of
+  # `ts_*` / `tree_sitter_*` patterns: the bundled tree-sitter runtime also
+  # exports internal helpers that don't share that prefix (e.g. `_ts_dup`),
+  # which a name-based localize misses — on ELF the GNU linker then aborts with
+  # "multiple definition" against a consumer's own tree-sitter copy, while
+  # Mach-O silently takes the first definition (latent ODR/memory-corruption
+  # risk). Since consumers only ever call the codecartographer_* FFI, keeping
+  # just those global is both correct and future-proof. Undefined symbols (libc
+  # imports) are unaffected. Safe now that the partial link resolved internal
+  # refs within combined.o.
   "$OBJCOPY" \
     --wildcard \
-    --localize-symbol="${UPREFIX}ts_*" \
-    --localize-symbol="${UPREFIX}tree_sitter_*" \
+    --keep-global-symbol="${UPREFIX}codecartographer_*" \
     combined.o
 
   # Replace the archive with just the combined, localized object.
