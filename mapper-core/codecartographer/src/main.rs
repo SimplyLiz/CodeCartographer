@@ -4056,10 +4056,17 @@ fn semidiff_mode(root: &Path, commit1: &str, commit2: &str) -> Result<()> {
 fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, MappedFile>> {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Deserialize)]
     struct MapCache {
         head: String,
         files: HashMap<String, MappedFile>,
+    }
+
+    /// Borrowed mirror for writing — see save_cache() in lib.rs.
+    #[derive(Serialize)]
+    struct MapCacheRef<'a> {
+        head: &'a str,
+        files: &'a HashMap<String, MappedFile>,
     }
 
     // Compute git HEAD (empty string if not a git repo)
@@ -4097,10 +4104,23 @@ fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, Mapp
         })
         .collect();
 
-    // Write cache
+    // Write cache — borrowed and streamed, so the map is not deep-copied and
+    // the encoded JSON never has to sit in memory alongside it.
     if !head.is_empty() {
-        if let Ok(json) = serde_json::to_string(&MapCache { head, files: result.clone() }) {
-            let _ = std::fs::write(&cache_path, json);
+        if let Ok(file) = fs::File::create(&cache_path) {
+            let mut writer = std::io::BufWriter::new(file);
+            if serde_json::to_writer(
+                &mut writer,
+                &MapCacheRef {
+                    head: &head,
+                    files: &result,
+                },
+            )
+            .is_ok()
+            {
+                use std::io::Write;
+                let _ = writer.flush();
+            }
         }
     }
 

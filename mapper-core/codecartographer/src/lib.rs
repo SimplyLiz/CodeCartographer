@@ -96,10 +96,18 @@ fn git_head(root: &Path) -> String {
 }
 
 /// Persistent cache envelope stored at `<root>/.codecartographer_cache.json`.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct MapCache {
     head: String,
     files: HashMap<String, MappedFile>,
+}
+
+/// Borrowed mirror of `MapCache` for writing. Owning the envelope would mean
+/// deep-copying the whole skeleton map just to hand it to serde.
+#[derive(serde::Serialize)]
+struct MapCacheRef<'a> {
+    head: &'a str,
+    files: &'a HashMap<String, MappedFile>,
 }
 
 fn cache_path(root: &Path) -> PathBuf {
@@ -123,9 +131,18 @@ fn save_cache(root: &Path, head: &str, files: &HashMap<String, MappedFile>) {
     if head.is_empty() {
         return;
     }
-    let cache = MapCache { head: head.to_string(), files: files.clone() };
-    if let Ok(json) = serde_json::to_vec(&cache) {
-        let _ = std::fs::write(cache_path(root), json);
+    // Stream borrowed data straight to the file. Cloning the map and then
+    // buffering the entire JSON in memory held three copies of the skeleton at
+    // once (map, clone, encoded bytes) at the peak of every cold build.
+    // A partial write is self-healing: it fails to deserialize, so the next
+    // load_cache() returns None and rebuilds.
+    let Ok(file) = std::fs::File::create(cache_path(root)) else {
+        return;
+    };
+    let mut writer = std::io::BufWriter::new(file);
+    if serde_json::to_writer(&mut writer, &MapCacheRef { head, files }).is_ok() {
+        use std::io::Write;
+        let _ = writer.flush();
     }
 }
 
