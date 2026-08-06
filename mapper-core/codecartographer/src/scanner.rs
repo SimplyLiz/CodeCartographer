@@ -284,6 +284,26 @@ impl CodeCartographerIgnorePattern {
     }
 }
 
+/// Length of the bracket expression starting at `chars[0] == '['`, including
+/// both brackets, or None if it is never closed. A leading '!'/'^' and a ']' in
+/// first position are part of the class, not its terminator.
+fn class_len(chars: &[char]) -> Option<usize> {
+    let mut i = 1;
+    if i < chars.len() && (chars[i] == '!' || chars[i] == '^') {
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == ']' {
+        i += 1;
+    }
+    while i < chars.len() {
+        if chars[i] == ']' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
     let mut out = String::from("^");
     let chars: Vec<char> = pattern.chars().collect();
@@ -305,7 +325,42 @@ fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
                 out.push_str("[^/]");
                 i += 1;
             }
-            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\' => {
+            // gitignore supports bracket expressions — [0-9], [a-z], [!x] to
+            // negate. Escaping the brackets turned every one of them into
+            // literal text, so a rule like `*_[0-9][0-9].json` could never match.
+            '[' => match class_len(&chars[i..]) {
+                Some(len) => {
+                    out.push('[');
+                    let end = i + len - 1; // index of the closing ']'
+                    let mut j = i + 1;
+                    if chars[j] == '!' || chars[j] == '^' {
+                        out.push('^');
+                        j += 1;
+                    }
+                    if j < end && chars[j] == ']' {
+                        out.push_str("\\]"); // ']' first in a class is a literal
+                        j += 1;
+                    }
+                    while j < end {
+                        // '-' passes through so ranges keep working; '\' and '['
+                        // are escaped so they cannot open a nested class.
+                        match chars[j] {
+                            '\\' => out.push_str("\\\\"),
+                            '[' => out.push_str("\\["),
+                            c => out.push(c),
+                        }
+                        j += 1;
+                    }
+                    out.push(']');
+                    i += len;
+                }
+                // Unterminated '[' — treat it as a literal, like git does.
+                None => {
+                    out.push_str("\\[");
+                    i += 1;
+                }
+            },
+            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | ']' | '\\' => {
                 out.push('\\');
                 out.push(chars[i]);
                 i += 1;
@@ -839,5 +894,50 @@ mod nested_ignore_tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod glob_class_tests {
+    use super::*;
+
+    fn m(pattern: &str, path: &str) -> bool {
+        CodeCartographerIgnorePattern::parse(pattern)
+            .expect("pattern failed to compile")
+            .matches(path)
+    }
+
+    /// The rule that let two 8.6 MB benchmark JSONs into the index: bracket
+    /// expressions were escaped into literals, so this could never match.
+    #[test]
+    fn timestamped_artifacts() {
+        let p = "docs/benchmark_results/**/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].json";
+        assert!(m(p, "docs/benchmark_results/v5.2.0/nonlinear_probe_1783337559.json"));
+        assert!(!m(p, "docs/benchmark_results/v5.2.0/summary.json"));
+    }
+
+    #[test]
+    fn ranges_and_negation() {
+        assert!(m("tmp[0-9].log", "tmp7.log"));
+        assert!(!m("tmp[0-9].log", "tmpx.log"));
+        assert!(m("[a-c]*.rs", "b_mod.rs"));
+        assert!(m("file[!0-9].txt", "filea.txt"));
+        assert!(!m("file[!0-9].txt", "file4.txt"));
+    }
+
+    /// A '[' that never closes is a literal, the way git treats it.
+    #[test]
+    fn unterminated_bracket_is_literal() {
+        assert!(m("weird[name.txt", "weird[name.txt"));
+    }
+
+    /// Wildcards must keep their existing meaning: '*' stays within one path
+    /// segment, '**' crosses separators.
+    #[test]
+    fn wildcards_unchanged() {
+        assert!(m("*.log", "app.log"));
+        assert!(!m("src/*.rs", "src/a/b.rs"));
+        assert!(m("src/**/*.rs", "src/a/b.rs"));
+        assert!(m("f?o.txt", "foo.txt"));
     }
 }
