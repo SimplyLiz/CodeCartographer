@@ -1,7 +1,8 @@
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 
 pub const IGNORED_DIRS: &[&str] = &[
@@ -319,9 +320,7 @@ fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
     regex::Regex::new(&out).ok()
 }
 
-/// Load .codecartographerignore from the repo root.
-pub fn load_codecartographer_ignore(root: &Path) -> Vec<CodeCartographerIgnorePattern> {
-    let path = root.join(".codecartographerignore");
+fn load_ignore_file(path: &Path) -> Vec<CodeCartographerIgnorePattern> {
     fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -329,37 +328,106 @@ pub fn load_codecartographer_ignore(root: &Path) -> Vec<CodeCartographerIgnorePa
         .collect()
 }
 
-/// Load .gitignore from the repo root.  Same pattern syntax — reuses the
-/// existing CodeCartographerIgnorePattern parser since .gitignore is compatible.
-pub fn load_gitignore(root: &Path) -> Vec<CodeCartographerIgnorePattern> {
-    let path = root.join(".gitignore");
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(CodeCartographerIgnorePattern::parse)
-        .collect()
+/// Ignore rules resolved the way git resolves them: a `.gitignore` applies to
+/// its own directory's subtree, with its patterns relative to that directory.
+///
+/// Reading only the root file misses most exclusions in multi-package repos —
+/// a nested `DMP/.gitignore` containing `/results/` left 18k benchmark-output
+/// JSONs in the index because the root file's `/results/` is anchored at the
+/// repo root and never applied there.
+///
+/// Layers are loaded lazily per directory and cached; most directories have no
+/// ignore file, which caches as an empty layer.
+pub struct IgnoreIndex {
+    root: PathBuf,
+    layers: Mutex<HashMap<String, Arc<Vec<CodeCartographerIgnorePattern>>>>,
 }
 
+impl IgnoreIndex {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            layers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Patterns declared in `dir_rel` ("" = repo root).
+    fn layer(&self, dir_rel: &str) -> Arc<Vec<CodeCartographerIgnorePattern>> {
+        if let Some(hit) = self.layers.lock().unwrap().get(dir_rel) {
+            return Arc::clone(hit);
+        }
+        let dir = if dir_rel.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(dir_rel)
+        };
+        // .codecartographerignore is appended last so its rules (including
+        // negations) take precedence over .gitignore at the same level.
+        let mut pats = load_ignore_file(&dir.join(".gitignore"));
+        pats.extend(load_ignore_file(&dir.join(".codecartographerignore")));
+        let layer = Arc::new(pats);
+        self.layers
+            .lock()
+            .unwrap()
+            .insert(dir_rel.to_string(), Arc::clone(&layer));
+        layer
+    }
+
+    /// Evaluate `rel` (a repo-relative path, '/'-separated) against every
+    /// ancestor directory's rules, outermost first — last match wins, so a
+    /// deeper negation can re-include what an outer rule excluded.
+    fn is_ignored(&self, rel: &str, is_dir: bool) -> bool {
+        let mut ignored = false;
+        let mut dir_end = 0; // "" = root layer
+        loop {
+            let dir_rel = &rel[..dir_end];
+            let sub = if dir_end == 0 {
+                rel
+            } else {
+                &rel[dir_end + 1..]
+            };
+            if let Some(verdict) = eval_layer(sub, is_dir, &self.layer(dir_rel)) {
+                ignored = verdict;
+            }
+            // Advance to the next ancestor directory, if any.
+            let next = if dir_end == 0 { 0 } else { dir_end + 1 };
+            match rel[next..].find('/') {
+                Some(pos) => dir_end = next + pos,
+                None => return ignored,
+            }
+        }
+    }
+}
+
+/// Last-match-wins verdict for one directory's rules. `None` means no rule in
+/// this layer applied, which is what lets an outer layer's verdict stand.
+fn eval_layer(
+    rel: &str,
+    is_dir: bool,
+    patterns: &[CodeCartographerIgnorePattern],
+) -> Option<bool> {
+    let mut verdict = None;
+    for p in patterns {
+        let hit = if is_dir {
+            p.matches_dir(rel)
+        } else {
+            p.matches(rel)
+        };
+        if hit {
+            verdict = Some(!p.negate);
+        }
+    }
+    verdict
+}
+
+#[cfg(test)]
 fn is_codecartographer_ignored(rel_path: &str, patterns: &[CodeCartographerIgnorePattern]) -> bool {
-    let mut ignored = false;
-    for p in patterns {
-        if p.matches(rel_path) {
-            ignored = !p.negate;
-        }
-    }
-    ignored
+    eval_layer(rel_path, false, patterns).unwrap_or(false)
 }
 
-/// Same last-match-wins evaluation as `is_codecartographer_ignored`, but for a
-/// directory — used to prune the walk before descending.
+#[cfg(test)]
 fn is_dir_ignored(rel_dir: &str, patterns: &[CodeCartographerIgnorePattern]) -> bool {
-    let mut ignored = false;
-    for p in patterns {
-        if p.matches_dir(rel_dir) {
-            ignored = !p.negate;
-        }
-    }
-    ignored
+    eval_layer(rel_dir, true, patterns).unwrap_or(false)
 }
 
 // =============================================================================
@@ -402,16 +470,15 @@ pub fn scan_files(root: &Path) -> Result<Vec<PathBuf>> {
 pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
     let ignored_dirs: HashSet<&str> = IGNORED_DIRS.iter().copied().collect();
     let ignored_files: HashSet<&str> = IGNORED_FILES.iter().copied().collect();
-    // .gitignore patterns are processed first; .codecartographerignore is appended
-    // so its rules (including negations) take precedence over .gitignore.
-    let mut ignore_patterns = load_gitignore(root);
-    ignore_patterns.extend(load_codecartographer_ignore(root));
+    // Ignore rules are resolved per directory, git-style: a nested .gitignore
+    // applies to its own subtree with its patterns relative to that directory.
+    let ignore_index = IgnoreIndex::new(root);
 
     let mut result = ScanResult::default();
 
     let all_entries: Vec<_> = WalkDir::new(root)
         .into_iter()
-        .filter_entry(|e| !should_skip_dir(e, &ignored_dirs, root, &ignore_patterns))
+        .filter_entry(|e| !should_skip_dir(e, &ignored_dirs, root, &ignore_index))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .collect();
@@ -430,7 +497,7 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if is_codecartographer_ignored(&rel, &ignore_patterns) {
+        if ignore_index.is_ignored(&rel, false) {
             continue;
         }
 
@@ -578,7 +645,7 @@ fn should_skip_dir(
     entry: &walkdir::DirEntry,
     ignored: &HashSet<&str>,
     root: &Path,
-    patterns: &[CodeCartographerIgnorePattern],
+    ignore_index: &IgnoreIndex,
 ) -> bool {
     if entry
         .file_name()
@@ -599,7 +666,7 @@ fn should_skip_dir(
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if !rel.is_empty() && is_dir_ignored(&rel, patterns) {
+        if !rel.is_empty() && ignore_index.is_ignored(&rel, true) {
             return true;
         }
     }
@@ -687,5 +754,90 @@ mod ignore_pattern_tests {
         assert!(is_dir_ignored(".build", &pats));
         assert!(is_dir_ignored("KlippsterWasm/.build", &pats));
         assert!(!is_dir_ignored("src", &pats));
+    }
+}
+
+#[cfg(test)]
+mod nested_ignore_tests {
+    use super::*;
+
+    fn write(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cc-nested-ignore-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A nested .gitignore applies to its own subtree, with patterns relative to
+    /// that directory. The root file's `/results/` is anchored at the repo root
+    /// and must NOT reach into `DMP/`; `DMP/.gitignore`'s `/results/` must.
+    #[test]
+    fn nested_gitignore_applies_to_its_own_subtree() {
+        let root = tmpdir("subtree");
+        write(&root.join(".gitignore"), "/results/\n");
+        write(&root.join("DMP/.gitignore"), "/results/\n");
+
+        let idx = IgnoreIndex::new(&root);
+        assert!(idx.is_ignored("results/out.json", false));
+        assert!(idx.is_ignored("DMP/results/run_1/seed_50.json", false));
+        assert!(idx.is_ignored("DMP/results", true));
+        // Root-anchored rule must not leak into the nested package.
+        assert!(!idx.is_ignored("DMP/src/main.rs", false));
+        assert!(!idx.is_ignored("DMP/results.rs", false));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Deeper rules are evaluated after outer ones, so a nested negation wins.
+    #[test]
+    fn nested_negation_overrides_outer_rule() {
+        let root = tmpdir("negation");
+        write(&root.join(".gitignore"), "*.json\n");
+        write(&root.join("fixtures/.gitignore"), "!keep.json\n");
+
+        let idx = IgnoreIndex::new(&root);
+        assert!(idx.is_ignored("data/x.json", false));
+        assert!(!idx.is_ignored("fixtures/keep.json", false));
+        assert!(idx.is_ignored("fixtures/other.json", false));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The end-to-end path: a nested build tree must not reach the file list.
+    #[test]
+    fn scan_excludes_nested_ignored_tree() {
+        let root = tmpdir("scan");
+        write(&root.join(".gitignore"), "");
+        write(&root.join("src/main.rs"), "fn main() {}\n");
+        write(&root.join("pkg/.gitignore"), "/generated/\n");
+        write(&root.join("pkg/lib.rs"), "pub fn f() {}\n");
+        write(&root.join("pkg/generated/huge.rs"), "// generated\n");
+        write(&root.join("pkg/generated/deep/more.rs"), "// generated\n");
+
+        let files = scan_files_with_noise_tracking(&root).unwrap().files;
+        let rels: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(rels.iter().any(|r| r == "src/main.rs"), "got {:?}", rels);
+        assert!(rels.iter().any(|r| r == "pkg/lib.rs"), "got {:?}", rels);
+        assert!(
+            !rels.iter().any(|r| r.starts_with("pkg/generated/")),
+            "nested ignored tree leaked: {:?}",
+            rels
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
