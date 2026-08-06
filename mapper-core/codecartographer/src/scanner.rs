@@ -21,6 +21,10 @@ pub const IGNORED_DIRS: &[&str] = &[
     "externals",
     ".next",
     "build",
+    // SwiftPM's build tree. Holds generated manifests, a full `checkouts/` copy
+    // of every dependency's source, and an `index-build/` duplicate of both —
+    // multi-GB on real projects, and none of it is code the team owns.
+    ".build",
     "out",
     ".env",
     "__pycache__",
@@ -192,6 +196,9 @@ pub const BLOCKED_PATTERNS: &[&str] = &[
 pub struct CodeCartographerIgnorePattern {
     pub negate: bool,
     filename_only: bool,
+    /// Pattern ended in `/` — matches directories only, never a plain file of
+    /// that name (gitignore semantics).
+    dir_only: bool,
     regex: regex::Regex,
 }
 
@@ -206,24 +213,73 @@ impl CodeCartographerIgnorePattern {
         } else {
             (false, line)
         };
+        // Trailing '/' → directory-only rule (`.build/`, `dist/`).
+        let dir_only = pattern.ends_with('/');
         // No '/' in pattern (ignoring trailing slash) → match filename only
         let filename_only = !pattern.trim_end_matches('/').contains('/');
         let pattern = pattern.trim_end_matches('/');
+        // A leading '/' anchors to the repo root; the rest is matched relatively.
+        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
         let regex = glob_to_regex(pattern)?;
         Some(Self {
             negate,
             filename_only,
+            dir_only,
             regex,
         })
     }
 
+    /// Match a repo-relative *file* path against this pattern.
+    ///
+    /// gitignore excludes a directory's whole subtree, so a rule has to be
+    /// tested against every ancestor of the path — not just the path itself.
+    /// Without that, `.build/` only ever matched a file literally named
+    /// `.build` and let the entire build tree through.
     fn matches(&self, rel_path: &str) -> bool {
         if self.filename_only {
-            let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-            self.regex.is_match(name)
+            // A pattern with no '/' applies at any depth: to the entry itself
+            // or to any directory above it.
+            let mut comps: Vec<&str> = rel_path.split('/').collect();
+            if self.dir_only {
+                comps.pop(); // directory-only: never match the leaf file
+            }
+            comps.iter().any(|c| self.regex.is_match(c))
         } else {
-            self.regex.is_match(rel_path)
+            // Anchored pattern: the full path, or any ancestor directory.
+            if !self.dir_only && self.regex.is_match(rel_path) {
+                return true;
+            }
+            let mut idx = 0;
+            while let Some(pos) = rel_path[idx..].find('/') {
+                let end = idx + pos;
+                if self.regex.is_match(&rel_path[..end]) {
+                    return true;
+                }
+                idx = end + 1;
+            }
+            false
         }
+    }
+
+    /// Match a repo-relative *directory* path. Unlike `matches`, a `dir_only`
+    /// rule matches the directory itself here — that is what lets a negation
+    /// (`!.claude/skills/`) rescue a directory its parent rule excluded.
+    fn matches_dir(&self, rel_dir: &str) -> bool {
+        if self.filename_only {
+            return rel_dir.split('/').any(|c| self.regex.is_match(c));
+        }
+        if self.regex.is_match(rel_dir) {
+            return true;
+        }
+        let mut idx = 0;
+        while let Some(pos) = rel_dir[idx..].find('/') {
+            let end = idx + pos;
+            if self.regex.is_match(&rel_dir[..end]) {
+                return true;
+            }
+            idx = end + 1;
+        }
+        false
     }
 }
 
@@ -294,6 +350,18 @@ fn is_codecartographer_ignored(rel_path: &str, patterns: &[CodeCartographerIgnor
     ignored
 }
 
+/// Same last-match-wins evaluation as `is_codecartographer_ignored`, but for a
+/// directory — used to prune the walk before descending.
+fn is_dir_ignored(rel_dir: &str, patterns: &[CodeCartographerIgnorePattern]) -> bool {
+    let mut ignored = false;
+    for p in patterns {
+        if p.matches_dir(rel_dir) {
+            ignored = !p.negate;
+        }
+    }
+    ignored
+}
+
 // =============================================================================
 // Source-file classification
 // =============================================================================
@@ -343,7 +411,7 @@ pub fn scan_files_with_noise_tracking(root: &Path) -> Result<ScanResult> {
 
     let all_entries: Vec<_> = WalkDir::new(root)
         .into_iter()
-        .filter_entry(|e| !should_skip_dir(e, &ignored_dirs))
+        .filter_entry(|e| !should_skip_dir(e, &ignored_dirs, root, &ignore_patterns))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .collect();
@@ -506,12 +574,36 @@ fn is_blocked_file(path: &Path, ignored_files: &HashSet<&str>) -> bool {
     false
 }
 
-fn should_skip_dir(entry: &walkdir::DirEntry, ignored: &HashSet<&str>) -> bool {
-    entry
+fn should_skip_dir(
+    entry: &walkdir::DirEntry,
+    ignored: &HashSet<&str>,
+    root: &Path,
+    patterns: &[CodeCartographerIgnorePattern],
+) -> bool {
+    if entry
         .file_name()
         .to_str()
         .map(|s| ignored.contains(s))
         .unwrap_or(false)
+    {
+        return true;
+    }
+    // Prune ignored directories before descending — a gitignored build tree can
+    // be multi-GB, and walking it costs the same whether or not we keep the
+    // files. Same caveat as git: a rule that excludes a directory cannot be
+    // undone by a negation deeper inside it.
+    if entry.file_type().is_dir() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !rel.is_empty() && is_dir_ignored(&rel, patterns) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_ignored_path(path: &Path) -> bool {
@@ -521,4 +613,79 @@ pub fn is_ignored_path(path: &Path) -> bool {
             .map(|s| IGNORED_DIRS.contains(&s) || IGNORED_FILES.contains(&s))
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod ignore_pattern_tests {
+    use super::*;
+
+    fn compile(lines: &[&str]) -> Vec<CodeCartographerIgnorePattern> {
+        lines
+            .iter()
+            .filter_map(|l| CodeCartographerIgnorePattern::parse(l))
+            .collect()
+    }
+
+    /// A `dir/` rule must exclude the whole subtree, not just a file of that
+    /// name. This is the bug that let SwiftPM's `.build/` (multi-GB: generated
+    /// manifests, a `checkouts/` copy of every dependency, plus an
+    /// `index-build/` duplicate) into the index.
+    #[test]
+    fn dir_pattern_excludes_directory_contents() {
+        let pats = compile(&[".build/", "dist/", "coverage/"]);
+        for p in [
+            ".build/plugin-tools.yaml",
+            ".build/checkouts/swift-atomics/Tests/AtomicsFolding.swift",
+            "KlippsterWasm/.build/debug.yaml",
+            "dist/bundle.js",
+            "coverage/lcov-report/index.html",
+        ] {
+            assert!(is_codecartographer_ignored(p, &pats), "not ignored: {}", p);
+        }
+    }
+
+    /// Directory-only rules must not swallow a plain file of the same name.
+    #[test]
+    fn dir_pattern_does_not_match_a_plain_file() {
+        let pats = compile(&["dist/"]);
+        assert!(!is_codecartographer_ignored("dist", &pats));
+        assert!(!is_codecartographer_ignored("src/dist", &pats));
+    }
+
+    #[test]
+    fn bare_name_applies_at_any_depth() {
+        let pats = compile(&["node_modules", "*.log"]);
+        assert!(is_codecartographer_ignored("a/b/node_modules/x/y.js", &pats));
+        assert!(is_codecartographer_ignored("logs/app.log", &pats));
+        assert!(!is_codecartographer_ignored("src/main.rs", &pats));
+    }
+
+    /// A leading '/' anchors to the repo root.
+    #[test]
+    fn leading_slash_anchors_to_root() {
+        let pats = compile(&["/build/"]);
+        assert!(is_codecartographer_ignored("build/out.o", &pats));
+        assert!(!is_codecartographer_ignored("sub/build/out.o", &pats));
+    }
+
+    /// The `.claude/*` + `!.claude/skills/` idiom must keep skills — at both the
+    /// file level and the directory-pruning level, or the walk drops them before
+    /// the file check ever runs.
+    #[test]
+    fn negation_rescues_subdirectory() {
+        let pats = compile(&[".claude/*", "!.claude/skills/"]);
+        assert!(is_codecartographer_ignored(".claude/settings.json", &pats));
+        assert!(!is_codecartographer_ignored(".claude/skills/foo.md", &pats));
+
+        assert!(is_dir_ignored(".claude/other", &pats));
+        assert!(!is_dir_ignored(".claude/skills", &pats));
+    }
+
+    #[test]
+    fn dir_pruning_matches_file_level_decisions() {
+        let pats = compile(&[".build/", "target/"]);
+        assert!(is_dir_ignored(".build", &pats));
+        assert!(is_dir_ignored("KlippsterWasm/.build", &pats));
+        assert!(!is_dir_ignored("src", &pats));
+    }
 }
