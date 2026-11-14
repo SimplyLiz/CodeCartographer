@@ -312,3 +312,37 @@ fn ffi_god_module_encoding() {
     assert_keys(&v, &["moduleId", "path", "degree", "cohesionScore", "severity"], "godModule");
     assert_camel(&v, &[], "godModule");
 }
+
+/// Timing probe, not a test: `CARTO_PROBE_ROOT=/path cargo test --release --lib
+/// probe_timing -- --ignored --nocapture`. Prints the scan size and the wall
+/// time of a sequence of FFI calls the way CKB issues them.
+#[test]
+#[ignore]
+fn probe_timing() {
+    let Some(root) = std::env::var_os("CARTO_PROBE_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let t = std::time::Instant::now();
+    let n = crate::scanner::scan_files_with_noise_tracking(&root).unwrap().files.len();
+    eprintln!("scan: {n} files in {:?}", t.elapsed());
+    if std::env::var_os("CARTO_PROBE_SCAN_ONLY").is_some() {
+        return;
+    }
+    let c = cs(root.to_str().unwrap());
+    let p = c.as_ptr();
+    let timed = |name: &str, f: &dyn Fn() -> *mut c_char| {
+        let t = std::time::Instant::now();
+        let d = call(f());
+        eprintln!("{name}: {:?} ({} bytes)", t.elapsed(), d.to_string().len());
+    };
+    timed("map_project #1", &|| codecartographer_map_project(p));
+    timed("map_project #2", &|| codecartographer_map_project(p));
+    timed("health", &|| codecartographer_health(p));
+    let target = cs("internal/query/engine.go");
+    timed("blast_radius", &|| codecartographer_blast_radius(p, target.as_ptr(), 0));
+    timed("simulate_change", &|| {
+        codecartographer_simulate_change(p, target.as_ptr(), std::ptr::null(), std::ptr::null())
+    });
+    timed("hidden_coupling", &|| codecartographer_hidden_coupling(p, 0, 0));
+}

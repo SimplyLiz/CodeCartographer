@@ -4,6 +4,21 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the scanner reads git's out-of-tree excludes
+
+- **`.git/info/exclude` and `core.excludesFile` apply.** The scanner resolved
+  `.gitignore` files itself but never read the two exclude sources outside the
+  tree. A checkout that keeps `.claude/worktrees/` (two full copies of the repo)
+  out of git only through `info/exclude` was scanned three times over: on CKB's
+  checkout the scan found 3,693 files instead of 1,323, and `MapProject` took
+  more than 10 minutes instead of 2.3 s. Both sources are read with git's
+  semantics: patterns relative to the repository top level (also when the scan
+  root is a subdirectory), lowest precedence, so a `.gitignore` negation still
+  wins. A `.git` file (linked worktree, submodule) is followed, and a worktree
+  reads `info/exclude` from the common git dir. `core.excludesFile` comes from
+  `git config` (repo, global, system), defaulting to
+  `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`.
+
 ### Fixed — the C ABI speaks camelCase
 
 - **FFI results are camelCase, as documented.** Most result structs
