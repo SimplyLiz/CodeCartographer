@@ -30,8 +30,9 @@ use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
 ///
 /// History: 1 = 4.0.3 and earlier (implicit); 2 = graph-resolution fixes
 /// (Python function-level and relative imports, Rust `pub use`, grouped and
-/// inline `crate::` paths, Go package imports, TS type-only imports).
-pub(crate) const EXTRACTOR_VERSION: u32 = 2;
+/// inline `crate::` paths, Go package imports, TS type-only imports); 3 =
+/// Python function-local imports carry `LAZY_PREFIX`.
+pub(crate) const EXTRACTOR_VERSION: u32 = 3;
 
 pub(crate) const CACHE_FILE: &str = ".codecartographer_cache.json";
 

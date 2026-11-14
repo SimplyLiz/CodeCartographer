@@ -140,7 +140,9 @@ pub struct GraphEdge {
     pub source: String,
     pub target: String,
     /// Kind of the importing file — `"runtime"`, `"test"`, `"doc"` — or
-    /// `"type"` for a type-only import (kept out of cycle detection).
+    /// `"type"` for a type-only import, or `"lazy"` for a Python import inside a
+    /// function body. Both stay out of cycle detection; `lazy` is otherwise a
+    /// runtime dependency.
     pub edge_type: String,
     pub at_range: Option<Range>,
     /// How confidently this edge was resolved from the import text:
@@ -693,13 +695,10 @@ impl ApiState {
                 for import in &file.imports {
                     // A type-only import (TS `import type`, Python `if TYPE_CHECKING:`)
                     // is a real dependency but erased at runtime: typed `type` so cycle
-                    // detection can ignore it.
-                    let (import, type_only) = split_type_only(import);
-                    let edge_type = if type_only && source_kind == "runtime" {
-                        "type"
-                    } else {
-                        source_kind
-                    };
+                    // detection can ignore it. A function-local Python import runs on
+                    // call, not on load: typed `lazy`, also out of cycle detection.
+                    let (import, kind) = split_import_kind(import);
+                    let edge_type = if source_kind == "runtime" { kind.unwrap_or(source_kind) } else { source_kind };
                     for (target, resolution) in import_index.resolve_all(import, module_id) {
                         // Reject cross-type edges: a source file importing "json" must not
                         // resolve to a fixture like testdata/review/json.json (doc), and a
@@ -748,9 +747,9 @@ impl ApiState {
                 _ => 3,
             }
         }
-        // A runtime import beats a type-only one for the same pair.
+        // A runtime import beats a lazy one, which beats a type-only one.
         fn type_rank(t: &str) -> u8 {
-            u8::from(t == "type")
+            edge_kind_rank(t)
         }
         edges.sort_unstable_by(|a, b| {
             a.source
@@ -864,7 +863,7 @@ impl ApiState {
             *in_degree.entry(edge.target.clone()).or_insert(0) += 1;
             // A type-only import still uses the target (a types module that is
             // only ever `import type`d is not dead).
-            if edge.edge_type == "runtime" || edge.edge_type == "type" {
+            if matches!(edge.edge_type.as_str(), "runtime" | "type" | "lazy") {
                 *runtime_in_degree.entry(edge.target.clone()).or_insert(0) += 1;
             }
         }
@@ -1094,8 +1093,9 @@ impl ApiState {
             .collect();
 
         // Aggregate cross-directory edges (deduped presence, self-loops dropped).
-        // A directory pair linked only by type-only imports stays a `type` edge
-        // (out of cycle detection); any runtime import makes it `runtime`.
+        // A directory pair linked only by type-only imports stays a `type` edge,
+        // only by type-only and lazy ones a `lazy` edge (both out of cycle
+        // detection); any runtime import makes it `runtime`.
         let mut seen: HashMap<(String, String), usize> = HashMap::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
         for e in &file_graph.edges {
@@ -1108,11 +1108,15 @@ impl ApiState {
             if sf == tf {
                 continue;
             }
-            let kind = if e.edge_type == "type" { "type" } else { "runtime" };
+            let kind = match e.edge_type.as_str() {
+                "type" => "type",
+                "lazy" => "lazy",
+                _ => "runtime",
+            };
             match seen.get(&(sf.clone(), tf.clone())) {
                 Some(&i) => {
-                    if kind == "runtime" {
-                        edges[i].edge_type = "runtime".into();
+                    if edge_kind_rank(kind) < edge_kind_rank(&edges[i].edge_type) {
+                        edges[i].edge_type = kind.into();
                     }
                 }
                 None => {
@@ -2715,12 +2719,26 @@ impl<'a> ImportIndex<'a> {
     }
 }
 
-/// Split the type-only marker the extractors put in front of an import
-/// (`"type ./x"`, see `TYPE_ONLY_PREFIX`) from the import text.
-fn split_type_only(import: &str) -> (&str, bool) {
-    match import.strip_prefix(crate::mapper::TYPE_ONLY_PREFIX) {
-        Some(rest) => (rest, true),
-        None => (import, false),
+/// Split the marker the extractors put in front of an import (`"type ./x"`,
+/// `"lazy from a import b"`, see `TYPE_ONLY_PREFIX` and `LAZY_PREFIX`) from the
+/// import text: the bare import and the edge kind it asks for, if any.
+fn split_import_kind(import: &str) -> (&str, Option<&'static str>) {
+    if let Some(rest) = import.strip_prefix(crate::mapper::TYPE_ONLY_PREFIX) {
+        (rest, Some("type"))
+    } else if let Some(rest) = import.strip_prefix(crate::mapper::LAZY_PREFIX) {
+        (rest, Some("lazy"))
+    } else {
+        (import, None)
+    }
+}
+
+/// Strength of a code edge kind for merging duplicates: `runtime` (and any
+/// other kind) beats `lazy`, which beats `type`.
+fn edge_kind_rank(t: &str) -> u8 {
+    match t {
+        "type" => 2,
+        "lazy" => 1,
+        _ => 0,
     }
 }
 
@@ -2746,9 +2764,10 @@ fn lang_family(path: &str) -> Option<&'static str> {
 }
 
 /// Edges that can close a dependency cycle: confidently resolved (not
-/// `fuzzy`) and present at runtime (not a type-only `type` edge).
+/// `fuzzy`) and present when the module loads (not a type-only `type` edge,
+/// not a function-local `lazy` one).
 fn is_cycle_edge(e: &GraphEdge) -> bool {
-    e.resolution != "fuzzy" && e.edge_type != "type"
+    e.resolution != "fuzzy" && e.edge_type != "type" && e.edge_type != "lazy"
 }
 
 /// True when `a` and `b` are files of one Go package (same directory). Go has
@@ -3345,7 +3364,7 @@ impl ApiState {
         // node → dependency unit → that unit's directory.
         let mut deps: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
         for e in edges {
-            if e.edge_type != "runtime" && e.edge_type != "type" {
+            if !matches!(e.edge_type.as_str(), "runtime" | "type" | "lazy") {
                 continue;
             }
             let dir = dir_of(&e.target);
@@ -4361,6 +4380,23 @@ mod tests {
     }
 
     #[test]
+    fn python_function_local_import_does_not_close_a_cycle() {
+        let lazy = format!("{}from app.profiles import load", crate::mapper::LAZY_PREFIX);
+        let g = graph_with(
+            "pylazy",
+            &[],
+            &[
+                ("src/app/__init__.py", vec![]),
+                ("src/app/profiles.py", vec!["from app.enrich import run"]),
+                ("src/app/enrich.py", vec![lazy.as_str()]),
+            ],
+        );
+        assert_eq!(has_edge(&g, "src/app/profiles.py", "src/app/enrich.py"), Some(("runtime".into(), "suffix".into())), "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/enrich.py", "src/app/profiles.py"), Some(("lazy".into(), "suffix".into())));
+        assert!(g.cycles.is_empty(), "a function-local import must not close a cycle: {:?}", g.cycles);
+    }
+
+    #[test]
     fn python_local_relative_and_type_checking_imports() {
         let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
         let tc = t("from app.web import Server");
@@ -4689,7 +4725,7 @@ mod graph_probe {
                 let (m, _) = parse_import_parts(imp);
                 if m.starts_with("@/") || m.starts_with("~/") {
                     alias += 1;
-                    if idx.resolve(split_type_only(imp).0, id).is_some() {
+                    if idx.resolve(split_import_kind(imp).0, id).is_some() {
                         alias_hit += 1;
                     } else {
                         println!("  alias miss: {id}: {imp}");
@@ -4766,7 +4802,7 @@ mod graph_probe {
         }
         // Calibration view for god modules: widest non-test files by breadth.
         let mut units: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
-        for e in g.edges.iter().filter(|e| e.edge_type == "runtime" || e.edge_type == "type") {
+        for e in g.edges.iter().filter(|e| matches!(e.edge_type.as_str(), "runtime" | "type" | "lazy")) {
             let u = if e.resolution == "package" {
                 e.target.rsplit_once('/').map(|x| x.0).unwrap_or("")
             } else {

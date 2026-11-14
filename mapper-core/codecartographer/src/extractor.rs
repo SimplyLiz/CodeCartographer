@@ -731,7 +731,7 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
 
     // Imports anywhere in the module: top level, inside functions (lazy
     // imports), try/except fallbacks, `if TYPE_CHECKING:` blocks (type-only).
-    collect_py_imports(&root, src, false, &mut imports);
+    collect_py_imports(&root, src, false, false, &mut imports);
     let mut seen = std::collections::HashSet::new();
     imports.retain(|i| seen.insert(i.clone()));
 
@@ -740,14 +740,24 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
 }
 
 /// Collect Python imports from the whole subtree of `node`. Function-local
-/// imports are ordinary runtime dependencies (only deferred), so they count;
-/// imports under `if TYPE_CHECKING:` (or `typing.TYPE_CHECKING`) never run and
-/// are marked type-only (`TYPE_ONLY_PREFIX`). Relative imports keep their dots
-/// (`from ..pkg import name`) for the resolver to anchor at the source file.
+/// imports are runtime dependencies that only run on the first call, and are
+/// marked lazy (`LAZY_PREFIX`): they count as dependencies but cannot close an
+/// import cycle. Imports under `if TYPE_CHECKING:` (or `typing.TYPE_CHECKING`)
+/// never run and are marked type-only (`TYPE_ONLY_PREFIX`). Relative imports
+/// keep their dots (`from ..pkg import name`) for the resolver to anchor at the
+/// source file.
 #[cfg(feature = "lang-python")]
-fn collect_py_imports(node: &Node, src: &[u8], type_only: bool, imports: &mut Vec<String>) {
+fn collect_py_imports(node: &Node, src: &[u8], type_only: bool, lazy: bool, imports: &mut Vec<String>) {
     let _depth = match DepthGuard::enter() { Some(g) => g, None => return };
-    let mark = |s: String| if type_only { format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX) } else { s };
+    let mark = |s: String| {
+        if type_only {
+            format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX)
+        } else if lazy {
+            format!("{}{s}", crate::mapper::LAZY_PREFIX)
+        } else {
+            s
+        }
+    };
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         match child.kind() {
@@ -799,20 +809,23 @@ fn collect_py_imports(node: &Node, src: &[u8], type_only: bool, imports: &mut Ve
                     .unwrap_or_default();
                 if cond == "TYPE_CHECKING" || cond == "typing.TYPE_CHECKING" {
                     if let Some(body) = child.child_by_field_name("consequence") {
-                        collect_py_imports(&body, src, true, imports);
+                        collect_py_imports(&body, src, true, lazy, imports);
                     }
                     // `else:` / `elif` branches do run.
                     let mut c3 = child.walk();
                     for alt in child.children_by_field_name("alternative", &mut c3) {
-                        collect_py_imports(&alt, src, type_only, imports);
+                        collect_py_imports(&alt, src, type_only, lazy, imports);
                     }
                 } else {
-                    collect_py_imports(&child, src, type_only, imports);
+                    collect_py_imports(&child, src, type_only, lazy, imports);
                 }
             }
+            // A function body runs on call, not on import (methods included; a
+            // class body itself runs at import time and stays eager).
+            "function_definition" => collect_py_imports(&child, src, type_only, true, imports),
             // Leaves that cannot contain statements.
             "string" | "comment" | "identifier" | "integer" | "float" => {}
-            _ => collect_py_imports(&child, src, type_only, imports),
+            _ => collect_py_imports(&child, src, type_only, lazy, imports),
         }
     }
 }
@@ -1801,6 +1814,7 @@ class C:
 "#;
         let out = ts_extract(Path::new("pkg/web.py"), src).unwrap();
         let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let l = |s: &str| format!("{}{s}", crate::mapper::LAZY_PREFIX);
         assert_eq!(
             out.imports,
             vec![
@@ -1811,10 +1825,12 @@ class C:
                 "import pkg.runtime_only".to_string(),
                 "import ujson".to_string(),
                 "import json".to_string(),
-                "from pkg.search.corpus import CorpusSearcher".to_string(),
-                "from .sibling import helper".to_string(),
-                "from .. import top".to_string(),
-                "from . import *".to_string(),
+                // Function bodies (methods too) run on call: lazy.
+                l("from pkg.search.corpus import CorpusSearcher"),
+                l("from .sibling import helper"),
+                l("from .. import top"),
+                l("import os"),
+                l("from . import *"),
             ]
         );
     }

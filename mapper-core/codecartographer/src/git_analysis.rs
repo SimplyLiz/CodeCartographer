@@ -353,14 +353,16 @@ pub fn git_cochange_dispersion(root: &Path, limit: usize) -> Vec<CoChangeDispers
 
 /// Dispersion from already computed co-change pairs (lets the FFI reuse its
 /// cached pairs instead of running `git log` again).
+///
+/// Only source files count, as a file and as a partner. A changelog, a lock
+/// file or a generated migration journal changes alongside everything, so it
+/// topped the ranking and inflated every code file's partner count.
 pub fn dispersion_from_pairs(pairs: &[CoChangePair]) -> Vec<CoChangeDispersion> {
-    if pairs.is_empty() {
-        return vec![];
-    }
+    let is_code = |f: &str| crate::scanner::is_source_file(Path::new(f));
 
     // Build per-file partner maps: file → { partner → count }
     let mut partner_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for p in pairs {
+    for p in pairs.iter().filter(|p| is_code(&p.file_a) && is_code(&p.file_b)) {
         *partner_counts
             .entry(p.file_a.clone())
             .or_default()
@@ -373,6 +375,9 @@ pub fn dispersion_from_pairs(pairs: &[CoChangePair]) -> Vec<CoChangeDispersion> 
             .or_insert(0) += p.count;
     }
 
+    if partner_counts.is_empty() {
+        return vec![];
+    }
     let max_partners = partner_counts.values().map(|m| m.len()).max().unwrap_or(1).max(1) as f64;
 
     let mut result: Vec<CoChangeDispersion> = partner_counts
@@ -607,6 +612,27 @@ pub fn git_bus_factor(root: &Path, limit: usize) -> HashMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispersion_leaves_out_non_code_files() {
+        let pair = |a: &str, b: &str| CoChangePair {
+            file_a: a.into(),
+            file_b: b.into(),
+            count: 3,
+            coupling_score: 0.5,
+        };
+        let pairs = vec![
+            pair("CHANGELOG.md", "src/a.rs"),
+            pair("CHANGELOG.md", "src/b.rs"),
+            pair("drizzle/meta/_journal.json", "src/a.rs"),
+            pair("src/a.rs", "src/b.rs"),
+        ];
+        let d = dispersion_from_pairs(&pairs);
+        let files: Vec<&str> = d.iter().map(|e| e.file.as_str()).collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files.iter().all(|f| f.starts_with("src/")), "{files:?}");
+        assert!(d.iter().all(|e| e.partner_count == 1));
+    }
 
     #[test]
     fn noise_paths_are_filtered_but_source_config_docs_kept() {

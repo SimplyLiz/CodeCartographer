@@ -7,6 +7,23 @@ All notable changes to CodeCartographer will be documented in this file.
 The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — a function-local Python import does not close a cycle
+
+- Python imports inside a function body run on the first call, not when the
+  module loads — the usual way to break an import cycle on purpose. Since
+  imports inside functions are collected, such a pair came out as a HIGH
+  cycle (`profiles.py` ↔ `stage4_enrichment.py` in a Python package). They
+  are now `lazy` edges: dependencies for liveness, layers and coupling, but
+  out of cycle detection, like `type` edges. A runtime import of the same
+  pair still wins. The skeleton cache's extractor version moves to 3.
+
+### Fixed — shotgun surgery ranks source files only
+
+- Co-change dispersion (C ABI `shotgun_surgery`, MCP `shotgun_surgery`, the
+  CLI) ranked a changelog or a generated migration journal first, because
+  they change alongside everything, and counted them as partners of every
+  code file. Only source files count now, as file and as partner.
+
 ### Fixed — test files are not bridges
 
 - Bridge detection (betweenness on the undirected import graph) counted test
