@@ -290,17 +290,19 @@ char *codecartographer_hidden_coupling(const char *path, uint32_t limit, uint32_
  * ```json
  * {
  *   "ok": true,
- *   "data": [
- *     {
- *       "path": "src/api.rs",
- *       "moduleId": "src/api.rs",
- *       "rank": 0.0842,
- *       "signatureCount": 45,
- *       "estimatedTokens": 680,
- *       "role": "core",
- *       "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
- *     }
- *   ]
+ *   "data": {
+ *     "files": [
+ *       {
+ *         "path": "src/api.rs",
+ *         "moduleId": "src/api.rs",
+ *         "rank": 0.0842,
+ *         "signatureCount": 45,
+ *         "estimatedTokens": 680,
+ *         "role": "core",
+ *         "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
+ *       }
+ *     ]
+ *   }
  * }
  * ```
  */
@@ -671,10 +673,10 @@ char *codecartographer_shotgun_surgery(const char *path, uint32_t limit, uint32_
  *   "data": [
  *     {
  *       "path": "docs/architecture.md",
- *       "module_id": "docs/architecture.md",
+ *       "moduleId": "docs/architecture.md",
  *       "signatures": ["# Architecture", "## Overview"],
  *       "imports": ["src/api.rs"],
- *       "edge_count": 3
+ *       "edgeCount": 3
  *     }
  *   ]
  * }

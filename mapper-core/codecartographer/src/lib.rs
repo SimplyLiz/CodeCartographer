@@ -22,6 +22,9 @@ mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;
+mod ffi_json;
+#[cfg(test)]
+mod ffi_tests;
 mod html_export;
 mod git_analysis;
 mod layers;
@@ -64,12 +67,35 @@ fn c_str_to_path(s: *const c_char) -> Result<PathBuf, String> {
     Ok(PathBuf::from(rust_str))
 }
 
+/// Encode an FFI result as the `{"ok", "data" | "error"}` envelope.
+///
+/// Struct field names inside `data` are emitted camelCase (the FFI contract),
+/// even though the structs themselves serialize snake_case for the MCP server
+/// and the CLI; see [`ffi_json`]. Map keys are data and stay as they are.
+/// A `serde_json::Value` passes through unchanged, so a struct embedded in a
+/// `json!` must go through [`ffi_json::camel`] at the embedding site.
 fn result_to_json_ptr<T: serde::Serialize>(result: Result<T, String>) -> *mut c_char {
+    let json = match result {
+        Ok(value) => serde_json::json!({ "ok": true, "data": ffi_json::camel(&value) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    json_to_c_ptr(&json)
+}
+
+/// Like [`result_to_json_ptr`] but keeps the struct field names as serde emits
+/// them. Only for `ContextHealthReport`: CKB decodes it with snake_case tags
+/// (`token_count`, `signal_density`, ...), so it stays snake_case until both
+/// sides change together.
+fn result_to_json_ptr_verbatim<T: serde::Serialize>(result: Result<T, String>) -> *mut c_char {
     let json = match result {
         Ok(value) => serde_json::json!({ "ok": true, "data": value }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     };
-    let s = serde_json::to_string(&json)
+    json_to_c_ptr(&json)
+}
+
+fn json_to_c_ptr(json: &serde_json::Value) -> *mut c_char {
+    let s = serde_json::to_string(json)
         .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_string());
     match CString::new(s) {
         Ok(cs) => cs.into_raw(),
@@ -376,7 +402,7 @@ pub extern "C" fn codecartographer_check_layers(
     let violations = layers::detect_layer_violations(&edge_tuples, &config);
 
     let data = serde_json::json!({
-        "violations": violations,
+        "violations": ffi_json::camel(&violations),
         "violationCount": violations.len(),
     });
 
@@ -652,7 +678,7 @@ pub extern "C" fn codecartographer_module_context(
             "imports": module.imports,
             "signatures": module.signatures.iter().map(|s| &s.raw).collect::<Vec<_>>(),
         },
-        "dependencies": deps,
+        "dependencies": ffi_json::camel(&deps),
     });
 
     result_to_json_ptr::<serde_json::Value>(Ok(data))
@@ -990,17 +1016,19 @@ pub extern "C" fn codecartographer_hidden_coupling(
 /// ```json
 /// {
 ///   "ok": true,
-///   "data": [
-///     {
-///       "path": "src/api.rs",
-///       "moduleId": "src/api.rs",
-///       "rank": 0.0842,
-///       "signatureCount": 45,
-///       "estimatedTokens": 680,
-///       "role": "core",
-///       "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
-///     }
-///   ]
+///   "data": {
+///     "files": [
+///       {
+///         "path": "src/api.rs",
+///         "moduleId": "src/api.rs",
+///         "rank": 0.0842,
+///         "signatureCount": 45,
+///         "estimatedTokens": 680,
+///         "role": "core",
+///         "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
+///       }
+///     ]
+///   }
 /// }
 /// ```
 #[no_mangle]
@@ -1058,7 +1086,9 @@ pub extern "C" fn codecartographer_ranked_skeleton(
         }))
         .collect();
 
-    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(data))
+    // CKB decodes `{ "files": [...] }` (RankedSkeletonResult); a bare array
+    // failed to unmarshal there.
+    result_to_json_ptr::<serde_json::Value>(Ok(serde_json::json!({ "files": data })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1733,7 +1763,7 @@ pub extern "C" fn codecartographer_context_health(
     };
 
     let report = token_metrics::analyze(&text, &opts);
-    result_to_json_ptr(Ok::<_, String>(report))
+    result_to_json_ptr_verbatim(Ok::<_, String>(report))
 }
 
 // ---------------------------------------------------------------------------
@@ -2025,10 +2055,10 @@ pub extern "C" fn codecartographer_shotgun_surgery(
 ///   "data": [
 ///     {
 ///       "path": "docs/architecture.md",
-///       "module_id": "docs/architecture.md",
+///       "moduleId": "docs/architecture.md",
 ///       "signatures": ["# Architecture", "## Overview"],
 ///       "imports": ["src/api.rs"],
-///       "edge_count": 3
+///       "edgeCount": 3
 ///     }
 ///   ]
 /// }

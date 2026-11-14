@@ -4,6 +4,28 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the C ABI speaks camelCase
+
+- **FFI results are camelCase, as documented.** Most result structs
+  (`ProjectGraphResponse`, `GraphNode`, `GraphMetadata`, `CycleInfo`,
+  `GodModuleInfo`, `SimulatedChange`/`ImpactAnalysis`, `LayerViolation`,
+  `ArchitectureEvolution`, `CoChangeDispersion`, `DependencyInfo`, `DocNode`)
+  serialize snake_case for the MCP server and the CLI, and the FFI passed that
+  through. CKB's Go types decode camelCase, so `isBridge`, `healthScore`,
+  `godModules`, `moduleId`, `predictedImpact`, `sourcePath`, `partnerCount` and
+  more came back as zero values: the bridge risk multiplier never fired, the
+  layers check always passed, shotgun surgery and evolution reported zeros. The
+  FFI now re-serializes struct field names to camelCase through a serializer
+  adapter (`ffi_json`); map keys (paths in `git_churn`, extensions in
+  `metadata.languages`) and string values are never touched. MCP and CLI output
+  is unchanged.
+- `context_health` (and the `health` object inside `query_context` /
+  `query_docs`) stays snake_case: CKB decodes it with snake_case tags.
+- `ranked_skeleton` returns `{ "files": [...] }`, the shape CKB decodes; the
+  bare array failed to unmarshal there.
+- A contract test calls every FFI function CKB uses and checks the keys
+  `types.go` expects.
+
 ## [4.0.3] — 2026-11-14
 
 ### Fixed — the scanner follows .gitignore like git
