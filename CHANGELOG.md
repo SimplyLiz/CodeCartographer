@@ -4,6 +4,19 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [4.0.3] — 2026-11-14
+
+### Fixed — the scanner follows .gitignore like git
+
+- Directory patterns (`build/`) exclude whole subtrees.
+- Nested `.gitignore` files apply, not just the one at the repo root.
+- Bracket expressions (`*.[oa]`) match.
+
+### Changed
+
+- The skeleton cache is written borrowed and streamed instead of through an
+  owned copy.
+
 ### Fixed — the static library links with Go 1.26.11
 
 - **No LLVM bitcode in the C-ABI `.a`.** `lto = true` left 34 MB of embedded
