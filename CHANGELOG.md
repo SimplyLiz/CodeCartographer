@@ -7,6 +7,29 @@ All notable changes to CodeCartographer will be documented in this file.
 Measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — Rust inline paths, grouped uses, re-exports, precise anchoring
+
+- **Inline paths count**: `crate::readout::ReadoutMlp::new()`,
+  `crate::epistemic::score(…)`, `super::x::f` written without a `use` are
+  imports (outermost path only; `super::`/`self::` inside an inline
+  `mod tests { … }` refer back into the same file and are skipped).
+- **`pub use` / `pub(crate) use` resolve.** The extractor kept the visibility
+  (`"pub use x::Y"`), which resolved nowhere, so every re-export was missing.
+- **Paths anchor where Rust anchors them**: `crate::` at the source's crate
+  root (nearest `lib.rs`/`main.rs`, so workspace crates do not bleed into each
+  other), `self::`/`super::` (repeatable) at the source module, bare
+  `types::X` at the current module first (2018 uniform paths). The longest
+  prefix naming `x.rs` or `x/mod.rs` wins (`exact`); suffix matching remains
+  the fallback.
+- **Grouped uses name every module**: `use crate::{a, b::{c, D}}` gives an
+  edge to `a`, `b/c` and `b` (for `D`), not just the text before the brace.
+- **`crate::Item` follows the crate root's re-export** (`pub use
+  types::Item;`) to the defining module instead of pointing at `lib.rs`.
+- In the Rust crate: code edges 107 → 146 (`system.rs` → `readout.rs` and
+  `epistemic.rs` were among the missing), `exact` 1 → 127. One cycle appears
+  and is real: `morphogenesis` uses `governance`, `epistemic` and `homeostasis`
+  inline, all three import `morphogenesis::Cluster`.
+
 ### Fixed — Python imports inside functions, relative imports, stdlib names
 
 - **Imports anywhere in a module count**, not only top-level ones: inside

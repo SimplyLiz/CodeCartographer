@@ -347,8 +347,13 @@ fn extract_rust(source: &str, path: &Path) -> TsOutput {
     for child in root.children(&mut cur) {
         match child.kind() {
             "use_declaration" => {
-                // Strip "use " prefix and trailing ";"
-                let text = node_text(&child, src);
+                // The use tree itself (`argument`): drops `use`, the `;` and any
+                // visibility — `pub use x::Y` used to stay "pub use x::Y", which
+                // resolved nowhere, so every re-export was missing.
+                let text = child
+                    .child_by_field_name("argument")
+                    .map(|a| node_text(&a, src))
+                    .unwrap_or_else(|| node_text(&child, src));
                 let imp = text.trim_start_matches("use ").trim_end_matches(';').trim();
                 if !imp.is_empty() {
                     imports.push(imp.to_string());
@@ -371,8 +376,54 @@ fn extract_rust(source: &str, path: &Path) -> TsOutput {
         }
     }
 
+    // Inline paths used without a `use` (`crate::readout::ReadoutMlp::new()`,
+    // `super::epistemic::f(x)`) are dependencies too.
+    let mut inline = Vec::new();
+    collect_rust_inline_paths(&root, src, 0, &mut inline);
+    let mut seen: std::collections::HashSet<String> = imports.iter().cloned().collect();
+    for p in inline {
+        if seen.insert(p.clone()) {
+            imports.push(p);
+        }
+    }
+
     walk_rust(&root, src, path, &mut sigs, &mut scope);
     TsOutput::new(sigs, imports)
+}
+
+/// Collect crate-internal paths written inline (not via `use`): the outermost
+/// `scoped_identifier` / `scoped_type_identifier` whose text starts with
+/// `crate::`, `super::` or `self::`. `use` declarations are skipped (handled
+/// as imports). Inside an inline `mod x { … }` a `super::` refers back into
+/// this same file, so such paths are dropped there (`self::` too: it names
+/// the inline module). Paths inside macro token trees are not parsed by
+/// tree-sitter and stay invisible.
+#[cfg(feature = "lang-rust")]
+fn collect_rust_inline_paths(node: &Node, src: &[u8], inline_mod_depth: usize, out: &mut Vec<String>) {
+    let _depth = match DepthGuard::enter() { Some(g) => g, None => return };
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "use_declaration" => {}
+            "mod_item" => {
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_rust_inline_paths(&body, src, inline_mod_depth + 1, out);
+                }
+            }
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let text: String = node_text(&child, src).split_whitespace().collect();
+                let text = text.split('<').next().unwrap_or(&text).to_string();
+                let local = text.starts_with("super::") || text.starts_with("self::");
+                if text.starts_with("crate::") || (local && inline_mod_depth == 0) {
+                    out.push(text);
+                } else {
+                    // `Foo::<crate::x::Y>::new` etc.: look inside.
+                    collect_rust_inline_paths(&child, src, inline_mod_depth, out);
+                }
+            }
+            _ => collect_rust_inline_paths(&child, src, inline_mod_depth, out),
+        }
+    }
 }
 
 #[cfg(feature = "lang-rust")]
@@ -1684,6 +1735,41 @@ mod tests {
         let src = "fn internal() {}";
         let out = ts_extract(Path::new("lib.rs"), src).unwrap();
         assert!(out.signatures.is_empty(), "private top-level fn should be skipped");
+    }
+
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn rust_inline_crate_paths_are_imports() {
+        let src = r#"
+use crate::types::Id;
+pub(crate) use crate::net::Socket;
+pub struct System { r: crate::readout::ReadoutMlp<f32> }
+impl System {
+    pub fn step(&mut self) {
+        let v = crate::epistemic::score(&self.r, 1);
+        let w: Vec<crate::types::Id> = Vec::new();
+        super::helpers::log(v);
+        std::mem::drop(w);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn t() { super::System::new(); crate::fixtures::make(); }
+}
+"#;
+        let out = ts_extract(Path::new("src/system.rs"), src).unwrap();
+        assert_eq!(
+            out.imports,
+            vec![
+                "crate::types::Id",
+                "crate::net::Socket",
+                "crate::readout::ReadoutMlp",
+                "crate::epistemic::score",
+                "super::helpers::log",
+                "crate::fixtures::make",
+            ]
+        );
     }
 
     #[cfg(feature = "lang-python")]

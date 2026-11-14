@@ -1735,6 +1735,58 @@ fn derive_module_stem(module_path: &str) -> String {
         .to_string()
 }
 
+/// Expand a Rust use tree into one path per leaf:
+/// `crate::{a, b::{c, D}, e::{self, F}}` → `crate::a`, `crate::b::c`,
+/// `crate::b::D`, `crate::e`, `crate::e::F`. `as` aliases are dropped.
+fn expand_rust_use_tree(import: &str) -> Vec<String> {
+    fn split_top(s: &str) -> Vec<&str> {
+        let (mut out, mut depth, mut start) = (Vec::new(), 0usize, 0usize);
+        for (i, c) in s.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(&s[start..]);
+        out
+    }
+    fn go(prefix: &str, tree: &str, out: &mut Vec<String>) {
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return;
+        }
+        match tree.find('{') {
+            Some(open) if tree.ends_with('}') => {
+                let head = tree[..open].trim().trim_end_matches("::");
+                let p = match (prefix.is_empty(), head.is_empty()) {
+                    (true, _) => head.to_string(),
+                    (false, true) => prefix.to_string(),
+                    (false, false) => format!("{prefix}::{head}"),
+                };
+                for part in split_top(&tree[open + 1..tree.len() - 1]) {
+                    go(&p, part, out);
+                }
+            }
+            _ => {
+                let leaf = tree.split(" as ").next().unwrap_or(tree).trim();
+                out.push(match (prefix.is_empty(), leaf) {
+                    (true, l) => l.to_string(),
+                    (false, "self") => prefix.to_string(),
+                    (false, l) => format!("{prefix}::{l}"),
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go("", import.trim().trim_start_matches("use ").trim_end_matches(';'), &mut out);
+    out
+}
+
 /// Precomputed lookup tables for import resolution. Built once per `rebuild_graph`
 /// so resolving every file's imports is O(N + edges) instead of O(N²): the previous
 /// resolver scanned every file for every import, which made large C/C++ trees
@@ -1762,6 +1814,10 @@ struct ImportIndex<'a> {
     /// project root is a Go module. Enables namespace-exact import resolution:
     /// internal imports resolve to their package directory, external ones to no edge.
     go_module: Option<String>,
+    /// Rust file → the leaf paths of its `use` declarations (use trees
+    /// expanded). Lets `crate::Item` follow a crate-root re-export
+    /// (`pub use types::Item;` in lib.rs) to the module that defines it.
+    rust_uses: HashMap<&'a str, Vec<String>>,
     /// tsconfig/jsconfig path-alias configs by the directory holding the config
     /// (repo-relative, "" for the root). A JS/TS source uses the nearest one.
     ts_configs: HashMap<String, TsPaths>,
@@ -1789,6 +1845,7 @@ impl<'a> ImportIndex<'a> {
         let mut by_segment: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_symbol: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_dir: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut rust_uses: HashMap<&'a str, Vec<String>> = HashMap::new();
 
         for (module_id, file) in files.iter() {
             let id = module_id.as_str();
@@ -1823,6 +1880,17 @@ impl<'a> ImportIndex<'a> {
                     }
                 }
             }
+            if id.ends_with(".rs") {
+                let uses: Vec<String> = file
+                    .imports
+                    .iter()
+                    .filter(|i| i.contains("::"))
+                    .flat_map(|i| expand_rust_use_tree(i))
+                    .collect();
+                if !uses.is_empty() {
+                    rust_uses.insert(id, uses);
+                }
+            }
         }
         // Index directories by their last segment for O(candidates) suffix probing.
         let mut by_dir_last: HashMap<String, Vec<String>> = HashMap::new();
@@ -1853,6 +1921,7 @@ impl<'a> ImportIndex<'a> {
             by_dir,
             by_dir_last,
             go_module: None,
+            rust_uses,
             ts_configs: HashMap::new(),
         }
     }
@@ -2231,7 +2300,123 @@ impl<'a> ImportIndex<'a> {
                 return hits;
             }
         }
+        // Rust grouped `use crate::{a, b::{c, D}}` names several modules.
+        if source.ends_with(".rs") && import.contains('{') {
+            let mut out: Vec<(String, &'static str)> = Vec::new();
+            for path in expand_rust_use_tree(import) {
+                if let Some(hit) = self.resolve(&path, source) {
+                    if !out.iter().any(|(t, _)| *t == hit.0) {
+                        out.push(hit);
+                    }
+                }
+            }
+            return out;
+        }
         self.resolve(import, source).into_iter().collect()
+    }
+
+    /// Rust path anchored precisely: `crate::` at the crate root (nearest
+    /// ancestor directory with `lib.rs`/`main.rs`), `self::`/`super::` at the
+    /// source module. The longest prefix naming a module file (`x.rs` or
+    /// `x/mod.rs`) wins; with no module segment left (`super::Foo`) it is the
+    /// anchor module's own file. `None` → caller falls back to suffix matching.
+    fn resolve_rust_anchored(&self, path: &str, source: &str) -> Option<String> {
+        self.resolve_rust_anchored_at(path, source, 0)
+    }
+
+    fn resolve_rust_anchored_at(&self, path: &str, source: &str, depth: usize) -> Option<String> {
+        if depth > 3 {
+            return None;
+        }
+        // Rust 2018 uniform paths: `use types::X` names a child module of the
+        // current module when one exists (lib.rs `pub use types::X;`).
+        let first = path.trim_start_matches("::").split("::").next().unwrap_or("").trim();
+        if !first.is_empty() && !matches!(first, "crate" | "self" | "super") && path.contains("::") {
+            return self.resolve_rust_anchored_at(&format!("self::{}", path.trim()), source, depth + 1);
+        }
+        let head = path.split('{').next().unwrap_or(path);
+        let head = head.split(" as ").next().unwrap_or(head).trim().trim_end_matches("::");
+        let mut segs: Vec<&str> = head.split("::").map(str::trim).filter(|s| !s.is_empty()).collect();
+        if segs.is_empty() {
+            return None;
+        }
+        let dir_of = |p: &str| p.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        // Directory holding the CHILD modules of the source file's module.
+        let children_dir = |file: &str| -> String {
+            let (d, name) = file.rsplit_once('/').unwrap_or(("", file));
+            match name {
+                "mod.rs" | "lib.rs" | "main.rs" => d.to_string(),
+                _ => normalize_rel(d, name.trim_end_matches(".rs")),
+            }
+        };
+        let anchor: String = match segs[0] {
+            "crate" => {
+                let mut d = dir_of(source);
+                loop {
+                    let has_root = ["lib.rs", "main.rs"].iter().any(|r| {
+                        let c = if d.is_empty() { r.to_string() } else { format!("{d}/{r}") };
+                        self.ids.contains(c.as_str())
+                    });
+                    if has_root {
+                        break d;
+                    }
+                    if d.is_empty() {
+                        return None;
+                    }
+                    d = dir_of(&d);
+                }
+            }
+            "self" => children_dir(source),
+            "super" => {
+                let mut d = children_dir(source);
+                let mut i = 0;
+                while segs.get(i) == Some(&"super") {
+                    if d.is_empty() {
+                        return None;
+                    }
+                    d = dir_of(&d);
+                    i += 1;
+                }
+                segs.drain(..i.saturating_sub(1));
+                d
+            }
+            _ => return None,
+        };
+        segs.remove(0);
+        let module_file = |p: &str| -> Option<String> {
+            [format!("{p}.rs"), format!("{p}/mod.rs")]
+                .into_iter()
+                .find(|c| self.ids.contains(c.as_str()))
+        };
+        for k in (1..=segs.len()).rev() {
+            let cand = normalize_rel(&anchor, &segs[..k].join("/"));
+            if let Some(hit) = module_file(&cand) {
+                return (hit != source).then_some(hit);
+            }
+        }
+        // No module segment (`crate::Item`, `super::Item`): the item lives in
+        // the anchor module's own file — or that file re-exports it (`pub use
+        // types::Item;`), in which case follow the re-export to the module
+        // that defines it instead of pointing at the facade.
+        let own = [
+            module_file(&anchor),
+            ["lib.rs", "main.rs"].iter().find_map(|r| {
+                let c = if anchor.is_empty() { r.to_string() } else { format!("{anchor}/{r}") };
+                self.ids.contains(c.as_str()).then_some(c)
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .next()?;
+        if let (Some(item), Some(uses)) = (segs.first(), self.rust_uses.get(own.as_str())) {
+            let suffix = format!("::{item}");
+            if let Some(reexport) = uses.iter().find(|u| u.ends_with(&suffix)) {
+                if let Some(hit) = self.resolve_rust_anchored_at(reexport, &own, depth + 1) {
+                    return (hit != source).then_some(hit);
+                }
+            }
+        }
+        (own != source).then_some(own)
     }
 
     /// Python relative import (`from .x import y`, `from .. import z`),
@@ -2396,6 +2581,9 @@ impl<'a> ImportIndex<'a> {
         //     structural (bridges/cycles/health/roles) analysis. An external crate
         //     (serde, std, tokio, …) matches nothing local and yields no edge.
         if source.ends_with(".rs") {
+            if let Some(hit) = self.resolve_rust_anchored(import, source) {
+                return Some((hit, "exact"));
+            }
             if let Some(module_rel) = rust_module_path(import) {
                 let mut segs: Vec<&str> = module_rel.split('/').collect();
                 while !segs.is_empty() {
@@ -3584,25 +3772,82 @@ mod tests {
         // `use crate::substrate::Substrate` — trailing type stripped, module file.
         assert_eq!(
             idx.resolve("crate::substrate::Substrate", src),
-            Some(("src/substrate.rs".to_string(), "suffix")),
+            Some(("src/substrate.rs".to_string(), "exact")),
         );
         // Qualified path disambiguates the same-stem trap: io, not selfhood.
         assert_eq!(
             idx.resolve("crate::io::language::converse", src),
-            Some(("src/io/language.rs".to_string(), "suffix")),
+            Some(("src/io/language.rs".to_string(), "exact")),
         );
         // `use crate::io` → the module directory's `mod.rs` entry point.
         assert_eq!(
             idx.resolve("crate::io", src),
-            Some(("src/io/mod.rs".to_string(), "suffix")),
+            Some(("src/io/mod.rs".to_string(), "exact")),
         );
         // Grouped import: module before the `{…}` resolves.
         assert_eq!(
             idx.resolve("crate::lifecycle::daemon::{Daemon, tick}", src),
-            Some(("src/lifecycle/daemon.rs".to_string(), "suffix")),
+            Some(("src/lifecycle/daemon.rs".to_string(), "exact")),
         );
         // External crate names nothing local → no edge (no fuzzy fabrication).
         assert_eq!(idx.resolve("serde::Deserialize", "src/substrate.rs"), None);
+    }
+
+    // Rust paths anchor precisely: `crate::` at the crate root of the SOURCE
+    // (workspace crates do not bleed into each other), `super::`/`self::` at the
+    // source module, a grouped use tree names every module in it, and
+    // `super::Item` with no module segment is the parent module's own file.
+    #[test]
+    fn rust_paths_anchor_at_crate_root_and_module() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in [
+            "core/src/lib.rs",
+            "core/src/readout.rs",
+            "core/src/net/mod.rs",
+            "core/src/net/tcp.rs",
+            "core/src/net/udp.rs",
+            "cli/src/main.rs",
+            "cli/src/readout.rs", // trap: same path inside another crate
+        ] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        let ex = |t: &str| Some((t.to_string(), "exact"));
+        assert_eq!(idx.resolve("crate::readout::ReadoutMlp", "core/src/net/tcp.rs"), ex("core/src/readout.rs"));
+        assert_eq!(idx.resolve("crate::readout::f", "cli/src/main.rs"), ex("cli/src/readout.rs"));
+        assert_eq!(idx.resolve("super::udp::Socket", "core/src/net/tcp.rs"), ex("core/src/net/udp.rs"));
+        assert_eq!(idx.resolve("super::Config", "core/src/net/tcp.rs"), ex("core/src/net/mod.rs"));
+        assert_eq!(idx.resolve("super::readout::x", "core/src/net/mod.rs"), ex("core/src/readout.rs"));
+        assert_eq!(idx.resolve("self::tcp::connect", "core/src/net/mod.rs"), ex("core/src/net/tcp.rs"));
+        assert_eq!(idx.resolve("super::super::readout::x", "core/src/net/tcp.rs"), ex("core/src/readout.rs"));
+        let mut grouped: Vec<String> = idx
+            .resolve_all("crate::{readout::ReadoutMlp, net::{self, tcp::connect, udp}}", "core/src/lib.rs")
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        grouped.sort();
+        assert_eq!(
+            grouped,
+            vec!["core/src/net/mod.rs", "core/src/net/tcp.rs", "core/src/net/udp.rs", "core/src/readout.rs"]
+        );
+        // `crate::Item` follows the crate root's re-export to the defining
+        // module; a bare `use types::X` in lib.rs is the child module.
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        files.insert(
+            "src/lib.rs".into(),
+            MappedFile::from_minimal("src/lib.rs".into(), vec!["types".into(), "types::{MorphonId, Other}".into()]),
+        );
+        for p in ["src/types.rs", "src/system.rs"] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx2 = ImportIndex::build(&files);
+        assert_eq!(idx2.resolve("crate::MorphonId", "src/system.rs"), ex("src/types.rs"));
+        assert_eq!(idx2.resolve("types::{MorphonId, Other}", "src/lib.rs"), ex("src/types.rs"));
+        assert_eq!(idx2.resolve("crate::Unknown", "src/system.rs"), ex("src/lib.rs"));
+        assert_eq!(
+            expand_rust_use_tree("crate::{a, b::{c, D as E}, f::{self, G}}"),
+            vec!["crate::a", "crate::b::c", "crate::b::D", "crate::f", "crate::f::G"]
+        );
     }
 
     // JS/TS relative specifiers resolve against the SOURCE directory, not a
