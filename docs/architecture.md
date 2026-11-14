@@ -146,7 +146,7 @@ All git metrics are computed by shelling out to `git` and parsing stdout. No lib
 | Metric | How |
 |--------|-----|
 | **Churn** | `git log --name-only` — commit count per file |
-| **Co-change** | Jaccard-style coupling: `count / min(churn_a, churn_b)` |
+| **Co-change** | Tornhill coupling with a support prior: `count / (min(churn_a, churn_b) + 2)` |
 | **Hotspot score** | `churn × signature_count`, normalised 0–100 |
 | **Semantic diff** | `git show` at two refs → `extract_skeleton` on both → diff signatures |
 

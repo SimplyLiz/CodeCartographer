@@ -86,6 +86,10 @@ pub(crate) fn fixture() -> Fixture {
             "import {{ render }} from '../ui/view';\nexport function load(): string {{ return 'x'; }}\nexport function unused(): number {{ return 1; }}\nexport function m{i}(): number {{ return {i}; }}\n"));
         write(&root, "src/config.ts", &format!("export const port = {i};\n"));
         write(&root, "src/util.ts", &format!("export function helper(): number {{ return {i}; }}\n"));
+        if i < 2 {
+            // Two co-changes only: below the default co-change floor.
+            write(&root, "NOTES.md", &format!("# Notes {i}\n"));
+        }
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", &format!("change {i}")]);
     }
@@ -230,6 +234,18 @@ fn ffi_contract_all_functions() {
     let d = call(codecartographer_git_cochange(p, 0, 1));
     assert_camel(&d, &[], "git_cochange");
     assert_keys(first(&d, "git_cochange"), &["fileA", "fileB", "count", "couplingScore"], "pair");
+
+    // Default floor (min_count 0 → 3): the one-off pairs from the initial
+    // commit (layers.toml with everything) are dropped.
+    let d = call(codecartographer_git_cochange(p, 0, 0));
+    let pairs = d.as_array().unwrap();
+    assert!(!pairs.is_empty());
+    assert!(pairs.iter().all(|x| x["count"].as_u64().unwrap() >= 3), "{d}");
+    let has_notes = |d: &Value| {
+        d.as_array().unwrap().iter().any(|x| x["fileA"] == "NOTES.md" || x["fileB"] == "NOTES.md")
+    };
+    assert!(!has_notes(&d), "{d}");
+    assert!(has_notes(&call(codecartographer_git_cochange(p, 0, 2))));
 
     // hidden_coupling
     let d = call(codecartographer_hidden_coupling(p, 0, 1));

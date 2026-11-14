@@ -9,6 +9,12 @@
 #include <stdlib.h>
 
 /**
+ * Pseudo-commits in which a pair is assumed *not* to have changed together.
+ * See [`coupling_score`].
+ */
+#define COUPLING_PRIOR 2.0
+
+/**
  * SVG size threshold in bytes (only ignore if > 2KB)
  */
 #define SVG_SIZE_THRESHOLD 2048
@@ -213,7 +219,7 @@ char *codecartographer_git_churn(const char *path, uint32_t limit);
  * Inputs:
  *   `path`      — project root (C string)
  *   `limit`     — number of commits to analyse (0 → 500)
- *   `min_count` — minimum co-change count to include (0 → 2)
+ *   `min_count` — minimum co-change count to include (0 → 3)
  *
  * Response shape:
  * ```json
@@ -271,7 +277,7 @@ char *codecartographer_semidiff(const char *path, const char *commit1, const cha
  * Inputs:
  *   `path`      — project root
  *   `limit`     — commits to analyse (0 → 500)
- *   `min_count` — minimum co-change count to include (0 → 2)
+ *   `min_count` — minimum co-change count to include (0 → 3)
  *
  * Response shape: same as `codecartographer_git_cochange` (array of CoChangePair).
  * Returns an empty array when the directory is not a git repo.

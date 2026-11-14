@@ -4,6 +4,18 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — co-change coupling accounts for support
+
+- **`coupling_score` is shrunk by a prior.** It was Tornhill's
+  `count / min(churn_a, churn_b)`, so a file changed twice, both times with X,
+  scored 1.0 and outranked a partner that changed with X in 14 of its 16
+  commits (CKB's `prepareChange` showed exactly that, plus a false "High
+  coupling" risk factor). The score is now `count / (min(churn_a, churn_b) + 2)`:
+  2 of 2 scores 0.5, 5 of 5 0.71, 14 of 16 0.78, 10 of 10 0.83. Ties are broken
+  by the co-change count. Applies to `git_cochange`, `hidden_coupling`, shotgun
+  surgery's input, the MCP tools and the CLI.
+- The FFI's default minimum co-change count (`min_count` 0) is 3 instead of 2.
+
 ### Changed — FFI calls reuse built state
 
 - **Process-level cache for the C ABI.** Every FFI call scanned the tree,

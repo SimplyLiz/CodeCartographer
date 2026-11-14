@@ -631,12 +631,17 @@ pub extern "C" fn codecartographer_git_churn(path: *const c_char, limit: u32) ->
 // FFI: Git Co-change
 // ---------------------------------------------------------------------------
 
+/// Co-change floor when the caller passes 0. Two shared commits are too few to
+/// call a coupling (it was 2, which let a file changed twice outrank real
+/// partners); CKB uses 3 for its own hidden-coupling check.
+const DEFAULT_MIN_COCHANGES: usize = 3;
+
 /// Return temporally coupled file pairs from the last `limit` commits.
 ///
 /// Inputs:
 ///   `path`      — project root (C string)
 ///   `limit`     — number of commits to analyse (0 → 500)
-///   `min_count` — minimum co-change count to include (0 → 2)
+///   `min_count` — minimum co-change count to include (0 → 3)
 ///
 /// Response shape:
 /// ```json
@@ -664,7 +669,7 @@ pub extern "C" fn codecartographer_git_cochange(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
     let limit = if limit == 0 { 500 } else { limit as usize };
-    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+    let min_count = if min_count == 0 { DEFAULT_MIN_COCHANGES } else { min_count as usize };
 
     let pairs: Vec<serde_json::Value> = ffi_cache::git_cochange(&path, limit)
         .iter()
@@ -818,7 +823,7 @@ pub extern "C" fn codecartographer_semidiff(
 /// Inputs:
 ///   `path`      — project root
 ///   `limit`     — commits to analyse (0 → 500)
-///   `min_count` — minimum co-change count to include (0 → 2)
+///   `min_count` — minimum co-change count to include (0 → 3)
 ///
 /// Response shape: same as `codecartographer_git_cochange` (array of CoChangePair).
 /// Returns an empty array when the directory is not a git repo.
@@ -833,7 +838,7 @@ pub extern "C" fn codecartographer_hidden_coupling(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
     let limit = if limit == 0 { 500 } else { limit as usize };
-    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+    let min_count = if min_count == 0 { DEFAULT_MIN_COCHANGES } else { min_count as usize };
 
     // Build the static import-edge set from the dependency graph.
     let state = match ffi_state(&path) {
