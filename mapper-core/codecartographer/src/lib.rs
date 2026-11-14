@@ -1115,7 +1115,7 @@ pub extern "C" fn codecartographer_search_content(
 ///
 /// Parameters:
 /// - `path`      – absolute path to repo root (UTF-8 C string)
-/// - `pattern`   – glob pattern, e.g. `"*.rs"` or `"src/subdir/*.go"` (C string)
+/// - `pattern`   – glob pattern, e.g. `"*.rs"` or `"src/{a,b}.go"` (C string)
 /// - `limit`     – max files to return; 0 = unlimited
 /// - `opts_json` – optional JSON `FindOptions` or null for defaults:
 ///   `{ modifiedSinceSecs, newerThan, minSizeBytes, maxSizeBytes, maxDepth, noIgnore }`

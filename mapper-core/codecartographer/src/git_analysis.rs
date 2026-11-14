@@ -305,7 +305,7 @@ pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
 
 /// Pseudo-commits in which a pair is assumed *not* to have changed together.
 /// See [`coupling_score`].
-pub const COUPLING_PRIOR: f64 = 2.0;
+pub(crate) const COUPLING_PRIOR: f64 = 2.0;
 
 /// Coupling of two files that changed together in `count` commits, out of
 /// `churn_a` and `churn_b` commits each.

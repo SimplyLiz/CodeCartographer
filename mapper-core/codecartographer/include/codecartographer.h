@@ -9,12 +9,6 @@
 #include <stdlib.h>
 
 /**
- * Pseudo-commits in which a pair is assumed *not* to have changed together.
- * See [`coupling_score`].
- */
-#define COUPLING_PRIOR 2.0
-
-/**
  * SVG size threshold in bytes (only ignore if > 2KB)
  */
 #define SVG_SIZE_THRESHOLD 2048
@@ -386,7 +380,7 @@ char *codecartographer_search_content(const char *path, const char *pattern, con
  *
  * Parameters:
  * - `path`      – absolute path to repo root (UTF-8 C string)
- * - `pattern`   – glob pattern, e.g. `"*.rs"` or `"src/subdir/*.go"` (C string)
+ * - `pattern`   – glob pattern, e.g. `"*.rs"` or `"src/{a,b}.go"` (C string)
  * - `limit`     – max files to return; 0 = unlimited
  * - `opts_json` – optional JSON `FindOptions` or null for defaults:
  *   `{ modifiedSinceSecs, newerThan, minSizeBytes, maxSizeBytes, maxDepth, noIgnore }`
