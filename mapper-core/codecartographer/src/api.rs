@@ -809,7 +809,13 @@ impl ApiState {
             structural.iter().filter(|e| e.edge_type != "doc").cloned().collect();
         let code_node_count = nodes.iter().filter(|n| !is_doc_path(&n.path)).count();
 
-        let bridge_analysis = self.analyze_bridges(&nodes, &code_structural);
+        // Bridges are measured on the graph without test imports. Betweenness
+        // runs on the undirected graph, where a test importing A and B is a
+        // path A–test–B: test files came out as bridges (36 of 154 in a TS app)
+        // and lent their shortest paths to the production files they import.
+        let bridge_edges: Vec<GraphEdge> =
+            code_structural.iter().filter(|e| e.edge_type != "test").cloned().collect();
+        let bridge_analysis = self.analyze_bridges(&nodes, &bridge_edges);
 
         for node in &mut nodes {
             if let Some(analysis) = bridge_analysis.get(&node.module_id) {
@@ -4060,6 +4066,27 @@ mod tests {
             .iter()
             .find(|e| e.source == s && e.target == t)
             .map(|e| (e.edge_type.clone(), e.resolution.clone()))
+    }
+
+    // Betweenness runs on the undirected graph: a test importing a and b would
+    // sit on a path a–test–b and come out as a bridge. Test imports are left
+    // out of bridge analysis; the production file joining a and b stays one.
+    #[test]
+    fn test_files_are_not_bridges() {
+        let g = graph_with(
+            "bridgetest",
+            &[],
+            &[
+                ("src/a.ts", vec![]),
+                ("src/b.ts", vec![]),
+                ("src/c.ts", vec!["./a", "./b"]),
+                ("tests/ab.test.ts", vec!["../src/a", "../src/b"]),
+            ],
+        );
+        assert!(has_edge(&g, "tests/ab.test.ts", "src/a.ts").is_some(), "{:?}", g.edges);
+        let bridge = |id: &str| g.nodes.iter().find(|n| n.module_id == id).and_then(|n| n.is_bridge);
+        assert_eq!(bridge("src/c.ts"), Some(true));
+        assert_ne!(bridge("tests/ab.test.ts"), Some(true));
     }
 
     // A Go import names a package: the importer gets an edge to every non-test

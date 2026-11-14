@@ -7,6 +7,14 @@ All notable changes to CodeCartographer will be documented in this file.
 The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — test files are not bridges
+
+- Bridge detection (betweenness on the undirected import graph) counted test
+  imports: a test importing `a` and `b` sat on the path `a`–test–`b`, so test
+  files came out as bridges (36 of 154 bridges in a Next.js app, 6 of 29 in a
+  Python package) and lent shortest paths to the files they test. Test
+  imports are now left out of bridge analysis.
+
 ### Fixed — a Go package import is one layer violation, not one per file
 
 - Go imports resolve to every file of the package (`"package"` edges), so one
