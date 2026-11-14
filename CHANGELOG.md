@@ -7,6 +7,30 @@ All notable changes to CodeCartographer will be documented in this file.
 Measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — TypeScript path aliases, type-only imports, fuzzy guesses
+
+- **tsconfig/jsconfig `paths` and `baseUrl` resolve.** 0 of 1,454 `@/…`
+  imports in the Next.js app became edges; now 1,453 do (the last names a
+  `.jpg` that is not scanned), and the app's edges go 816 → 2,146. Each source
+  uses its nearest config (nested per-package configs in monorepos), relative
+  `extends` chains and solution-style `references` are followed, comments and
+  trailing commas are accepted. Lookup follows TypeScript: the file, `.js` →
+  `.ts`, `.ts/.tsx/.d.ts/.js/…`, then `index.*`; relative imports from JS/TS
+  use the same order.
+- **Type-only imports are `type` edges and never close a cycle.**
+  `import type`, `export type … from` and all-`type` named imports are marked
+  by the extractor (`TYPE_ONLY_PREFIX`); the edge stays, cycle detection and
+  `simulate_change`'s cycle check skip it, and a pair imported both ways keeps
+  the runtime edge. Cycles in the app 3 → 1: the two that closed only through
+  `import type` are gone, `DesignPanel ↔ SignatureControls/Hyphenation` stays.
+  The directory rollup keeps a pair `type` when all its imports are.
+- **Fuzzy resolution is narrower.** A bare JS/TS specifier no relative path,
+  alias or `baseUrl` resolved is an npm package and gets no edge (it used to
+  segment-match, e.g. `drizzle-orm` → `drizzle/0000_init.sql`, the app's most
+  "imported" file). Other code imports only fuzzy-match files of their own
+  language family. Fuzzy edges in the app 118 → 0; code → non-code edges
+  66 → 7, all explicit `.css` imports.
+
 ### Fixed — Go imports resolve to the package, not one arbitrary file
 
 - **An import connects to every non-test `.go` file of the package**

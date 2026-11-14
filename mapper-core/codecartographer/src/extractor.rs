@@ -855,12 +855,44 @@ fn collect_js_ts_imports(root: &Node, src: &[u8]) -> Vec<String> {
                 let raw = node_text(&source_node, src);
                 let clean = raw.trim_matches('"').trim_matches('\'');
                 if !clean.is_empty() {
-                    imports.push(clean.to_string());
+                    if js_ts_is_type_only(node_text(&child, src)) {
+                        imports.push(format!("{}{clean}", crate::mapper::TYPE_ONLY_PREFIX));
+                    } else {
+                        imports.push(clean.to_string());
+                    }
                 }
             }
         }
     }
     imports
+}
+
+/// True for an import/re-export that TypeScript erases at runtime:
+/// `import type …`, `export type … from`, or named imports that are all
+/// `type`-qualified (`import { type A, type B } from …`). `import type from 'x'`
+/// is a default import NAMED `type`, not type-only.
+#[cfg(any(feature = "lang-typescript", feature = "lang-javascript"))]
+pub(crate) fn js_ts_is_type_only(stmt: &str) -> bool {
+    let rest = stmt.trim_start();
+    let rest = match rest.strip_prefix("import").or_else(|| rest.strip_prefix("export")) {
+        Some(r) => r.trim_start(),
+        None => return false,
+    };
+    if let Some(after) = rest.strip_prefix("type") {
+        if after.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '*') {
+            let next = after.trim_start();
+            // `import type from 'x'` / `import type, { a } from 'x'`: identifier `type`.
+            return !(next.starts_with("from") && next[4..].trim_start().starts_with(['"', '\'']))
+                && !next.starts_with(',');
+        }
+        return false;
+    }
+    if let Some(body) = rest.strip_prefix('{') {
+        let Some(end) = body.find('}') else { return false };
+        let names: Vec<&str> = body[..end].split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        return !names.is_empty() && names.iter().all(|n| n.starts_with("type "));
+    }
+    false
 }
 
 /// Shared walker for TypeScript and JavaScript (both grammars produce compatible node kinds).
@@ -1620,6 +1652,36 @@ mod tests {
         let src = "fn internal() {}";
         let out = ts_extract(Path::new("lib.rs"), src).unwrap();
         assert!(out.signatures.is_empty(), "private top-level fn should be skipped");
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_type_only_imports_are_marked() {
+        let src = r#"
+import type { A } from "./a";
+import { type B, type C } from "./bc";
+import { type D, e } from "./de";
+import type from "./default-named-type";
+import f from "./f";
+export type { G } from "./g";
+export { h } from "./h";
+export type * from "./star";
+"#;
+        let out = ts_extract(Path::new("x.ts"), src).unwrap();
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        assert_eq!(
+            out.imports,
+            vec![
+                t("./a"),
+                t("./bc"),
+                "./de".to_string(),
+                "./default-named-type".to_string(),
+                "./f".to_string(),
+                t("./g"),
+                "./h".to_string(),
+                t("./star"),
+            ]
+        );
     }
 
     #[cfg(feature = "lang-rust")]

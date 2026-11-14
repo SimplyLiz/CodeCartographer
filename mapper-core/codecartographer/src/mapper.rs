@@ -221,6 +221,14 @@ pub enum DetailLevel {
 // MappedFile
 // ---------------------------------------------------------------------------
 
+/// Prefix an extractor puts in front of an entry in `MappedFile::imports` when
+/// the import is type-only — erased at runtime (TS `import type` / `export type
+/// … from`, all-`type` named imports, Python imports under `if TYPE_CHECKING:`).
+/// `"type ./attachments"`. The graph keeps these as `type` edges and leaves them
+/// out of cycle detection; resolvers that do not know the prefix still find the
+/// specifier as the last whitespace token.
+pub const TYPE_ONLY_PREFIX: &str = "type ";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappedFile {
     pub path: String,

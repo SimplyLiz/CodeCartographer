@@ -626,7 +626,9 @@ impl ApiState {
 
         // Build the import-resolution index ONCE for the whole rebuild (O(N)); each import
         // then resolves via hash lookups instead of scanning every file (was O(N²)).
-        let import_index = ImportIndex::build(&files).with_go_module(&self.root_path);
+        let import_index = ImportIndex::build(&files)
+            .with_go_module(&self.root_path)
+            .with_ts_paths(&self.root_path);
         phase!("index_build");
 
         // Resolve every file's imports in parallel — resolution is a read-only lookup
@@ -675,6 +677,15 @@ impl ApiState {
 
                 let mut file_edges = Vec::new();
                 for import in &file.imports {
+                    // A type-only import (TS `import type`, Python `if TYPE_CHECKING:`)
+                    // is a real dependency but erased at runtime: typed `type` so cycle
+                    // detection can ignore it.
+                    let (import, type_only) = split_type_only(import);
+                    let edge_type = if type_only && source_kind == "runtime" {
+                        "type"
+                    } else {
+                        source_kind
+                    };
                     for (target, resolution) in import_index.resolve_all(import, module_id) {
                         // Reject cross-type edges: a source file importing "json" must not
                         // resolve to a fixture like testdata/review/json.json (doc), and a
@@ -688,7 +699,7 @@ impl ApiState {
                         file_edges.push(GraphEdge {
                             source: module_id.clone(),
                             target,
-                            edge_type: source_kind.to_string(),
+                            edge_type: edge_type.to_string(),
                             at_range: None,
                             resolution: resolution.to_string(),
                         });
@@ -723,10 +734,15 @@ impl ApiState {
                 _ => 3,
             }
         }
+        // A runtime import beats a type-only one for the same pair.
+        fn type_rank(t: &str) -> u8 {
+            u8::from(t == "type")
+        }
         edges.sort_unstable_by(|a, b| {
             a.source
                 .cmp(&b.source)
                 .then(a.target.cmp(&b.target))
+                .then(type_rank(&a.edge_type).cmp(&type_rank(&b.edge_type)))
                 .then(res_rank(&a.resolution).cmp(&res_rank(&b.resolution)))
         });
         edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
@@ -829,7 +845,9 @@ impl ApiState {
         for edge in &structural {
             *out_degree.entry(edge.source.clone()).or_insert(0) += 1;
             *in_degree.entry(edge.target.clone()).or_insert(0) += 1;
-            if edge.edge_type == "runtime" {
+            // A type-only import still uses the target (a types module that is
+            // only ever `import type`d is not dead).
+            if edge.edge_type == "runtime" || edge.edge_type == "type" {
                 *runtime_in_degree.entry(edge.target.clone()).or_insert(0) += 1;
             }
         }
@@ -1059,7 +1077,9 @@ impl ApiState {
             .collect();
 
         // Aggregate cross-directory edges (deduped presence, self-loops dropped).
-        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        // A directory pair linked only by type-only imports stays a `type` edge
+        // (out of cycle detection); any runtime import makes it `runtime`.
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
         for e in &file_graph.edges {
             if e.resolution == "fuzzy" {
@@ -1071,14 +1091,23 @@ impl ApiState {
             if sf == tf {
                 continue;
             }
-            if seen.insert((sf.clone(), tf.clone())) {
-                edges.push(GraphEdge {
-                    source: sf.clone(),
-                    target: tf.clone(),
-                    edge_type: "runtime".into(),
-                    at_range: None,
-                    resolution: "exact".into(),
-                });
+            let kind = if e.edge_type == "type" { "type" } else { "runtime" };
+            match seen.get(&(sf.clone(), tf.clone())) {
+                Some(&i) => {
+                    if kind == "runtime" {
+                        edges[i].edge_type = "runtime".into();
+                    }
+                }
+                None => {
+                    seen.insert((sf.clone(), tf.clone()), edges.len());
+                    edges.push(GraphEdge {
+                        source: sf.clone(),
+                        target: tf.clone(),
+                        edge_type: kind.into(),
+                        at_range: None,
+                        resolution: "exact".into(),
+                    });
+                }
             }
         }
 
@@ -1531,6 +1560,148 @@ fn path_no_ext(p: &str) -> &str {
     }
 }
 
+/// Join `rel` onto the repo-relative directory `dir` and normalise `.`/`..`
+/// (never above the repo root). `normalize_rel("src/a", "../b/c")` → `"src/b/c"`.
+fn normalize_rel(dir: &str, rel: &str) -> String {
+    let mut parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// Strip `//` and `/* */` comments (outside strings) and trailing commas, so a
+/// tsconfig (JSONC) parses as JSON.
+fn strip_jsonc(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_str = false;
+    while i < c.len() {
+        if in_str {
+            out.push(c[i]);
+            if c[i] == '\\' && i + 1 < c.len() {
+                out.push(c[i + 1]);
+                i += 2;
+                continue;
+            }
+            in_str = c[i] != '"';
+            i += 1;
+        } else if c[i] == '"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+        } else if c[i] == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' {
+                i += 1;
+            }
+        } else if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(c[i]);
+            i += 1;
+        }
+    }
+    let re = regex::Regex::new(r",(\s*[}\]])").unwrap();
+    re.replace_all(&out, "$1").into_owned()
+}
+
+/// Load `baseUrl` + `paths` from the tsconfig/jsconfig at repo-relative
+/// `rel`, following relative `extends` (string or array; the child overrides)
+/// up to a small depth, and — for a solution-style config that sets no
+/// `paths` itself — the configs it lists under `references` (Vite's
+/// tsconfig.json → tsconfig.app.json layout). `None` when nothing applies.
+fn load_ts_paths(root: &Path, rel: &str) -> Option<TsPaths> {
+    fn load(root: &Path, rel: &str, depth: usize, out: &mut TsPaths, have_paths: &mut bool, have_base: &mut bool) -> Option<serde_json::Value> {
+        if depth > 5 {
+            return None;
+        }
+        let text = std::fs::read_to_string(root.join(rel)).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&strip_jsonc(&text)).ok()?;
+        let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let opts = v.get("compilerOptions");
+        // The child's own settings win; only fill what is still unset.
+        if !*have_base {
+            if let Some(b) = opts.and_then(|o| o.get("baseUrl")).and_then(|b| b.as_str()) {
+                out.base_url = Some(normalize_rel(dir, b));
+                *have_base = true;
+            }
+        }
+        if !*have_paths {
+            if let Some(p) = opts.and_then(|o| o.get("paths")).and_then(|p| p.as_object()) {
+                out.paths = p
+                    .iter()
+                    .map(|(k, v)| {
+                        let subs = v
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default();
+                        (k.clone(), subs)
+                    })
+                    .collect();
+                out.paths_dir = dir.to_string();
+                *have_paths = true;
+            }
+        }
+        let parents: Vec<String> = match v.get("extends") {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => {
+                // Later entries override earlier ones: visit them last-first.
+                a.iter().rev().filter_map(|x| x.as_str().map(str::to_string)).collect()
+            }
+            _ => vec![],
+        };
+        for parent in parents {
+            if !(parent.starts_with("./") || parent.starts_with("../")) {
+                continue; // package-provided base (node_modules): not in the scan
+            }
+            let mut p = normalize_rel(dir, &parent);
+            if !p.ends_with(".json") {
+                p.push_str(".json");
+            }
+            load(root, &p, depth + 1, out, have_paths, have_base);
+        }
+        Some(v)
+    }
+    let mut out = TsPaths::default();
+    let (mut have_paths, mut have_base) = (false, false);
+    let v = load(root, rel, 0, &mut out, &mut have_paths, &mut have_base)?;
+    if !have_paths && !have_base {
+        let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        for r in v.get("references").and_then(|r| r.as_array()).into_iter().flatten() {
+            let Some(path) = r.get("path").and_then(|p| p.as_str()) else { continue };
+            let mut p = normalize_rel(dir, path);
+            if !p.ends_with(".json") {
+                p.push_str("/tsconfig.json");
+            }
+            let mut sub = TsPaths::default();
+            let (mut hp, mut hb) = (false, false);
+            if load(root, &p, 1, &mut sub, &mut hp, &mut hb).is_some() && (hp || hb) {
+                if let (true, Some(b)) = (hp, sub.base_url.clone()) {
+                    sub.paths_dir = b;
+                }
+                return Some(sub);
+            }
+        }
+        return None;
+    }
+    // `paths` with a baseUrl are relative to baseUrl.
+    if let (true, Some(b)) = (have_paths, out.base_url.clone()) {
+        out.paths_dir = b;
+    }
+    Some(out)
+}
+
 /// Read the `module` path declared in `<root>/go.mod`, if present.
 /// e.g. a go.mod with `module github.com/acme/widget` → `Some("github.com/acme/widget")`.
 fn read_go_module(root: &Path) -> Option<String> {
@@ -1591,6 +1762,23 @@ struct ImportIndex<'a> {
     /// project root is a Go module. Enables namespace-exact import resolution:
     /// internal imports resolve to their package directory, external ones to no edge.
     go_module: Option<String>,
+    /// tsconfig/jsconfig path-alias configs by the directory holding the config
+    /// (repo-relative, "" for the root). A JS/TS source uses the nearest one.
+    ts_configs: HashMap<String, TsPaths>,
+}
+
+/// The module-resolution part of a tsconfig.json / jsconfig.json after
+/// `extends` is applied: `baseUrl` and `paths`, both already anchored to
+/// repo-relative directories (TS resolves `baseUrl` against the config that
+/// sets it, and `paths` against `baseUrl` or, without one, against the config
+/// that sets `paths`).
+#[derive(Debug, Clone, Default)]
+struct TsPaths {
+    base_url: Option<String>,
+    /// (pattern, substitutions), e.g. ("@/*", ["./src/*"]).
+    paths: Vec<(String, Vec<String>)>,
+    /// Directory the `paths` substitutions are relative to.
+    paths_dir: String,
 }
 
 impl<'a> ImportIndex<'a> {
@@ -1665,6 +1853,7 @@ impl<'a> ImportIndex<'a> {
             by_dir,
             by_dir_last,
             go_module: None,
+            ts_configs: HashMap::new(),
         }
     }
 
@@ -1687,6 +1876,131 @@ impl<'a> ImportIndex<'a> {
     fn with_go_module(mut self, root: &Path) -> Self {
         self.go_module = read_go_module(root);
         self
+    }
+
+    /// Load the tsconfig.json / jsconfig.json `baseUrl` + `paths` of every
+    /// directory that holds scanned files (and its ancestors), so alias imports
+    /// like `@/lib/db` resolve. No-op for trees without such configs.
+    fn with_ts_paths(mut self, root: &Path) -> Self {
+        let mut dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for d in self.by_dir.keys() {
+            let mut cur = d.as_str();
+            loop {
+                if !dirs.insert(cur.to_string()) {
+                    break;
+                }
+                match cur.rsplit_once('/') {
+                    Some((parent, _)) => cur = parent,
+                    None if !cur.is_empty() => cur = "",
+                    None => break,
+                }
+            }
+        }
+        for d in dirs {
+            if d.split('/').any(|seg| seg == "node_modules") {
+                continue;
+            }
+            for name in ["tsconfig.json", "jsconfig.json"] {
+                let rel = if d.is_empty() { name.to_string() } else { format!("{d}/{name}") };
+                if root.join(&rel).is_file() {
+                    if let Some(cfg) = load_ts_paths(root, &rel) {
+                        self.ts_configs.insert(d.clone(), cfg);
+                    }
+                    break;
+                }
+            }
+        }
+        self
+    }
+
+    /// The tsconfig governing `source`: the one in its nearest ancestor directory.
+    fn ts_config_for(&self, source: &str) -> Option<&TsPaths> {
+        if self.ts_configs.is_empty() {
+            return None;
+        }
+        let mut cur = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        loop {
+            if let Some(c) = self.ts_configs.get(cur) {
+                return Some(c);
+            }
+            if cur.is_empty() {
+                return None;
+            }
+            cur = cur.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        }
+    }
+
+    /// Resolve a normalised repo-relative path the way TypeScript's module
+    /// resolution looks it up: the file itself, a `.js`-family specifier
+    /// pointing at its `.ts` source, the path plus a TS/JS extension (incl.
+    /// `.d.ts`), then a directory `index`.
+    fn resolve_js_file(&self, cand: &str) -> Option<String> {
+        const EXTS: [&str; 9] = ["ts", "tsx", "d.ts", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+        if cand.is_empty() {
+            return None;
+        }
+        if self.ids.contains(cand) {
+            return Some(cand.to_string());
+        }
+        for (js, ts) in [(".js", [".ts", ".tsx"]), (".jsx", [".tsx", ".tsx"]), (".mjs", [".mts", ".mts"]), (".cjs", [".cts", ".cts"])] {
+            if let Some(stem) = cand.strip_suffix(js) {
+                for t in ts {
+                    let c = format!("{stem}{t}");
+                    if self.ids.contains(c.as_str()) {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        for ext in EXTS {
+            let c = format!("{cand}.{ext}");
+            if self.ids.contains(c.as_str()) {
+                return Some(c);
+            }
+        }
+        for ext in EXTS {
+            let c = format!("{cand}/index.{ext}");
+            if self.ids.contains(c.as_str()) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// Resolve a bare (non-relative) JS/TS specifier through the governing
+    /// tsconfig: `paths` first (longest matching prefix wins, substitutions in
+    /// order), then `baseUrl`. `Some(None)` = an alias pattern matched but names
+    /// nothing scanned (dangling, no edge); `None` = no alias applies.
+    fn resolve_ts_alias(&self, spec: &str, source: &str) -> Option<Option<String>> {
+        let cfg = self.ts_config_for(source)?;
+        let mut best: Option<(&str, &Vec<String>, &str)> = None; // (prefix, subs, captured)
+        for (pat, subs) in &cfg.paths {
+            let captured = match pat.split_once('*') {
+                None if pat == spec => Some(""),
+                None => None,
+                Some((pre, suf)) => spec
+                    .strip_prefix(pre)
+                    .and_then(|r| r.strip_suffix(suf))
+                    .filter(|_| spec.len() >= pre.len() + suf.len()),
+            };
+            if let Some(cap) = captured {
+                let pre = pat.split('*').next().unwrap_or(pat);
+                if best.map(|(p, _, _)| pre.len() > p.len()).unwrap_or(true) {
+                    best = Some((pre, subs, cap));
+                }
+            }
+        }
+        if let Some((_, subs, cap)) = best {
+            for sub in subs {
+                let target = normalize_rel(&cfg.paths_dir, &sub.replace('*', cap));
+                if let Some(hit) = self.resolve_js_file(&target) {
+                    return Some(Some(hit));
+                }
+            }
+            return Some(None);
+        }
+        let base = cfg.base_url.as_ref()?;
+        self.resolve_js_file(&normalize_rel(base, spec)).map(Some)
     }
 
     /// Pick the candidate whose module_id best matches the import path, preferring a
@@ -1927,10 +2241,32 @@ impl<'a> ImportIndex<'a> {
         // against the source directory. Path-precise, and authoritative — a
         // relative import names something local, so a miss is a dangling ref
         // (no edge), never a reason to fuzzy-guess a same-name file elsewhere.
+        let js_source = lang_family(source) == Some("js");
         if module_path.starts_with("./") || module_path.starts_with("../") {
+            // JS/TS: TypeScript's lookup order (`.ts` before `.css`, `.d.ts`,
+            // `.js` → `.ts`, `index.*`) before the generic any-extension match.
+            if js_source {
+                let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                if let Some(hit) = self.resolve_js_file(&normalize_rel(dir, &module_path)) {
+                    if hit != source {
+                        return Some((hit, "exact"));
+                    }
+                }
+            }
             return self
                 .resolve_relative(&module_path, source)
                 .map(|hit| (hit, "exact"));
+        }
+
+        // JS/TS path aliases (tsconfig/jsconfig `paths`, then `baseUrl`), e.g.
+        // `@/lib/db` → src/lib/db.ts. An alias that matches but names nothing
+        // scanned is a dangling import, not a reason to guess.
+        if js_source {
+            match self.resolve_ts_alias(&module_path, source) {
+                Some(Some(hit)) if hit != source => return Some((hit, "exact")),
+                Some(_) => return None,
+                None => {}
+            }
         }
 
         let norm = module_path
@@ -2021,10 +2357,32 @@ impl<'a> ImportIndex<'a> {
                 .map(|hit| (hit, "suffix"));
         }
 
-        // 3. Extensionless import (Rust `mod`, Python `import`, Go package): match by stem.
+        // Fuzzy fallbacks (3–5) below are guesses. Two limits keep them honest:
+        // - A bare JS/TS specifier that no relative path, alias or baseUrl
+        //   resolved is an npm package (`drizzle-orm`, `react`): never guessed.
+        //   The segment guess used to send `drizzle-orm` to drizzle/0000_init.sql.
+        // - A code import only lands on a file of the same language family —
+        //   never on SQL, docs or another language's file. Non-code sources
+        //   (doc cross-references) keep the old behaviour.
+        if js_source {
+            return None;
+        }
+        let family = lang_family(source);
+        let fuzzy_pick = |cands: &[&'a str]| -> Option<String> {
+            match family {
+                Some(f) => {
+                    let same: Vec<&'a str> =
+                        cands.iter().copied().filter(|m| lang_family(m) == Some(f)).collect();
+                    Self::pick_deterministic(&same, source)
+                }
+                None => Self::pick_deterministic(cands, source),
+            }
+        };
+
+        // 3. Extensionless import (Rust `mod`, Python `import`): match by stem.
         if !has_ext {
             if let Some(cands) = self.by_stem.get(&stem) {
-                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                if let Some(hit) = fuzzy_pick(cands) {
                     return Some((hit, "fuzzy"));
                 }
             }
@@ -2033,7 +2391,7 @@ impl<'a> ImportIndex<'a> {
         // 4. Loose segment fallback: stem appears as a path component.
         if stem.len() >= 3 {
             if let Some(cands) = self.by_segment.get(&stem.to_lowercase()) {
-                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                if let Some(hit) = fuzzy_pick(cands) {
                     return Some((hit, "fuzzy"));
                 }
             }
@@ -2043,7 +2401,7 @@ impl<'a> ImportIndex<'a> {
         if let Some(sym) = &symbol_hint {
             if sym.len() >= 4 {
                 if let Some(cands) = self.by_symbol.get(sym) {
-                    if let Some(hit) = Self::pick_deterministic(cands, source) {
+                    if let Some(hit) = fuzzy_pick(cands) {
                         return Some((hit, "fuzzy"));
                     }
                 }
@@ -2051,6 +2409,15 @@ impl<'a> ImportIndex<'a> {
         }
 
         None
+    }
+}
+
+/// Split the type-only marker the extractors put in front of an import
+/// (`"type ./x"`, see `TYPE_ONLY_PREFIX`) from the import text.
+fn split_type_only(import: &str) -> (&str, bool) {
+    match import.strip_prefix(crate::mapper::TYPE_ONLY_PREFIX) {
+        Some(rest) => (rest, true),
+        None => (import, false),
     }
 }
 
@@ -2075,9 +2442,10 @@ fn lang_family(path: &str) -> Option<&'static str> {
     })
 }
 
-/// Edges that can close a dependency cycle: confidently resolved (not `fuzzy`).
+/// Edges that can close a dependency cycle: confidently resolved (not
+/// `fuzzy`) and present at runtime (not a type-only `type` edge).
 fn is_cycle_edge(e: &GraphEdge) -> bool {
-    e.resolution != "fuzzy"
+    e.resolution != "fuzzy" && e.edge_type != "type"
 }
 
 /// True when `a` and `b` are files of one Go package (same directory). Go has
@@ -2561,6 +2929,10 @@ impl ApiState {
         // low-confidence stem/segment guesses — counting them fabricated the
         // false import cycles this graph used to report (e.g. 22 "cycles" in a Go
         // repo, which the language forbids).
+        //
+        // Type-only edges (`import type`, `if TYPE_CHECKING:`) are erased at
+        // runtime, so a loop that closes only through one is not a dependency
+        // cycle — two of three "cycles" in a TS app were exactly that.
         for edge in edges.iter().filter(|e| is_cycle_edge(e)) {
             graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
         }
@@ -3439,6 +3811,80 @@ mod tests {
         assert!(state.detect_god_modules(&nodes, &edges, &HashMap::new()).is_empty());
     }
 
+    // tsconfig `paths` aliases resolve (with extension, index and .d.ts lookup),
+    // including a nested package's own tsconfig that `extends` a base with
+    // comments and trailing commas; `baseUrl` bare paths resolve; an alias that
+    // names nothing is dangling, and an npm package is never fuzzy-guessed onto
+    // a same-named file (drizzle-orm → drizzle/0000_init.sql).
+    #[test]
+    fn ts_path_aliases_resolve_and_bare_packages_never_fuzzy() {
+        let g = graph_with(
+            "tsalias",
+            &[
+                (
+                    "tsconfig.json",
+                    "{\n  // root\n  \"compilerOptions\": { \"paths\": { \"@/*\": [\"./src/*\"], \"@ui\": [\"./src/components/ui/index.ts\"], }, },\n}",
+                ),
+                ("packages/web/tsconfig.base.json", "{ \"compilerOptions\": { \"baseUrl\": \"./app\", /* x */ \"paths\": { \"~/*\": [\"lib/*\"] } } }"),
+                ("packages/web/tsconfig.json", "{ \"extends\": \"./tsconfig.base\" }"),
+            ],
+            &[
+                ("src/app/page.tsx", vec!["@/lib/db", "@/components/Button", "@/types/api", "@ui", "@/missing/x", "drizzle-orm"]),
+                ("src/lib/db.ts", vec![]),
+                ("src/lib/db.css", vec![]),
+                ("src/components/Button/index.tsx", vec![]),
+                ("src/components/ui/index.ts", vec![]),
+                ("src/types/api.d.ts", vec![]),
+                ("drizzle/0000_init.sql", vec![]),
+                ("packages/web/app/main.ts", vec!["~/util", "routes/home", "./x.js"]),
+                ("packages/web/app/lib/util.ts", vec![]),
+                ("packages/web/app/routes/home.ts", vec![]),
+                ("packages/web/app/x.ts", vec![]),
+            ],
+        );
+        let exact = Some(("runtime".to_string(), "exact".to_string()));
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/lib/db.ts"), exact, "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/components/Button/index.tsx"), exact);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/types/api.d.ts"), exact);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/components/ui/index.ts"), exact);
+        assert!(has_edge(&g, "src/app/page.tsx", "drizzle/0000_init.sql").is_none());
+        assert!(has_edge(&g, "src/app/page.tsx", "src/lib/db.css").is_none());
+        assert_eq!(
+            g.edges.iter().filter(|e| e.source == "src/app/page.tsx").count(),
+            4,
+            "alias miss and npm package give no edge: {:?}",
+            g.edges
+        );
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/lib/util.ts"), exact);
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/routes/home.ts"), exact);
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/x.ts"), exact);
+    }
+
+    // `import type` edges stay in the graph as `type` edges but do not close
+    // cycles; a runtime loop still does. A pair imported both ways keeps the
+    // runtime edge.
+    #[test]
+    fn type_only_imports_are_typed_and_skip_cycles() {
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let (b_to_a, p_to_q) = (t("./a"), t("./q"));
+        let g = graph_with(
+            "tstype",
+            &[],
+            &[
+                ("src/a.ts", vec!["./b"]),
+                ("src/b.ts", vec![b_to_a.as_str()]),
+                ("src/x.ts", vec!["./y"]),
+                ("src/y.ts", vec!["./x"]),
+                ("src/p.ts", vec![p_to_q.as_str(), "./q"]),
+                ("src/q.ts", vec![]),
+            ],
+        );
+        assert_eq!(has_edge(&g, "src/b.ts", "src/a.ts"), Some(("type".into(), "exact".into())));
+        assert!(g.cycles.iter().any(|c| c.nodes.contains(&"src/x.ts".to_string())), "runtime cycle kept");
+        assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
+        assert_eq!(has_edge(&g, "src/p.ts", "src/q.ts"), Some(("runtime".into(), "exact".into())));
+    }
+
     // Directory rollup folds files into their folder, drops intra-folder edges, and
     // aggregates cross-folder dependencies — the comprehensible view on a huge tree.
     // The file- and directory-level centralities must coexist in the MRU cache so a
@@ -3734,15 +4180,17 @@ mod graph_probe {
             files.insert(rel, crate::mapper::extract_skeleton(p, &content));
         }
         // Alias hit rate: imports that start with a tsconfig-style alias prefix.
-        let idx = ImportIndex::build(&files).with_go_module(&root);
+        let idx = ImportIndex::build(&files).with_go_module(&root).with_ts_paths(&root);
         let (mut alias, mut alias_hit) = (0usize, 0usize);
         for (id, f) in &files {
             for imp in &f.imports {
                 let (m, _) = parse_import_parts(imp);
                 if m.starts_with("@/") || m.starts_with("~/") {
                     alias += 1;
-                    if idx.resolve(imp, id).is_some() {
+                    if idx.resolve(split_type_only(imp).0, id).is_some() {
                         alias_hit += 1;
+                    } else {
+                        println!("  alias miss: {id}: {imp}");
                     }
                 }
             }
@@ -3786,6 +4234,9 @@ mod graph_probe {
             .iter()
             .filter(|e| code_ext(&e.source) && !code_ext(&e.target) && !is_doc_path(&e.target))
             .count();
+        for e in g.edges.iter().filter(|e| code_ext(&e.source) && !code_ext(&e.target) && !is_doc_path(&e.target)).take(8) {
+            println!("  code->noncode: {} -> {} ({}/{})", e.source, e.target, e.edge_type, e.resolution);
+        }
         println!(
             "dead={} code->noncode edges={}",
             m.dead_code_count.unwrap_or(0),
