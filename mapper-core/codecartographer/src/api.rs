@@ -2822,8 +2822,14 @@ pub fn is_entry_point_path(path: &str) -> bool {
 }
 
 pub(crate) fn is_test_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("_test.")
+    // Leading `/` so a repo-relative `tests/x.ts` matches `/tests/` like an
+    // absolute path does; graph module ids are relative and a top-level
+    // `tests/` directory used to count as production code.
+    let lower = format!("/{}", path.to_lowercase().trim_start_matches('/'));
+    let name = lower.rsplit('/').next().unwrap_or("");
+    (name.starts_with("test_") && name.ends_with(".py"))
+        || name == "conftest.py"
+        || lower.contains("_test.")
         || lower.contains(".test.")
         || lower.contains(".spec.")
         || lower.contains("/test/")
@@ -4066,6 +4072,17 @@ mod tests {
             .iter()
             .find(|e| e.source == s && e.target == t)
             .map(|e| (e.edge_type.clone(), e.resolution.clone()))
+    }
+
+    #[test]
+    fn top_level_test_dirs_are_tests() {
+        for p in ["tests/support/e2e.ts", "tests/_gen.py", "test/x.go", "src/pkg/test_io.py",
+                  "conftest.py", "/abs/repo/tests/a.rs", "web/a.spec.ts", "x_test.go"] {
+            assert!(is_test_path(p), "{p}");
+        }
+        for p in ["src/attestation.rs", "src/latest.ts", "contest/main.py", "src/testing_utils.py"] {
+            assert!(!is_test_path(p), "{p}");
+        }
     }
 
     // Betweenness runs on the undirected graph: a test importing a and b would

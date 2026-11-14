@@ -14,6 +14,11 @@ package, a Rust crate) before and after; numbers are from those runs.
   files came out as bridges (36 of 154 bridges in a Next.js app, 6 of 29 in a
   Python package) and lent shortest paths to the files they test. Test
   imports are now left out of bridge analysis.
+- **A top-level `tests/` directory is test code.** `is_test_path` matched
+  `/tests/` only, which graph module ids (repo-relative) never start with, so
+  `tests/support/e2e.ts` or `tests/test_api.py` counted as production code:
+  runtime edges, bridges, god-module candidates. Python `test_*.py` and
+  `conftest.py` count as tests anywhere.
 
 ### Fixed — a Go package import is one layer violation, not one per file
 
