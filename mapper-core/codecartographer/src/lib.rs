@@ -29,6 +29,7 @@ mod layers;
 mod mapper;
 mod scanner;
 mod search;
+mod skeleton_cache;
 mod token_metrics;
 
 use api::ApiState;

@@ -7,6 +7,19 @@ All notable changes to CodeCartographer will be documented in this file.
 The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — skeleton cache survives upgrades and uncommitted edits
+
+- **`.codecartographer_cache.json` is stamped with the crate version and a new
+  `EXTRACTOR_VERSION`** (src/skeleton_cache.rs, bump it with every change to
+  extraction output). A cache from another build is discarded as a whole.
+  Without it, unchanged files kept the imports a previous release extracted,
+  so the graph fixes below never reached repositories that already had a
+  cache — neither through the C ABI nor through the CLI.
+- **The CLI cache (`serve`, `switch_project`) is validated per file** (size and
+  mtime), like the C ABI one. It was keyed by git HEAD alone and served stale
+  skeletons for every uncommitted edit. Both now share one implementation;
+  caches written by 4.0.3 are rebuilt once on first use.
+
 ### Fixed — Rust inline paths, grouped uses, re-exports, precise anchoring
 
 - **Inline paths count**: `crate::readout::ReadoutMlp::new()`,

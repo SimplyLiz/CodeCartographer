@@ -19,6 +19,7 @@ mod mcp;
 mod memory;
 mod scanner;
 mod search;
+mod skeleton_cache;
 mod sync;
 mod webhooks;
 
@@ -4058,80 +4059,15 @@ fn semidiff_mode(root: &Path, commit1: &str, commit2: &str) -> Result<()> {
 // SHARED HELPER: parallel file scan + persistent cache
 // =============================================================================
 
-/// Scan and extract skeleton for every project file, with a parallel rayon scan
-/// and a git-HEAD-keyed persistent cache (.codecartographer_cache.json).
+/// Scan and extract skeleton for every project file (parallel, on the global
+/// large-stack rayon pool), reusing the persistent skeleton cache
+/// (.codecartographer_cache.json) per file — size and mtime — and only when it
+/// was written by this crate and extractor version. Inside git repositories
+/// only, as before. See `skeleton_cache`.
 fn build_mapped_files_cached(root: &Path) -> anyhow::Result<HashMap<String, MappedFile>> {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Deserialize)]
-    struct MapCache {
-        head: String,
-        files: HashMap<String, MappedFile>,
-    }
-
-    /// Borrowed mirror for writing — see save_cache() in lib.rs.
-    #[derive(Serialize)]
-    struct MapCacheRef<'a> {
-        head: &'a str,
-        files: &'a HashMap<String, MappedFile>,
-    }
-
-    // Compute git HEAD (empty string if not a git repo)
-    let head: String = std::process::Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
-        .unwrap_or_default();
-
-    let cache_path = root.join(".codecartographer_cache.json");
-
-    // Try cache hit
-    if !head.is_empty() {
-        if let Ok(raw) = std::fs::read_to_string(&cache_path) {
-            if let Ok(cached) = serde_json::from_str::<MapCache>(&raw) {
-                if cached.head == head {
-                    return Ok(cached.files);
-                }
-            }
-        }
-    }
-
-    // Parallel scan
-    let scan = scan_files_with_noise_tracking(root).context("file scan failed")?;
-    let result: HashMap<String, MappedFile> = scan.files
-        .par_iter()
-        .filter(|p| !is_ignored_path(p))
-        .filter_map(|p| {
-            let content = std::fs::read_to_string(p).ok()?;
-            let mapped = extract_skeleton(p, &content);
-            let rel = p.strip_prefix(root).unwrap_or(p)
-                .to_string_lossy().replace('\\', "/");
-            Some((rel, mapped))
-        })
-        .collect();
-
-    // Write cache — borrowed and streamed, so the map is not deep-copied and
-    // the encoded JSON never has to sit in memory alongside it.
-    if !head.is_empty() {
-        if let Ok(file) = fs::File::create(&cache_path) {
-            let mut writer = std::io::BufWriter::new(file);
-            if serde_json::to_writer(
-                &mut writer,
-                &MapCacheRef {
-                    head: &head,
-                    files: &result,
-                },
-            )
-            .is_ok()
-            {
-                use std::io::Write;
-                let _ = writer.flush();
-            }
-        }
-    }
-
-    Ok(result)
+    let in_git = !api::git_head_sha(root).is_empty();
+    let (files, _, _) = skeleton_cache::build(root, in_git).map_err(|e| anyhow::anyhow!("file scan failed: {e}"))?;
+    Ok(files)
 }
 
 // =============================================================================

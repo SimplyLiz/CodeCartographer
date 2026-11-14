@@ -15,10 +15,9 @@
 //! inherits the old state's topology-keyed centrality cache, so an edit that
 //! does not change the import graph skips betweenness too.
 //!
-//! The on-disk skeleton cache (`.codecartographer_cache.json`) now carries the
-//! same per-file stats, so a cold process reuses exactly the entries whose file
-//! is unchanged. It used to be keyed by git HEAD alone and served stale
-//! skeletons for every uncommitted edit.
+//! A cold process starts from the on-disk skeleton cache
+//! ([`crate::skeleton_cache`]), validated per file and by crate and extractor
+//! version, and reuses exactly the entries whose file is unchanged.
 //!
 //! Concurrency: the slot list is behind one mutex held only for lookup; each
 //! root has its own mutex held for validation and (re)build, so concurrent
@@ -29,29 +28,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rayon::prelude::*;
-
 use crate::api::ApiState;
-use crate::mapper::{extract_skeleton, MappedFile};
-use crate::scanner::{is_ignored_path, scan_files_with_noise_tracking};
+use crate::skeleton_cache::{self, stat_tree, FileStats};
 
 /// Roots kept in memory. CKB works on one repository per process; a few slots
 /// cover federation-style use without holding many graphs.
 pub(crate) const CAPACITY: usize = 4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct FileStat {
-    pub mtime_ns: u64,
-    pub size: u64,
-}
-
-pub(crate) type FileStats = HashMap<String, FileStat>;
-
-struct ScannedFile {
-    abs: PathBuf,
-    rel: String,
-    stat: FileStat,
-}
 
 /// What a lookup had to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,16 +124,20 @@ impl StateCache {
 
         let previous = built.take();
         let from_disk = previous.is_none();
-        let head = if from_disk { crate::git_head(&key) } else { String::new() };
+        // The disk cache is used inside git repositories only, as before.
+        let use_disk = from_disk && !crate::git_head(&key).is_empty();
+        let cached = if use_disk { skeleton_cache::load(&key) } else { None };
+        let disk_valid = cached.is_some();
         let (prev_files, prev_stats) = match &previous {
             Some(b) => (
                 b.state.mapped_files.lock().map_err(|e| e.to_string())?.clone(),
                 b.stats.clone(),
             ),
-            None => load_disk_cache(&key, &head).unwrap_or_default(),
+            None => cached.unwrap_or_default(),
         };
 
-        let (mapped, reparsed, removed) = patch(prev_files, &prev_stats, &files);
+        let (mapped, reparsed, removed) = crate::parse_pool()
+            .install(|| skeleton_cache::patch(prev_files, &prev_stats, &files));
 
         let state = Arc::new(ApiState::new(key.clone()));
         *state.mapped_files.lock().map_err(|e| e.to_string())? = mapped;
@@ -162,9 +148,9 @@ impl StateCache {
         // to build it twice.
         state.rebuild_graph()?;
 
-        if from_disk && (reparsed > 0 || removed > 0) {
+        if use_disk && (!disk_valid || reparsed > 0 || removed > 0) {
             if let Ok(files) = state.mapped_files.lock() {
-                save_disk_cache(&key, &head, &files, &current);
+                skeleton_cache::save(&key, &files, &current);
             }
         }
 
@@ -174,68 +160,6 @@ impl StateCache {
         });
         Ok((state, Outcome::Rebuilt { reparsed, removed, from_disk }))
     }
-}
-
-/// The file set the build parses, with size and mtime. Same scanner, same
-/// filters as a full build, so the cache key covers exactly what was parsed.
-fn stat_tree(root: &Path) -> Result<Vec<ScannedFile>, String> {
-    let scan = scan_files_with_noise_tracking(root).map_err(|e| e.to_string())?;
-    Ok(scan
-        .files
-        .into_iter()
-        .filter(|p| !is_ignored_path(p))
-        .filter_map(|abs| {
-            let meta = std::fs::metadata(&abs).ok()?;
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let rel = abs
-                .strip_prefix(root)
-                .unwrap_or(&abs)
-                .to_string_lossy()
-                .replace('\\', "/");
-            Some(ScannedFile {
-                abs,
-                rel,
-                stat: FileStat { mtime_ns, size: meta.len() },
-            })
-        })
-        .collect())
-}
-
-/// Keep the skeletons whose file stat is unchanged, re-parse the rest (in
-/// parallel, on the large-stack parse pool), drop deleted files.
-fn patch(
-    mut prev: HashMap<String, MappedFile>,
-    prev_stats: &FileStats,
-    files: &[ScannedFile],
-) -> (HashMap<String, MappedFile>, usize, usize) {
-    let mut out: HashMap<String, MappedFile> = HashMap::with_capacity(files.len());
-    let mut dirty: Vec<&ScannedFile> = Vec::new();
-    for f in files {
-        match (prev_stats.get(&f.rel), prev.remove(&f.rel)) {
-            (Some(s), Some(m)) if *s == f.stat => {
-                out.insert(f.rel.clone(), m);
-            }
-            _ => dirty.push(f),
-        }
-    }
-    let removed = prev.len();
-    let parsed: Vec<(String, MappedFile)> = crate::parse_pool().install(|| {
-        dirty
-            .par_iter()
-            .filter_map(|f| {
-                let content = std::fs::read_to_string(&f.abs).ok()?;
-                Some((f.rel.clone(), extract_skeleton(&f.abs, &content)))
-            })
-            .collect()
-    });
-    let reparsed = dirty.len();
-    out.extend(parsed);
-    (out, reparsed, removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -296,68 +220,11 @@ pub(crate) fn git_churn(root: &Path, limit: usize) -> Arc<HashMap<String, usize>
     CACHE.get_or(root, limit, |r| crate::git_analysis::git_churn(r, limit))
 }
 
-// ---------------------------------------------------------------------------
-// On-disk skeleton cache
-// ---------------------------------------------------------------------------
-
-/// `<root>/.codecartographer_cache.json`. `head` is still written because the
-/// CLI's own cache reader keys on it; this side validates per file.
-#[derive(serde::Deserialize)]
-struct DiskCache {
-    files: HashMap<String, MappedFile>,
-    /// Absent in caches written before 4.0.4 (or by the CLI): then nothing in
-    /// `files` can be validated and everything is re-parsed once.
-    #[serde(default)]
-    stats: FileStats,
-}
-
-/// Borrowed mirror of `DiskCache` for writing; owning it would deep-copy the
-/// whole skeleton map just to hand it to serde.
-#[derive(serde::Serialize)]
-struct DiskCacheRef<'a> {
-    head: &'a str,
-    files: &'a HashMap<String, MappedFile>,
-    stats: &'a FileStats,
-}
-
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".codecartographer_cache.json")
-}
-
-fn load_disk_cache(root: &Path, head: &str) -> Option<(HashMap<String, MappedFile>, FileStats)> {
-    if head.is_empty() {
-        return None; // not a git repo — no cache file, as before
-    }
-    let data = std::fs::read(cache_path(root)).ok()?;
-    let cache: DiskCache = serde_json::from_slice(&data).ok()?;
-    Some((cache.files, cache.stats))
-}
-
-fn save_disk_cache(
-    root: &Path,
-    head: &str,
-    files: &HashMap<String, MappedFile>,
-    stats: &FileStats,
-) {
-    if head.is_empty() {
-        return;
-    }
-    // Streamed from borrowed data. A partial write fails to deserialize, so
-    // the next load returns None and rebuilds.
-    let Ok(file) = std::fs::File::create(cache_path(root)) else {
-        return;
-    };
-    let mut writer = std::io::BufWriter::new(file);
-    if serde_json::to_writer(&mut writer, &DiskCacheRef { head, files, stats }).is_ok() {
-        use std::io::Write;
-        let _ = writer.flush();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ffi_tests::{fixture, temp_dir};
+    use crate::skeleton_cache::cache_path;
 
     fn touch(path: &Path, content: &str) {
         // Bump the mtime past the filesystem's granularity even if the size
@@ -429,6 +296,25 @@ mod tests {
             .map(|s| s.raw.clone())
             .collect();
         assert!(raw.iter().any(|s| s.contains("renamedPort")), "stale: {raw:?}");
+    }
+
+    /// After an upgrade, unchanged files must not keep skeletons from the old
+    /// extractor: a cache with another stamp is re-parsed in full.
+    #[test]
+    fn disk_cache_from_another_extractor_is_reparsed() {
+        let fx = fixture();
+        let (s, _) = StateCache::new(1).get(&fx.root).unwrap();
+        let total = s.mapped_files.lock().unwrap().len();
+        let raw = std::fs::read_to_string(cache_path(&fx.root)).unwrap();
+        let stamp = format!("\"extractor\":{}", crate::skeleton_cache::EXTRACTOR_VERSION);
+        assert!(raw.contains(&stamp), "cache not stamped");
+        std::fs::write(cache_path(&fx.root), raw.replace(&stamp, "\"extractor\":1")).unwrap();
+
+        let (_, o) = StateCache::new(1).get(&fx.root).unwrap();
+        assert_eq!(o, Outcome::Rebuilt { reparsed: total, removed: 0, from_disk: true });
+        // The rewritten cache is current again.
+        let (_, o) = StateCache::new(1).get(&fx.root).unwrap();
+        assert_eq!(o, Outcome::Rebuilt { reparsed: 0, removed: 0, from_disk: true });
     }
 
     #[test]
