@@ -678,9 +678,27 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
     let mut imports = Vec::new();
     let mut scope: Vec<String> = Vec::new();
 
-    // Extract imports at root level
-    let mut cur = root.walk();
-    for child in root.children(&mut cur) {
+    // Imports anywhere in the module: top level, inside functions (lazy
+    // imports), try/except fallbacks, `if TYPE_CHECKING:` blocks (type-only).
+    collect_py_imports(&root, src, false, &mut imports);
+    let mut seen = std::collections::HashSet::new();
+    imports.retain(|i| seen.insert(i.clone()));
+
+    walk_python(&root, src, path, &mut sigs, &mut scope);
+    TsOutput::new(sigs, imports)
+}
+
+/// Collect Python imports from the whole subtree of `node`. Function-local
+/// imports are ordinary runtime dependencies (only deferred), so they count;
+/// imports under `if TYPE_CHECKING:` (or `typing.TYPE_CHECKING`) never run and
+/// are marked type-only (`TYPE_ONLY_PREFIX`). Relative imports keep their dots
+/// (`from ..pkg import name`) for the resolver to anchor at the source file.
+#[cfg(feature = "lang-python")]
+fn collect_py_imports(node: &Node, src: &[u8], type_only: bool, imports: &mut Vec<String>) {
+    let _depth = match DepthGuard::enter() { Some(g) => g, None => return };
+    let mark = |s: String| if type_only { format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX) } else { s };
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
         match child.kind() {
             "import_statement" => {
                 // import os, import os.path, import a.b as c
@@ -693,45 +711,59 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
                         // Keep the `import ` keyword so parse_import_parts normalises the
                         // dotted path (a.b.c → a/b/c) rather than misreading `.c` as a
                         // file extension.
-                        imports.push(format!("import {name}"));
+                        imports.push(mark(format!("import {name}")));
                     }
                 }
             }
             "import_from_statement" => {
-                // from a.b import c, d  /  from . import foo
+                // from a.b import c, d  /  from . import foo  /  from ..x import y
                 if let Some(module) = child.child_by_field_name("module_name") {
                     let module = node_text(&module, src).to_string();
-                    if module.starts_with('.') {
-                        // Relative import — source-relative, left best-effort as-is.
-                        imports.push(module);
-                    } else {
-                        // Emit one `from a.b import name` per imported name so
-                        // parse_import_parts yields (module=a/b, symbol=name) and the
-                        // resolver's qualified-suffix step lands on the submodule
-                        // a/b/name when it exists, else the package a/b — one precise
-                        // edge instead of a bare-stem guess.
-                        let mut names = child.walk();
-                        let mut emitted = false;
-                        for n in child.children_by_field_name("name", &mut names) {
-                            let raw = node_text(&n, src);
-                            let nm = raw.split(" as ").next().unwrap_or(raw).trim();
-                            if !nm.is_empty() && nm != "*" {
-                                imports.push(format!("from {module} import {nm}"));
-                                emitted = true;
-                            }
+                    // Emit one `from a.b import name` per imported name so the
+                    // resolver lands on the submodule a/b/name when it exists, else
+                    // the package/module a/b — one precise edge per name.
+                    let mut names = child.walk();
+                    let mut emitted = false;
+                    for n in child.children_by_field_name("name", &mut names) {
+                        let raw = node_text(&n, src);
+                        let nm = raw.split(" as ").next().unwrap_or(raw).trim();
+                        if !nm.is_empty() && nm != "*" {
+                            imports.push(mark(format!("from {module} import {nm}")));
+                            emitted = true;
                         }
-                        if !emitted {
-                            imports.push(module);
-                        }
+                    }
+                    if !emitted {
+                        imports.push(mark(if module.starts_with('.') {
+                            format!("from {module} import *")
+                        } else {
+                            module
+                        }));
                     }
                 }
             }
-            _ => {}
+            "if_statement" => {
+                let cond = child
+                    .child_by_field_name("condition")
+                    .map(|c| node_text(&c, src).trim().to_string())
+                    .unwrap_or_default();
+                if cond == "TYPE_CHECKING" || cond == "typing.TYPE_CHECKING" {
+                    if let Some(body) = child.child_by_field_name("consequence") {
+                        collect_py_imports(&body, src, true, imports);
+                    }
+                    // `else:` / `elif` branches do run.
+                    let mut c3 = child.walk();
+                    for alt in child.children_by_field_name("alternative", &mut c3) {
+                        collect_py_imports(&alt, src, type_only, imports);
+                    }
+                } else {
+                    collect_py_imports(&child, src, type_only, imports);
+                }
+            }
+            // Leaves that cannot contain statements.
+            "string" | "comment" | "identifier" | "integer" | "float" => {}
+            _ => collect_py_imports(&child, src, type_only, imports),
         }
     }
-
-    walk_python(&root, src, path, &mut sigs, &mut scope);
-    TsOutput::new(sigs, imports)
 }
 
 #[cfg(feature = "lang-python")]
@@ -1652,6 +1684,53 @@ mod tests {
         let src = "fn internal() {}";
         let out = ts_extract(Path::new("lib.rs"), src).unwrap();
         assert!(out.signatures.is_empty(), "private top-level fn should be skipped");
+    }
+
+    #[cfg(feature = "lang-python")]
+    #[test]
+    fn python_imports_anywhere_type_checking_and_relative() {
+        let src = r#"
+from __future__ import annotations
+import os
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from pkg.models import Doc
+else:
+    import pkg.runtime_only
+try:
+    import ujson as json
+except ImportError:
+    import json
+
+def serve():
+    from pkg.search.corpus import CorpusSearcher
+    from .sibling import helper
+    from .. import top
+    import os
+    return CorpusSearcher
+
+class C:
+    def m(self):
+        from . import *
+"#;
+        let out = ts_extract(Path::new("pkg/web.py"), src).unwrap();
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        assert_eq!(
+            out.imports,
+            vec![
+                // `from __future__` is a compiler directive, not a dependency.
+                "import os".to_string(),
+                "from typing import TYPE_CHECKING".to_string(),
+                t("from pkg.models import Doc"),
+                "import pkg.runtime_only".to_string(),
+                "import ujson".to_string(),
+                "import json".to_string(),
+                "from pkg.search.corpus import CorpusSearcher".to_string(),
+                "from .sibling import helper".to_string(),
+                "from .. import top".to_string(),
+                "from . import *".to_string(),
+            ]
+        );
     }
 
     #[cfg(feature = "lang-typescript")]

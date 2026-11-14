@@ -7,6 +7,26 @@ All notable changes to CodeCartographer will be documented in this file.
 Measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — Python imports inside functions, relative imports, stdlib names
+
+- **Imports anywhere in a module count**, not only top-level ones: inside
+  functions (lazy imports), `try/except` fallbacks and classes. Imports under
+  `if TYPE_CHECKING:` are type-only (`type` edges, out of cycle detection);
+  the `else:` branch runs and stays runtime. In the Python package the
+  structural code edges go 390 → 533 (`web.py` → `search/corpus.py` was
+  one of the missing).
+- **Relative imports anchor at the source package** (`from .x import y`,
+  `from .. import z`, one edge per name, submodule before module). They used to
+  be emitted as bare `.x` and resolved by chance.
+- **Absolute imports need a top-level package.** `a` in `a.b` must sit in a
+  directory without `__init__.py` (repo root, `src/` layout, a scripts dir);
+  anything else is stdlib or third-party and gets no edge. A stdlib
+  `import logging` had fuzzy-matched the package's own `logging.py` from 44
+  modules. Python sources never fuzzy-match any more. One new cycle shows up:
+  `profiles.py` imports `stage4_enrichment` inside a function, which imports
+  `profiles` at the top — a real mutual dependency, deferred to break the
+  import-time loop.
+
 ### Fixed — TypeScript path aliases, type-only imports, fuzzy guesses
 
 - **tsconfig/jsconfig `paths` and `baseUrl` resolve.** 0 of 1,454 `@/…`

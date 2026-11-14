@@ -2234,8 +2234,106 @@ impl<'a> ImportIndex<'a> {
         self.resolve(import, source).into_iter().collect()
     }
 
+    /// Python relative import (`from .x import y`, `from .. import z`),
+    /// anchored at the source file's package: one dot is the file's own
+    /// directory, each further dot one level up. Tries the submodule
+    /// `<pkg>/<x>/<y>` first, then the module `<pkg>/<x>` (file or package
+    /// `__init__`). `None` = not a relative import; `Some(None)` = dangling.
+    fn resolve_py_relative(&self, import: &str, source: &str) -> Option<Option<String>> {
+        let rest = import.trim().strip_prefix("from ")?;
+        if !rest.starts_with('.') {
+            return None;
+        }
+        let (module, names) = rest.split_once(" import ").unwrap_or((rest, ""));
+        let module = module.trim();
+        let dots = module.chars().take_while(|c| *c == '.').count();
+        let tail = module[dots..].replace('.', "/");
+        let mut base: Vec<&str> = source.split('/').collect();
+        base.pop(); // file name
+        for _ in 1..dots {
+            base.pop()?;
+        }
+        let pkg = normalize_rel(&base.join("/"), &tail);
+        let name = names.split(',').next().unwrap_or("").trim();
+        let name = name.split(" as ").next().unwrap_or("").trim();
+        let lookup = |p: &str| -> Option<String> {
+            if p.is_empty() {
+                return None;
+            }
+            [format!("{p}.py"), format!("{p}.pyi"), format!("{p}/__init__.py")]
+                .into_iter()
+                .find(|c| c != source && self.ids.contains(c.as_str()))
+        };
+        if !name.is_empty() && name != "*" {
+            if let Some(hit) = lookup(&normalize_rel(&pkg, name)) {
+                return Some(Some(hit));
+            }
+        }
+        Some(lookup(&pkg))
+    }
+
+    /// Python absolute import (`import a.b`, `from a.b import c`): the module
+    /// file `a/b.py` / `a/b.pyi` or package `a/b/__init__.py`, where `a` must
+    /// be TOP-LEVEL — its directory holds no `__init__.py` (repo root, `src/`
+    /// layout, a scripts dir). That is how `sys.path` sees it: inside package
+    /// `ingestible`, `logging.py` is `ingestible.logging`, so a stdlib
+    /// `import logging` no longer lands on it (it did, as a fuzzy stem match,
+    /// for every module that logs). The submodule `a/b/c` is tried before
+    /// `a/b`. No match → external (stdlib / third-party), no edge.
+    fn resolve_py_absolute(&self, module: &str, symbol: Option<&str>, source: &str) -> Option<String> {
+        let module = module.trim_matches('/');
+        if module.is_empty() || module.starts_with('.') {
+            return None;
+        }
+        // `prefix` = the directory the first module segment lives in.
+        let top_level_at = |prefix: &str| -> bool {
+            let init = if prefix.is_empty() { "__init__.py".to_string() } else { format!("{prefix}/__init__.py") };
+            !self.ids.contains(init.as_str())
+        };
+        let find = |m: &str| -> Option<String> {
+            let last = m.rsplit('/').next().unwrap_or(m);
+            let mut hits: Vec<&'a str> = Vec::new();
+            let mut consider = |c: &'a str, named: &str| {
+                if named == m {
+                    if top_level_at("") {
+                        hits.push(c);
+                    }
+                } else if let Some(prefix) = named.strip_suffix(m).and_then(|p| p.strip_suffix('/')) {
+                    if top_level_at(prefix) {
+                        hits.push(c);
+                    }
+                }
+            };
+            for &c in self.by_stem.get(last).into_iter().flatten() {
+                if c.ends_with(".py") || c.ends_with(".pyi") {
+                    consider(c, path_no_ext(c));
+                }
+            }
+            for &c in self.by_stem.get("__init__").into_iter().flatten() {
+                if let Some(pkg) = c.strip_suffix("/__init__.py") {
+                    consider(c, pkg);
+                }
+            }
+            Self::pick_deterministic(&hits, source)
+        };
+        if let Some(sym) = symbol.filter(|s| !s.is_empty() && *s != "*") {
+            if let Some(hit) = find(&format!("{module}/{sym}")) {
+                return Some(hit);
+            }
+        }
+        find(module)
+    }
+
     fn resolve(&self, import: &str, source: &str) -> Option<(String, &'static str)> {
         let (module_path, symbol_hint) = parse_import_parts(import);
+        if source.ends_with(".py") || source.ends_with(".pyi") {
+            if let Some(hit) = self.resolve_py_relative(import, source) {
+                return hit.map(|h| (h, "exact"));
+            }
+            return self
+                .resolve_py_absolute(&module_path, symbol_hint.as_deref(), source)
+                .map(|h| (h, "suffix"));
+        }
 
         // Relative specifier (JS/TS `./`, `../`; relative C includes): resolve
         // against the source directory. Path-precise, and authoritative — a
@@ -3453,7 +3551,7 @@ mod tests {
         );
         // Monorepo/aliased path import → the exact file by suffix.
         assert_eq!(
-            idx.resolve("import Button from 'packages/ui/Button'", src),
+            idx.resolve("import Button from 'packages/ui/Button'", "app/page.tsx"),
             Some(("packages/ui/Button.tsx".to_string(), "suffix")),
         );
         // A qualified import that matches nothing local is external → no edge
@@ -3885,6 +3983,57 @@ mod tests {
         assert_eq!(has_edge(&g, "src/p.ts", "src/q.ts"), Some(("runtime".into(), "exact".into())));
     }
 
+    // Python: function-local imports are runtime edges (src layout, absolute
+    // package path), relative imports anchor at the source package, and a
+    // TYPE_CHECKING import is a `type` edge that does not close a cycle.
+    // A stdlib import never lands on a same-named module inside a package:
+    // `import logging` is not src/app/logging.py (that is `app.logging`). A
+    // top-level module beside the script is found.
+    #[test]
+    fn python_absolute_import_needs_a_top_level_package() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in ["src/app/__init__.py", "src/app/logging.py", "src/app/audit.py", "scripts/run.py", "scripts/utils.py"] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        assert_eq!(idx.resolve("import logging", "src/app/audit.py"), None);
+        assert_eq!(
+            idx.resolve("from app import logging", "src/app/audit.py"),
+            Some(("src/app/logging.py".to_string(), "suffix"))
+        );
+        assert_eq!(
+            idx.resolve("import utils", "scripts/run.py"),
+            Some(("scripts/utils.py".to_string(), "suffix"))
+        );
+    }
+
+    #[test]
+    fn python_local_relative_and_type_checking_imports() {
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let tc = t("from app.web import Server");
+        let g = graph_with(
+            "py",
+            &[],
+            &[
+                ("src/app/__init__.py", vec![]),
+                ("src/app/web.py", vec!["from app.search.corpus import CorpusSearcher", "from .util import f", "from . import models", "from .. import nothing"]),
+                ("src/app/util.py", vec![]),
+                ("src/app/models/__init__.py", vec![]),
+                ("src/app/search/__init__.py", vec![]),
+                ("src/app/search/corpus.py", vec!["from ..util import g", "from ...outside import x", tc.as_str()]),
+            ],
+        );
+        let ex = |res: &str| Some(("runtime".to_string(), res.to_string()));
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/search/corpus.py"), ex("suffix"), "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/util.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/models/__init__.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/search/corpus.py", "src/app/util.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/search/corpus.py", "src/app/web.py"), Some(("type".into(), "suffix".into())));
+        assert!(g.cycles.is_empty(), "TYPE_CHECKING import must not close a cycle: {:?}", g.cycles);
+        // `from .. import nothing` from src/app/web.py names src/__init__.py: not scanned.
+        assert_eq!(g.edges.iter().filter(|e| e.source == "src/app/web.py").count(), 3);
+    }
+
     // Directory rollup folds files into their folder, drops intra-folder edges, and
     // aggregates cross-folder dependencies — the comprehensible view on a huge tree.
     // The file- and directory-level centralities must coexist in the MRU cache so a
@@ -4280,6 +4429,14 @@ mod graph_probe {
             .collect();
         wide.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
         println!("  widest (id, breadth, sigs): {:?}", &wide[..wide.len().min(6)]);
+        for e in g.edges.iter().filter(|e| e.resolution == "fuzzy" && code_ext(&e.source)).take(6) {
+            println!("  fuzzy: {} -> {}", e.source, e.target);
+        }
+        if let Ok(f) = std::env::var("PROBE_FILE") {
+            for e in g.edges.iter().filter(|e| e.source == f) {
+                println!("  out: {} ({}/{})", e.target, e.edge_type, e.resolution);
+            }
+        }
         let mut targets: HashMap<&str, usize> = HashMap::new();
         for e in &g.edges {
             *targets.entry(e.target.as_str()).or_insert(0) += 1;
