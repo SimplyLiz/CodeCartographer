@@ -4,6 +4,39 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+Measured on four real repositories (CKB/Go, a Next.js app, a Python
+package, a Rust crate) before and after; numbers are from those runs.
+
+### Fixed — Go imports resolve to the package, not one arbitrary file
+
+- **An import connects to every non-test `.go` file of the package**
+  (resolution `package`). Before, all 97 imports of `internal/query` in CKB
+  pointed at one file (`pr.go`, tagged `exact`), which produced five false god
+  modules — the five most-imported files. `_test.go` files and non-Go files in
+  the package directory are never targets. The module-root package resolves too.
+- **Files of one Go package are linked without imports.** `same_go_package`
+  is used by `hidden_coupling` (MCP and FFI) and the context document, so
+  co-changing siblings are no longer reported as hidden coupling: CKB 1,214 →
+  688 pairs. The context document's "Hidden Coupling (no import …)" list did not
+  check imports at all; it now does. The links are not edges: a package is a
+  clique (CKB's largest has 157 files), it would read as cycles, and every
+  `edges` consumer would see siblings as importers.
+- **Dead code is per package for Go**: a file is alive when its package is
+  imported or holds `main.go`. CKB dead files 852 → 288.
+- **God modules are a file's own outgoing breadth, not its fan-in.** The old
+  rule (undirected degree > 50 plus an import-text "cohesion") flagged the most
+  imported files. Now: at least 15 distinct dependencies (a Go package counts
+  once) and at least 40 signatures; `degree` is that breadth and
+  `cohesion_score` the share of dependencies in the file's own area. CKB 5 → 0,
+  the TS app 1 → 0 (it was a test helper), the Python package 1 → 0
+  (`config.py`, imported by 59), the Rust crate 0 → 1 (`src/system.rs`, 15
+  modules, 110 signatures).
+- **A bridge needs `bridge_score >= 1.0`** (on 0.1% of shortest paths)
+  instead of `> 0`, which flagged any node on any shortest path (CKB 233 of
+  1,321 files, the TS app 176 of 698). Package fan-out spread paths over all
+  members and would have raised CKB to 544; the count at >= 1.0 went 66 → 77.
+  CKB health 65.0 → 86.1.
+
 ## [4.0.3] — 2026-11-14
 
 ### Fixed — the scanner follows .gitignore like git

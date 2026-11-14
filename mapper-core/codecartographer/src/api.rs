@@ -236,10 +236,21 @@ pub struct CycleInfo {
 pub struct GodModuleInfo {
     pub module_id: String,
     pub path: String,
+    /// Outgoing dependency breadth: distinct modules this file depends on (a Go
+    /// package counts once). Not fan-in — see `detect_god_modules`.
     pub degree: usize,
     pub cohesion_score: f64,
     pub severity: String,
 }
+
+/// Minimum `bridge_score` (normalised betweenness × 1000) for `is_bridge`:
+/// the node lies on at least 0.1% of all shortest paths. See `analyze_bridges`.
+const BRIDGE_MIN_SCORE: f64 = 1.0;
+
+/// God-module thresholds (see `ApiState::detect_god_modules`): minimum outgoing
+/// dependency breadth and minimum signature count, both required.
+const GOD_MIN_BREADTH: usize = 15;
+const GOD_MIN_SIGNATURES: usize = 40;
 
 /// Compression level configuration
 #[allow(dead_code)]
@@ -664,7 +675,7 @@ impl ApiState {
 
                 let mut file_edges = Vec::new();
                 for import in &file.imports {
-                    if let Some((target, resolution)) = import_index.resolve(import, module_id) {
+                    for (target, resolution) in import_index.resolve_all(import, module_id) {
                         // Reject cross-type edges: a source file importing "json" must not
                         // resolve to a fixture like testdata/review/json.json (doc), and a
                         // doc file must not depend on a source module just for mentioning it.
@@ -707,8 +718,9 @@ impl ApiState {
         fn res_rank(r: &str) -> u8 {
             match r {
                 "exact" => 0,
-                "suffix" => 1,
-                _ => 2,
+                "package" => 1,
+                "suffix" => 2,
+                _ => 3,
             }
         }
         edges.sort_unstable_by(|a, b| {
@@ -821,6 +833,18 @@ impl ApiState {
                 *runtime_in_degree.entry(edge.target.clone()).or_insert(0) += 1;
             }
         }
+        // Go: liveness is per package. A file is reachable when its package is —
+        // imported from outside (any member has runtime in-degree) or holding an
+        // entry file (`main.go` makes the rest of package main alive).
+        let mut live_go_pkgs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &nodes {
+            if is_go_package_member(&node.path)
+                && (is_entry_point_path(&node.path)
+                    || runtime_in_degree.get(&node.module_id).copied().unwrap_or(0) > 0)
+            {
+                live_go_pkgs.insert(go_dir(&node.module_id).to_string());
+            }
+        }
 
         let mut dead_code_count = 0usize;
 
@@ -855,7 +879,9 @@ impl ApiState {
             });
 
             // Dead-code flag: no runtime callers AND not an entry point or test.
-            let dead = runtime_ind == 0 && !is_entry_name && !is_test;
+            let pkg_live = is_go_package_member(&node.path)
+                && live_go_pkgs.contains(go_dir(&node.module_id));
+            let dead = runtime_ind == 0 && !is_entry_name && !is_test && !pkg_live;
             node.is_dead = Some(dead);
             if dead {
                 dead_code_count += 1;
@@ -1630,7 +1656,16 @@ impl<'a> ImportIndex<'a> {
         for v in by_dir.values_mut() { v.sort_unstable(); }
         for v in by_dir_last.values_mut() { v.sort_unstable(); }
 
-        Self { ids, by_basename, by_stem, by_segment, by_symbol, by_dir, by_dir_last, go_module: None }
+        Self {
+            ids,
+            by_basename,
+            by_stem,
+            by_segment,
+            by_symbol,
+            by_dir,
+            by_dir_last,
+            go_module: None,
+        }
     }
 
     /// Directories whose path ends with `/rel` (or equals `rel`), returning the
@@ -1830,6 +1865,61 @@ impl<'a> ImportIndex<'a> {
         None
     }
 
+    /// Go module-aware resolution, authoritative for `.go` sources when a go.mod
+    /// is present (`Some`, possibly empty). `None` means "not a Go import here",
+    /// so the generic ladder runs.
+    fn resolve_go(&self, norm: &str, source: &str) -> Option<Vec<(String, &'static str)>> {
+        // An import is INTERNAL iff it lives under the module path; anything else
+        // is stdlib/third-party and has NO internal edge (never a same-stem guess).
+        if !source.ends_with(".go") {
+            return None;
+        }
+        let module = self.go_module.as_ref()?;
+        let internal_rel: Option<&str> = if norm == module {
+            Some("")
+        } else {
+            norm.strip_prefix(module.as_str())
+                .filter(|r| r.starts_with('/'))
+                .map(|r| &r[1..])
+        };
+        // An internal import names a package DIRECTORY, never a file: the importer
+        // depends on the whole package, so it gets an edge to every non-test `.go`
+        // file of it (resolution `package`). Picking one member — the old
+        // behaviour — sent all 97 imports of a package to one arbitrary file and
+        // manufactured god modules and bridges out of it.
+        let members = internal_rel.and_then(|rel| {
+            self.by_dir.get(rel).or_else(|| {
+                // Package dir not scanned as-is (nested module, generated code):
+                // the shortest directory ending with the suffix.
+                if rel.is_empty() { None } else { self.dir_suffix_files(rel) }
+            })
+        });
+        Some(
+            members
+                .map(|cands| {
+                    cands
+                        .iter()
+                        .filter(|m| **m != source && is_go_package_member(m))
+                        .map(|m| (m.to_string(), "package"))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Resolve an import to every module it names, each with a confidence tag.
+    /// Most imports name one file; a Go import names a package (all its files).
+    fn resolve_all(&self, import: &str, source: &str) -> Vec<(String, &'static str)> {
+        if source.ends_with(".go") && self.go_module.is_some() {
+            let (module_path, _) = parse_import_parts(import);
+            let norm = module_path.trim_start_matches("./").trim_start_matches('/');
+            if let Some(hits) = self.resolve_go(norm, source) {
+                return hits;
+            }
+        }
+        self.resolve(import, source).into_iter().collect()
+    }
+
     fn resolve(&self, import: &str, source: &str) -> Option<(String, &'static str)> {
         let (module_path, symbol_hint) = parse_import_parts(import);
 
@@ -1854,42 +1944,11 @@ impl<'a> ImportIndex<'a> {
             .map(str::to_string);
         let stem = derive_module_stem(&module_path);
 
-        // 0. Go module-aware resolution. Authoritative for .go sources when a go.mod
-        //    is present: an import is INTERNAL iff it lives under the module path, in
-        //    which case it names a package DIRECTORY — resolve to that directory's
-        //    files, never to a same-stem file in an unrelated package. Anything not
-        //    under the module path is stdlib/third-party and has NO internal edge.
-        //    This branch always returns, so Go imports never reach the fuzzy
-        //    basename/stem/segment fallbacks below (which fabricate cross-package edges).
-        if source.ends_with(".go") {
-            if let Some(module) = &self.go_module {
-                let internal_rel: Option<&str> = if norm == *module {
-                    Some("")
-                } else {
-                    norm.strip_prefix(module.as_str())
-                        .filter(|r| r.starts_with('/'))
-                        .map(|r| &r[1..])
-                };
-                match internal_rel {
-                    // The module root package itself — no single file to point at.
-                    Some("") => return None,
-                    Some(rel) => {
-                        // Exact package directory.
-                        if let Some(cands) = self.by_dir.get(rel) {
-                            return Self::pick_deterministic(cands, source).map(|t| (t, "exact"));
-                        }
-                        // Package dir not scanned as-is (nested module, generated code):
-                        // accept the shortest directory whose path ends with the suffix.
-                        if let Some(cands) = self.dir_suffix_files(rel) {
-                            return Self::pick_deterministic(cands, source).map(|t| (t, "suffix"));
-                        }
-                        // Internal by namespace but absent from the scan → honest miss.
-                        return None;
-                    }
-                    // Not under the module path → external (stdlib / third-party).
-                    None => return None,
-                }
-            }
+        // 0. Go module-aware resolution (see `resolve_go`); authoritative, so Go
+        //    imports never reach the fuzzy basename/stem/segment fallbacks below.
+        //    Single-target callers get the package's first file.
+        if let Some(hits) = self.resolve_go(&norm, source) {
+            return hits.into_iter().next();
         }
 
         // 0.5 Rust module-path resolution. Authoritative for .rs sources: a
@@ -1993,6 +2052,56 @@ impl<'a> ImportIndex<'a> {
 
         None
     }
+}
+
+/// Language family of a source file by extension, `None` for non-code
+/// (docs, data, SQL, styles, …). Files of one family can import each other.
+fn lang_family(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        "py" | "pyi" => "py",
+        "go" => "go",
+        "rs" => "rs",
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => "c",
+        "java" | "kt" | "kts" | "scala" => "jvm",
+        "cs" => "cs",
+        "rb" => "rb",
+        "php" => "php",
+        "swift" => "swift",
+        "lua" => "lua",
+        "sh" | "bash" | "zsh" | "fish" => "sh",
+        _ => return None,
+    })
+}
+
+/// Edges that can close a dependency cycle: confidently resolved (not `fuzzy`).
+fn is_cycle_edge(e: &GraphEdge) -> bool {
+    e.resolution != "fuzzy"
+}
+
+/// True when `a` and `b` are files of one Go package (same directory). Go has
+/// no file-level imports: every file of a package sees every other one, so two
+/// such files are linked without an import edge and their co-change is not
+/// "hidden" coupling. Hidden-coupling filters must treat this as a link. The
+/// graph does not materialise these links as edges — a package is a clique by
+/// definition (157 files in one CKB package = 12k edges), it would turn every
+/// package into a cycle, and every consumer of `edges` (dependents, blast
+/// radius, PageRank) would read siblings as importers.
+pub fn same_go_package(a: &str, b: &str) -> bool {
+    a != b && a.ends_with(".go") && b.ends_with(".go") && go_dir(a) == go_dir(b)
+}
+
+/// Directory of a repo-relative path ("" at the root) — a Go file's package.
+fn go_dir(p: &str) -> &str {
+    p.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// A file that is part of a Go package's compiled API: a non-test `.go` file.
+/// Importers of the package see these; `_test.go` files are only visible to
+/// the package's own tests.
+fn is_go_package_member(path: &str) -> bool {
+    path.ends_with(".go") && !path.ends_with("_test.go")
 }
 
 pub fn is_entry_point_path(path: &str) -> bool {
@@ -2162,7 +2271,14 @@ impl ApiState {
             // bc is already normalized by (n-1)*(n-2) inside compute_betweenness_centrality
             let bridge_score = if is_hub { 0.0 } else { bc * 1000.0 };
 
-            let is_bridge = !is_hub && bridge_score > 0.0;
+            // A bridge carries a real share of the graph's shortest paths, not a
+            // sliver: `bridge_score > 0` flagged any node on ANY shortest path
+            // (233 of 1,321 CKB files, 176 of 698 in a TS app — mostly scores
+            // under 0.5). A Go package import fanning out to every package file
+            // spreads paths over all members and pushed that to 544, while the
+            // count at >= 1.0 barely moved (66 → 77). BRIDGE_MIN_SCORE is that
+            // floor: on at least 0.1% of all shortest paths.
+            let is_bridge = !is_hub && bridge_score >= BRIDGE_MIN_SCORE;
 
             let risk_level = if is_bridge && bridge_score > 10.0 {
                 "CRITICAL".to_string()
@@ -2445,7 +2561,7 @@ impl ApiState {
         // low-confidence stem/segment guesses — counting them fabricated the
         // false import cycles this graph used to report (e.g. 22 "cycles" in a Go
         // repo, which the language forbids).
-        for edge in edges.iter().filter(|e| e.resolution != "fuzzy") {
+        for edge in edges.iter().filter(|e| is_cycle_edge(e)) {
             graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
         }
 
@@ -2492,61 +2608,79 @@ impl ApiState {
         cycles
     }
 
+    /// God modules: files that do too much THEMSELVES — wide outgoing
+    /// dependency breadth on top of a large surface. Fan-in plays no part: a
+    /// file many others import is a popular utility or a package's API, and the
+    /// old degree-based rule (undirected degree > 50 plus an import-text
+    /// "cohesion") flagged exactly those.
+    ///
+    /// For each non-test node:
+    /// - `breadth` (reported as `degree`) = distinct modules it depends on over
+    ///   runtime and type edges. A Go package import fans out to every file of
+    ///   the package, so `package`-resolved targets count once per package
+    ///   directory, not once per file.
+    /// - `size` = its signature count.
+    /// - `cohesion_score` = share of those dependencies inside the node's own
+    ///   area (first two directory components, e.g. `internal/query`); low =
+    ///   it reaches across the codebase.
+    ///
+    /// Flagged when `breadth >= GOD_MIN_BREADTH && size >= GOD_MIN_SIGNATURES`.
+    /// Severity: CRITICAL at 2× both thresholds, HIGH at 1.5×, else MEDIUM.
     fn detect_god_modules(
         &self,
         nodes: &[GraphNode],
-        _edges: &[GraphEdge],
-        files: &HashMap<String, MappedFile>,
+        edges: &[GraphEdge],
+        _files: &HashMap<String, MappedFile>,
     ) -> Vec<GodModuleInfo> {
-        let god_threshold = 50;
-        let mut god_modules = Vec::new();
-
-        for node in nodes {
-            let degree = node.degree.unwrap_or(0);
-
-            if degree > god_threshold {
-                let file = files.get(&node.module_id);
-
-                let import_types: std::collections::HashSet<&str> = file
-                    .map(|f| {
-                        f.imports
-                            .iter()
-                            .filter_map(|i| {
-                                let parts: Vec<&str> = i.split('/').collect();
-                                parts.get(1).or(parts.first()).map(|s| *s)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                let unique_types = import_types.len() as f64;
-                let cohesion = if degree > 0 {
-                    (unique_types / degree as f64).min(1.0)
-                } else {
-                    0.0
-                };
-
-                if cohesion < 0.3 {
-                    let severity = if degree > 100 {
-                        "CRITICAL"
-                    } else if degree > 75 {
-                        "HIGH"
-                    } else {
-                        "MEDIUM"
-                    };
-
-                    god_modules.push(GodModuleInfo {
-                        module_id: node.module_id.clone(),
-                        path: self.rel(&node.path),
-                        degree,
-                        cohesion_score: cohesion,
-                        severity: severity.to_string(),
-                    });
-                }
+        fn dir_of(p: &str) -> &str {
+            p.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+        }
+        // First two directory components of a directory path.
+        fn area(dir: &str) -> String {
+            dir.split('/').take(2).collect::<Vec<_>>().join("/")
+        }
+        // node → dependency unit → that unit's directory.
+        let mut deps: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+        for e in edges {
+            if e.edge_type != "runtime" && e.edge_type != "type" {
+                continue;
             }
+            let dir = dir_of(&e.target);
+            let unit = if e.resolution == "package" { dir } else { e.target.as_str() };
+            deps.entry(e.source.as_str()).or_default().insert(unit, dir);
         }
 
-        god_modules.sort_by(|a, b| b.degree.cmp(&a.degree));
+        let mut god_modules = Vec::new();
+        for node in nodes {
+            if is_test_path(&node.path) {
+                continue;
+            }
+            let Some(units) = deps.get(node.module_id.as_str()) else { continue };
+            let breadth = units.len();
+            let size = node.signature_count;
+            if breadth < GOD_MIN_BREADTH || size < GOD_MIN_SIGNATURES {
+                continue;
+            }
+            let own = area(dir_of(&node.module_id));
+            let local = units.values().filter(|d| area(d) == own).count();
+            let cohesion = local as f64 / breadth as f64;
+            let severity = if breadth >= 2 * GOD_MIN_BREADTH && size >= 2 * GOD_MIN_SIGNATURES {
+                "CRITICAL"
+            } else if breadth * 2 >= 3 * GOD_MIN_BREADTH && size * 2 >= 3 * GOD_MIN_SIGNATURES {
+                "HIGH"
+            } else {
+                "MEDIUM"
+            };
+            god_modules.push(GodModuleInfo {
+                module_id: node.module_id.clone(),
+                path: self.rel(&node.path),
+                degree: breadth,
+                cohesion_score: cohesion,
+                severity: severity.to_string(),
+            });
+        }
+
+        god_modules.sort_by(|a, b| b.degree.cmp(&a.degree).then(a.module_id.cmp(&b.module_id)));
         god_modules
     }
 
@@ -2665,7 +2799,7 @@ impl ApiState {
         // Predict cycles only from structural (non-fuzzy) edges, matching
         // detect_cycles — a "will create a cycle" warning must not rest on a
         // low-confidence stem guess.
-        let structural = || edges.iter().filter(|e| e.resolution != "fuzzy");
+        let structural = || edges.iter().filter(|e| is_cycle_edge(e));
 
         for edge in structural() {
             if edge.source != target_module && edge.target != target_module {
@@ -2906,10 +3040,10 @@ mod tests {
         let src = "internal/backends/orch.go";
 
         // Internal import → the CORRECT package directory (not internal/a2a/errors.go),
-        // tagged as an exact resolution.
+        // tagged as a package resolution.
         assert_eq!(
             idx.resolve("github.com/acme/widget/internal/errors", src),
-            Some(("internal/errors/errors.go".to_string(), "exact")),
+            Some(("internal/errors/errors.go".to_string(), "package")),
         );
         // Stdlib import → no fabricated internal edge.
         assert_eq!(idx.resolve("sync", src), None);
@@ -3138,6 +3272,171 @@ mod tests {
             "expected resolved a->b edge, got edges: {:?}",
             graph.edges
         );
+    }
+
+    /// A graph over `files` (module_id → imports) rooted in a temp dir that holds
+    /// the given extra files (go.mod, tsconfig.json, …).
+    fn graph_with(
+        tag: &str,
+        disk: &[(&str, &str)],
+        files: &[(&str, Vec<&str>)],
+    ) -> ProjectGraphResponse {
+        let tmp = std::env::temp_dir().join(format!("cg_graph_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (rel, body) in disk {
+            let p = tmp.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        let state = ApiState::new(tmp.clone());
+        {
+            let mut m = state.mapped_files.lock().unwrap();
+            for (id, imports) in files {
+                m.insert(
+                    id.to_string(),
+                    MappedFile::from_minimal(
+                        id.to_string(),
+                        imports.iter().map(|s| s.to_string()).collect(),
+                    ),
+                );
+            }
+        }
+        let g = state.rebuild_graph().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        g
+    }
+
+    fn has_edge(g: &ProjectGraphResponse, s: &str, t: &str) -> Option<(String, String)> {
+        g.edges
+            .iter()
+            .find(|e| e.source == s && e.target == t)
+            .map(|e| (e.edge_type.clone(), e.resolution.clone()))
+    }
+
+    // A Go import names a package: the importer gets an edge to every non-test
+    // .go file of it (resolution `package`), not to one arbitrary member, and
+    // never to a non-Go file or a _test.go file that lives in the same directory.
+    #[test]
+    fn go_import_fans_out_to_every_package_file() {
+        let imp = "github.com/acme/w/internal/query";
+        let g = graph_with(
+            "gofan",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[
+                ("cmd/w/main.go", vec![imp]),
+                ("internal/api/h.go", vec![imp, "fmt"]),
+                ("internal/query/engine.go", vec![]),
+                ("internal/query/pr.go", vec![]),
+                ("internal/query/pr_test.go", vec![]),
+                ("internal/query/README.md", vec![]),
+            ],
+        );
+        for src in ["cmd/w/main.go", "internal/api/h.go"] {
+            for t in ["internal/query/engine.go", "internal/query/pr.go"] {
+                assert_eq!(
+                    has_edge(&g, src, t),
+                    Some(("runtime".into(), "package".into())),
+                    "{src} -> {t}: {:?}",
+                    g.edges
+                );
+            }
+            assert!(has_edge(&g, src, "internal/query/pr_test.go").is_none());
+            assert!(has_edge(&g, src, "internal/query/README.md").is_none());
+        }
+        // The module root import names the root package.
+        let g = graph_with(
+            "goroot",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[("w.go", vec![]), ("sub/s.go", vec!["github.com/acme/w"])],
+        );
+        assert_eq!(has_edge(&g, "sub/s.go", "w.go"), Some(("runtime".into(), "package".into())));
+    }
+
+    // Files of one Go package are linked without imports: same_go_package says so
+    // (hidden-coupling filters use it), and dead-code analysis treats the package
+    // as the unit — the rest of package main is alive through main.go, and every
+    // file of an imported package is alive.
+    #[test]
+    fn go_same_package_links_and_liveness() {
+        assert!(same_go_package("internal/q/a.go", "internal/q/b.go"));
+        assert!(same_go_package("internal/q/a.go", "internal/q/a_test.go"));
+        assert!(!same_go_package("internal/q/a.go", "internal/q/sub/b.go"));
+        assert!(!same_go_package("internal/q/a.go", "internal/q/a.ts"));
+        assert!(!same_go_package("a.go", "a.go"));
+
+        let g = graph_with(
+            "golive",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[
+                ("cmd/w/main.go", vec!["github.com/acme/w/internal/q"]),
+                ("cmd/w/flags.go", vec![]),
+                ("internal/q/a.go", vec![]),
+                ("internal/q/b.go", vec![]),
+                ("internal/orphan/o.go", vec![]),
+            ],
+        );
+        let dead = |id: &str| g.nodes.iter().find(|n| n.module_id == id).unwrap().is_dead;
+        assert_eq!(dead("cmd/w/flags.go"), Some(false), "package main is alive via main.go");
+        assert_eq!(dead("internal/q/b.go"), Some(false));
+        assert_eq!(dead("internal/orphan/o.go"), Some(true), "unimported package stays dead");
+    }
+
+    // God modules are about a file's OWN outgoing breadth and size. A file that
+    // is merely imported by many (high fan-in) is not one; a large file that
+    // reaches into many modules is. A Go package counts once, however many
+    // files its import fans out to.
+    #[test]
+    fn god_module_is_outgoing_breadth_not_fan_in() {
+        let state = ApiState::new(std::path::PathBuf::from("/test"));
+        let mk = |id: &str, sigs: usize| GraphNode {
+            module_id: id.into(),
+            path: id.into(),
+            language: "go".into(),
+            signature_count: sigs,
+            complexity: None,
+            is_bridge: None,
+            bridge_score: None,
+            degree: Some(200),
+            risk_level: None,
+            churn: None,
+            hotspot_score: None,
+            role: None,
+            is_dead: None,
+            unreferenced_exports: None,
+            fan_in: None,
+            fan_out: None,
+            cochange_partners: None,
+            cochange_entropy: None,
+            owner: None,
+        };
+        let e = |s: &str, t: &str, res: &str| GraphEdge {
+            source: s.into(),
+            target: t.into(),
+            edge_type: "runtime".into(),
+            at_range: None,
+            resolution: res.into(),
+        };
+        let mut nodes = vec![mk("popular.go", 100), mk("big.go", 100), mk("fanout.go", 100)];
+        let mut edges = Vec::new();
+        for i in 0..80 {
+            let id = format!("user{i}.go");
+            nodes.push(mk(&id, 1));
+            edges.push(e(&id, "popular.go", "exact"));
+            if i < GOD_MIN_BREADTH {
+                edges.push(e("big.go", &id, "exact"));
+            }
+            // 80 files of ONE package: a single dependency unit.
+            edges.push(e("fanout.go", &format!("pkg/f{i}.go"), "package"));
+        }
+        let gods = state.detect_god_modules(&nodes, &edges, &HashMap::new());
+        let ids: Vec<&str> = gods.iter().map(|g| g.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["big.go"], "{gods:?}");
+        assert_eq!(gods[0].degree, GOD_MIN_BREADTH);
+
+        // Too small to be a god module however broad.
+        nodes[1].signature_count = GOD_MIN_SIGNATURES - 1;
+        assert!(state.detect_god_modules(&nodes, &edges, &HashMap::new()).is_empty());
     }
 
     // Directory rollup folds files into their folder, drops intra-folder edges, and
@@ -3412,5 +3711,130 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// Recall probe over a real checkout (not part of the normal suite):
+/// `PROBE_ROOT=/path cargo test --lib graph_probe -- --ignored --nocapture`.
+/// Scans without the persistent map cache so extractor changes are measured.
+#[cfg(test)]
+mod graph_probe {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn graph_probe() {
+        let Ok(root) = std::env::var("PROBE_ROOT") else { return };
+        let root = std::path::PathBuf::from(root);
+        let scan = crate::scanner::scan_files_with_noise_tracking(&root).unwrap();
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in scan.files.iter().filter(|p| !crate::scanner::is_ignored_path(p)) {
+            let Ok(content) = std::fs::read_to_string(p) else { continue };
+            let rel = p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+            files.insert(rel, crate::mapper::extract_skeleton(p, &content));
+        }
+        // Alias hit rate: imports that start with a tsconfig-style alias prefix.
+        let idx = ImportIndex::build(&files).with_go_module(&root);
+        let (mut alias, mut alias_hit) = (0usize, 0usize);
+        for (id, f) in &files {
+            for imp in &f.imports {
+                let (m, _) = parse_import_parts(imp);
+                if m.starts_with("@/") || m.starts_with("~/") {
+                    alias += 1;
+                    if idx.resolve(imp, id).is_some() {
+                        alias_hit += 1;
+                    }
+                }
+            }
+        }
+        drop(idx);
+        let state = ApiState::new(root.clone());
+        *state.mapped_files.lock().unwrap() = files;
+        let g = state.rebuild_graph().unwrap();
+        let mut by_res: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &g.edges {
+            *by_res.entry(format!("{}/{}", e.edge_type, e.resolution)).or_insert(0) += 1;
+        }
+        let edge_set: std::collections::HashSet<(String, String)> = g
+            .edges
+            .iter()
+            .flat_map(|e| [(e.source.clone(), e.target.clone()), (e.target.clone(), e.source.clone())])
+            .collect();
+        let pairs = crate::git_analysis::git_cochange(&root, 500);
+        let pairs: Vec<_> = pairs.into_iter().filter(|p| p.count >= 2).collect();
+        let hidden = pairs
+            .iter()
+            .filter(|p| !edge_set.contains(&(p.file_a.clone(), p.file_b.clone())))
+            .filter(|p| !same_go_package(&p.file_a, &p.file_b))
+            .count();
+        let m = &g.metadata;
+        println!("PROBE root={}", root.display());
+        println!("files={} edges={} by={:?}", m.total_files, m.total_edges, by_res);
+        println!("alias imports={} resolved={}", alias, alias_hit);
+        println!(
+            "cycles={} god={} bridges={} health={:.1} cochange_pairs={} hidden={}",
+            m.cycle_count.unwrap_or(0),
+            m.god_module_count.unwrap_or(0),
+            m.bridge_count.unwrap_or(0),
+            m.health_score.unwrap_or(0.0),
+            pairs.len(),
+            hidden
+        );
+        let code_ext = |p: &str| lang_family(p).is_some();
+        let code_to_noncode = g
+            .edges
+            .iter()
+            .filter(|e| code_ext(&e.source) && !code_ext(&e.target) && !is_doc_path(&e.target))
+            .count();
+        println!(
+            "dead={} code->noncode edges={}",
+            m.dead_code_count.unwrap_or(0),
+            code_to_noncode
+        );
+        let bs: Vec<f64> = g.nodes.iter().filter(|n| n.is_bridge == Some(true)).filter_map(|n| n.bridge_score).collect();
+        println!(
+            "bridge_score buckets: >0={} >0.5={} >1={} >5={} >10={}",
+            bs.len(),
+            bs.iter().filter(|x| **x > 0.5).count(),
+            bs.iter().filter(|x| **x > 1.0).count(),
+            bs.iter().filter(|x| **x > 5.0).count(),
+            bs.iter().filter(|x| **x > 10.0).count()
+        );
+        let mut top: Vec<&GraphNode> = g.nodes.iter().filter(|n| n.is_bridge == Some(true)).collect();
+        top.sort_by(|a, b| b.bridge_score.partial_cmp(&a.bridge_score).unwrap());
+        for n in top.iter().take(5) {
+            println!("  bridge: {} score={:.2} degree={:?}", n.module_id, n.bridge_score.unwrap_or(0.0), n.degree);
+        }
+        for c in &g.cycles {
+            println!("  cycle: {:?}", c.nodes);
+        }
+        for gm in g.god_modules.iter().take(8) {
+            println!("  god: {} degree={} cohesion={:.2}", gm.module_id, gm.degree, gm.cohesion_score);
+        }
+        // Calibration view for god modules: widest non-test files by breadth.
+        let mut units: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        for e in g.edges.iter().filter(|e| e.edge_type == "runtime" || e.edge_type == "type") {
+            let u = if e.resolution == "package" {
+                e.target.rsplit_once('/').map(|x| x.0).unwrap_or("")
+            } else {
+                e.target.as_str()
+            };
+            units.entry(e.source.as_str()).or_default().insert(u);
+        }
+        let mut wide: Vec<(&str, usize, usize)> = g
+            .nodes
+            .iter()
+            .filter(|n| !is_test_path(&n.path))
+            .map(|n| (n.module_id.as_str(), units.get(n.module_id.as_str()).map_or(0, |u| u.len()), n.signature_count))
+            .collect();
+        wide.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        println!("  widest (id, breadth, sigs): {:?}", &wide[..wide.len().min(6)]);
+        let mut targets: HashMap<&str, usize> = HashMap::new();
+        for e in &g.edges {
+            *targets.entry(e.target.as_str()).or_insert(0) += 1;
+        }
+        let mut t: Vec<_> = targets.into_iter().collect();
+        t.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        println!("  top fan-in: {:?}", &t[..t.len().min(5)]);
     }
 }

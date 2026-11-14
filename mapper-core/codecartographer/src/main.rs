@@ -3923,8 +3923,15 @@ fn claudemd_mode(root: &Path, output: Option<&Path>) -> Result<()> {
 
     // Architectural issues
     let has_cycles = !graph.cycles.is_empty();
+    // "Hidden" means no static link: drop pairs joined by an import edge (either
+    // direction) or by sharing a Go package, which needs no import.
+    let linked: HashSet<(&str, &str)> = graph.edges.iter()
+        .flat_map(|e| [(e.source.as_str(), e.target.as_str()), (e.target.as_str(), e.source.as_str())])
+        .collect();
     let cochange_issues: Vec<_> = graph.cochange_pairs.iter()
         .filter(|p| p.coupling_score >= 0.7)
+        .filter(|p| !linked.contains(&(p.file_a.as_str(), p.file_b.as_str())))
+        .filter(|p| !crate::api::same_go_package(&p.file_a, &p.file_b))
         .collect();
 
     if has_cycles || !cochange_issues.is_empty() {

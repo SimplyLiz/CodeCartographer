@@ -962,6 +962,7 @@ pub extern "C" fn codecartographer_hidden_coupling(
         .into_iter()
         .filter(|p| p.count >= min_count)
         .filter(|p| !import_edges.contains(&(p.file_a.clone(), p.file_b.clone())))
+        .filter(|p| !api::same_go_package(&p.file_a, &p.file_b))
         .map(|p| {
             serde_json::json!({
                 "fileA": p.file_a,
