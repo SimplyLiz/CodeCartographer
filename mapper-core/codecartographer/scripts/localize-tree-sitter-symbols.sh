@@ -121,9 +121,19 @@ cp "$ARCHIVE_ABS" "$WORK/input.a"
   # just those global is both correct and future-proof. Undefined symbols (libc
   # imports) are unaffected. Safe now that the partial link resolved internal
   # refs within combined.o.
+  #
+  # The same pass drops the LLVM bitcode that `lto = true` leaves embedded
+  # (.llvmbc/.llvmcmd on ELF, __LLVM,__bitcode/__cmdline on Mach-O): about 34 MB
+  # nobody links against, and Go 1.26.11+ refuses to link a cgo library that
+  # carries LTO sections ("disallowed LTO section"). Removing an absent section
+  # is a no-op, so one list covers both formats.
   "$OBJCOPY" \
     --wildcard \
     --keep-global-symbol="${UPREFIX}codecartographer_*" \
+    --remove-section=.llvmbc \
+    --remove-section=.llvmcmd \
+    --remove-section=__LLVM,__bitcode \
+    --remove-section=__LLVM,__cmdline \
     combined.o
 
   # Replace the archive with just the combined, localized object.

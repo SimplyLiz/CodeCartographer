@@ -45,7 +45,14 @@ EOF
 
 "$CC" -c -fPIC runtime.c -o runtime.o
 "$CC" -c -fPIC grammar.c -o grammar.o
-"$CC" -c -fPIC wrapper.c -o wrapper.o
+# The wrapper carries embedded bitcode, as `lto = true` leaves in the real lib,
+# where the compiler can produce it (Apple clang and clang can; gcc cannot).
+EMBEDS_BITCODE=0
+if "$CC" -c -fPIC -fembed-bitcode wrapper.c -o wrapper.o 2>/dev/null; then
+  EMBEDS_BITCODE=1
+else
+  "$CC" -c -fPIC wrapper.c -o wrapper.o
+fi
 "$AR" rcs libfixture.a runtime.o grammar.o wrapper.o
 
 # Mach-O prepends an underscore to C symbol names; ELF does not.
@@ -63,6 +70,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
   || fail "baseline: ${U}tree_sitter_rust should be global in grammar.o"
 "$NM" -g runtime.o | grep -qE " T ${U}_ts_dup\$" \
   || fail "baseline: ${U}_ts_dup should be global in runtime.o"
+
+# LTO sections must be gone: Go 1.26.11+ refuses to link a cgo library with them.
+lto_sections() {
+  if command -v otool >/dev/null 2>&1; then otool -l "$1" | grep -cE "sectname __(bitcode|cmdline)" || true
+  else (readelf -S "$1" 2>/dev/null || objdump -h "$1") | grep -cE "\.llvm(bc|cmd)" || true; fi
+}
+if [[ "$EMBEDS_BITCODE" -eq 1 ]]; then
+  [[ "$(lto_sections wrapper.o)" -ge 1 ]] || fail "baseline: wrapper.o should carry bitcode sections"
+fi
 
 "$SCRIPT" libfixture.a >/dev/null
 
@@ -90,4 +106,7 @@ LOCAL_TSL="$("$NM" combined.o | grep -cE " t ${U}tree_sitter_" || true)"
 [[ "$LOCAL_TS" -ge 1 ]]  || fail "ts_* definitions missing post-localization"
 [[ "$LOCAL_TSL" -ge 1 ]] || fail "tree_sitter_* definitions missing post-localization"
 
-echo "PASS: ts_*/tree_sitter_*/_ts_dup localized; codecartographer_* still exported ($GLOBAL_CARTO symbols)"
+# LTO sections must be gone: Go 1.26.11+ refuses to link a cgo library with them.
+[[ "$(lto_sections combined.o)" -eq 0 ]] || fail "LTO bitcode sections left in combined.o"
+
+echo "PASS: ts_*/tree_sitter_*/_ts_dup localized; codecartographer_* still exported ($GLOBAL_CARTO symbols); no LTO sections"

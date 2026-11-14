@@ -4,6 +4,30 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+## [4.0.3] — 2026-11-14
+
+### Fixed — the scanner follows .gitignore like git
+
+- Directory patterns (`build/`) exclude whole subtrees.
+- Nested `.gitignore` files apply, not just the one at the repo root.
+- Bracket expressions (`*.[oa]`) match.
+
+### Changed
+
+- The skeleton cache is written borrowed and streamed instead of through an
+  owned copy.
+
+### Fixed — the static library links with Go 1.26.11
+
+- **No LLVM bitcode in the C-ABI `.a`.** `lto = true` left 34 MB of embedded
+  bitcode in the localized object (`.llvmbc`/`.llvmcmd` on ELF,
+  `__LLVM,__bitcode`/`__cmdline` on Mach-O). Go 1.26.11 refuses to link a cgo
+  library with LTO sections ("disallowed LTO section"), which broke CKB's
+  cartographer build. The localize step's objcopy pass now removes them: the
+  aarch64-apple-darwin lib drops from 75.7 to 41.5 MB, and CKB builds and passes
+  its cartographer tests against it. `test-localize-symbols.sh` checks that none
+  are left.
+
 ## [4.0.1] — 2026-07-13
 
 First release to actually publish the C-ABI static-library artifacts (the
