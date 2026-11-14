@@ -139,10 +139,14 @@ pub struct Range {
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
+    /// Kind of the importing file — `"runtime"`, `"test"`, `"doc"` — or
+    /// `"type"` for a type-only import (kept out of cycle detection).
     pub edge_type: String,
     pub at_range: Option<Range>,
     /// How confidently this edge was resolved from the import text:
-    /// `"exact"`  — exact module-id or Go package-directory match;
+    /// `"exact"`  — exact module-id match;
+    /// `"package"` — a Go import resolved to its package directory: one edge to
+    ///              every (non-test) file of the package;
     /// `"suffix"` — path-suffix / unique-basename agreement (C/C++ includes, etc.);
     /// `"fuzzy"`  — bare stem / segment / symbol guess with no path agreement.
     /// Consumers should treat `fuzzy` edges as low-confidence (they are the ones
