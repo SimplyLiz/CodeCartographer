@@ -347,8 +347,13 @@ fn extract_rust(source: &str, path: &Path) -> TsOutput {
     for child in root.children(&mut cur) {
         match child.kind() {
             "use_declaration" => {
-                // Strip "use " prefix and trailing ";"
-                let text = node_text(&child, src);
+                // The use tree itself (`argument`): drops `use`, the `;` and any
+                // visibility — `pub use x::Y` used to stay "pub use x::Y", which
+                // resolved nowhere, so every re-export was missing.
+                let text = child
+                    .child_by_field_name("argument")
+                    .map(|a| node_text(&a, src))
+                    .unwrap_or_else(|| node_text(&child, src));
                 let imp = text.trim_start_matches("use ").trim_end_matches(';').trim();
                 if !imp.is_empty() {
                     imports.push(imp.to_string());
@@ -371,8 +376,54 @@ fn extract_rust(source: &str, path: &Path) -> TsOutput {
         }
     }
 
+    // Inline paths used without a `use` (`crate::readout::ReadoutMlp::new()`,
+    // `super::epistemic::f(x)`) are dependencies too.
+    let mut inline = Vec::new();
+    collect_rust_inline_paths(&root, src, 0, &mut inline);
+    let mut seen: std::collections::HashSet<String> = imports.iter().cloned().collect();
+    for p in inline {
+        if seen.insert(p.clone()) {
+            imports.push(p);
+        }
+    }
+
     walk_rust(&root, src, path, &mut sigs, &mut scope);
     TsOutput::new(sigs, imports)
+}
+
+/// Collect crate-internal paths written inline (not via `use`): the outermost
+/// `scoped_identifier` / `scoped_type_identifier` whose text starts with
+/// `crate::`, `super::` or `self::`. `use` declarations are skipped (handled
+/// as imports). Inside an inline `mod x { … }` a `super::` refers back into
+/// this same file, so such paths are dropped there (`self::` too: it names
+/// the inline module). Paths inside macro token trees are not parsed by
+/// tree-sitter and stay invisible.
+#[cfg(feature = "lang-rust")]
+fn collect_rust_inline_paths(node: &Node, src: &[u8], inline_mod_depth: usize, out: &mut Vec<String>) {
+    let _depth = match DepthGuard::enter() { Some(g) => g, None => return };
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "use_declaration" => {}
+            "mod_item" => {
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_rust_inline_paths(&body, src, inline_mod_depth + 1, out);
+                }
+            }
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let text: String = node_text(&child, src).split_whitespace().collect();
+                let text = text.split('<').next().unwrap_or(&text).to_string();
+                let local = text.starts_with("super::") || text.starts_with("self::");
+                if text.starts_with("crate::") || (local && inline_mod_depth == 0) {
+                    out.push(text);
+                } else {
+                    // `Foo::<crate::x::Y>::new` etc.: look inside.
+                    collect_rust_inline_paths(&child, src, inline_mod_depth, out);
+                }
+            }
+            _ => collect_rust_inline_paths(&child, src, inline_mod_depth, out),
+        }
+    }
 }
 
 #[cfg(feature = "lang-rust")]
@@ -678,9 +729,37 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
     let mut imports = Vec::new();
     let mut scope: Vec<String> = Vec::new();
 
-    // Extract imports at root level
-    let mut cur = root.walk();
-    for child in root.children(&mut cur) {
+    // Imports anywhere in the module: top level, inside functions (lazy
+    // imports), try/except fallbacks, `if TYPE_CHECKING:` blocks (type-only).
+    collect_py_imports(&root, src, false, false, &mut imports);
+    let mut seen = std::collections::HashSet::new();
+    imports.retain(|i| seen.insert(i.clone()));
+
+    walk_python(&root, src, path, &mut sigs, &mut scope);
+    TsOutput::new(sigs, imports)
+}
+
+/// Collect Python imports from the whole subtree of `node`. Function-local
+/// imports are runtime dependencies that only run on the first call, and are
+/// marked lazy (`LAZY_PREFIX`): they count as dependencies but cannot close an
+/// import cycle. Imports under `if TYPE_CHECKING:` (or `typing.TYPE_CHECKING`)
+/// never run and are marked type-only (`TYPE_ONLY_PREFIX`). Relative imports
+/// keep their dots (`from ..pkg import name`) for the resolver to anchor at the
+/// source file.
+#[cfg(feature = "lang-python")]
+fn collect_py_imports(node: &Node, src: &[u8], type_only: bool, lazy: bool, imports: &mut Vec<String>) {
+    let _depth = match DepthGuard::enter() { Some(g) => g, None => return };
+    let mark = |s: String| {
+        if type_only {
+            format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX)
+        } else if lazy {
+            format!("{}{s}", crate::mapper::LAZY_PREFIX)
+        } else {
+            s
+        }
+    };
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
         match child.kind() {
             "import_statement" => {
                 // import os, import os.path, import a.b as c
@@ -693,45 +772,62 @@ fn extract_python(source: &str, path: &Path) -> TsOutput {
                         // Keep the `import ` keyword so parse_import_parts normalises the
                         // dotted path (a.b.c → a/b/c) rather than misreading `.c` as a
                         // file extension.
-                        imports.push(format!("import {name}"));
+                        imports.push(mark(format!("import {name}")));
                     }
                 }
             }
             "import_from_statement" => {
-                // from a.b import c, d  /  from . import foo
+                // from a.b import c, d  /  from . import foo  /  from ..x import y
                 if let Some(module) = child.child_by_field_name("module_name") {
                     let module = node_text(&module, src).to_string();
-                    if module.starts_with('.') {
-                        // Relative import — source-relative, left best-effort as-is.
-                        imports.push(module);
-                    } else {
-                        // Emit one `from a.b import name` per imported name so
-                        // parse_import_parts yields (module=a/b, symbol=name) and the
-                        // resolver's qualified-suffix step lands on the submodule
-                        // a/b/name when it exists, else the package a/b — one precise
-                        // edge instead of a bare-stem guess.
-                        let mut names = child.walk();
-                        let mut emitted = false;
-                        for n in child.children_by_field_name("name", &mut names) {
-                            let raw = node_text(&n, src);
-                            let nm = raw.split(" as ").next().unwrap_or(raw).trim();
-                            if !nm.is_empty() && nm != "*" {
-                                imports.push(format!("from {module} import {nm}"));
-                                emitted = true;
-                            }
+                    // Emit one `from a.b import name` per imported name so the
+                    // resolver lands on the submodule a/b/name when it exists, else
+                    // the package/module a/b — one precise edge per name.
+                    let mut names = child.walk();
+                    let mut emitted = false;
+                    for n in child.children_by_field_name("name", &mut names) {
+                        let raw = node_text(&n, src);
+                        let nm = raw.split(" as ").next().unwrap_or(raw).trim();
+                        if !nm.is_empty() && nm != "*" {
+                            imports.push(mark(format!("from {module} import {nm}")));
+                            emitted = true;
                         }
-                        if !emitted {
-                            imports.push(module);
-                        }
+                    }
+                    if !emitted {
+                        imports.push(mark(if module.starts_with('.') {
+                            format!("from {module} import *")
+                        } else {
+                            module
+                        }));
                     }
                 }
             }
-            _ => {}
+            "if_statement" => {
+                let cond = child
+                    .child_by_field_name("condition")
+                    .map(|c| node_text(&c, src).trim().to_string())
+                    .unwrap_or_default();
+                if cond == "TYPE_CHECKING" || cond == "typing.TYPE_CHECKING" {
+                    if let Some(body) = child.child_by_field_name("consequence") {
+                        collect_py_imports(&body, src, true, lazy, imports);
+                    }
+                    // `else:` / `elif` branches do run.
+                    let mut c3 = child.walk();
+                    for alt in child.children_by_field_name("alternative", &mut c3) {
+                        collect_py_imports(&alt, src, type_only, lazy, imports);
+                    }
+                } else {
+                    collect_py_imports(&child, src, type_only, lazy, imports);
+                }
+            }
+            // A function body runs on call, not on import (methods included; a
+            // class body itself runs at import time and stays eager).
+            "function_definition" => collect_py_imports(&child, src, type_only, true, imports),
+            // Leaves that cannot contain statements.
+            "string" | "comment" | "identifier" | "integer" | "float" => {}
+            _ => collect_py_imports(&child, src, type_only, lazy, imports),
         }
     }
-
-    walk_python(&root, src, path, &mut sigs, &mut scope);
-    TsOutput::new(sigs, imports)
 }
 
 #[cfg(feature = "lang-python")]
@@ -855,12 +951,44 @@ fn collect_js_ts_imports(root: &Node, src: &[u8]) -> Vec<String> {
                 let raw = node_text(&source_node, src);
                 let clean = raw.trim_matches('"').trim_matches('\'');
                 if !clean.is_empty() {
-                    imports.push(clean.to_string());
+                    if js_ts_is_type_only(node_text(&child, src)) {
+                        imports.push(format!("{}{clean}", crate::mapper::TYPE_ONLY_PREFIX));
+                    } else {
+                        imports.push(clean.to_string());
+                    }
                 }
             }
         }
     }
     imports
+}
+
+/// True for an import/re-export that TypeScript erases at runtime:
+/// `import type …`, `export type … from`, or named imports that are all
+/// `type`-qualified (`import { type A, type B } from …`). `import type from 'x'`
+/// is a default import NAMED `type`, not type-only.
+#[cfg(any(feature = "lang-typescript", feature = "lang-javascript"))]
+pub(crate) fn js_ts_is_type_only(stmt: &str) -> bool {
+    let rest = stmt.trim_start();
+    let rest = match rest.strip_prefix("import").or_else(|| rest.strip_prefix("export")) {
+        Some(r) => r.trim_start(),
+        None => return false,
+    };
+    if let Some(after) = rest.strip_prefix("type") {
+        if after.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '*') {
+            let next = after.trim_start();
+            // `import type from 'x'` / `import type, { a } from 'x'`: identifier `type`.
+            return !(next.starts_with("from") && next[4..].trim_start().starts_with(['"', '\'']))
+                && !next.starts_with(',');
+        }
+        return false;
+    }
+    if let Some(body) = rest.strip_prefix('{') {
+        let Some(end) = body.find('}') else { return false };
+        let names: Vec<&str> = body[..end].split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        return !names.is_empty() && names.iter().all(|n| n.starts_with("type "));
+    }
+    false
 }
 
 /// Shared walker for TypeScript and JavaScript (both grammars produce compatible node kinds).
@@ -1620,6 +1748,121 @@ mod tests {
         let src = "fn internal() {}";
         let out = ts_extract(Path::new("lib.rs"), src).unwrap();
         assert!(out.signatures.is_empty(), "private top-level fn should be skipped");
+    }
+
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn rust_inline_crate_paths_are_imports() {
+        let src = r#"
+use crate::types::Id;
+pub(crate) use crate::net::Socket;
+pub struct System { r: crate::readout::ReadoutMlp<f32> }
+impl System {
+    pub fn step(&mut self) {
+        let v = crate::epistemic::score(&self.r, 1);
+        let w: Vec<crate::types::Id> = Vec::new();
+        super::helpers::log(v);
+        std::mem::drop(w);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn t() { super::System::new(); crate::fixtures::make(); }
+}
+"#;
+        let out = ts_extract(Path::new("src/system.rs"), src).unwrap();
+        assert_eq!(
+            out.imports,
+            vec![
+                "crate::types::Id",
+                "crate::net::Socket",
+                "crate::readout::ReadoutMlp",
+                "crate::epistemic::score",
+                "super::helpers::log",
+                "crate::fixtures::make",
+            ]
+        );
+    }
+
+    #[cfg(feature = "lang-python")]
+    #[test]
+    fn python_imports_anywhere_type_checking_and_relative() {
+        let src = r#"
+from __future__ import annotations
+import os
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from pkg.models import Doc
+else:
+    import pkg.runtime_only
+try:
+    import ujson as json
+except ImportError:
+    import json
+
+def serve():
+    from pkg.search.corpus import CorpusSearcher
+    from .sibling import helper
+    from .. import top
+    import os
+    return CorpusSearcher
+
+class C:
+    def m(self):
+        from . import *
+"#;
+        let out = ts_extract(Path::new("pkg/web.py"), src).unwrap();
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let l = |s: &str| format!("{}{s}", crate::mapper::LAZY_PREFIX);
+        assert_eq!(
+            out.imports,
+            vec![
+                // `from __future__` is a compiler directive, not a dependency.
+                "import os".to_string(),
+                "from typing import TYPE_CHECKING".to_string(),
+                t("from pkg.models import Doc"),
+                "import pkg.runtime_only".to_string(),
+                "import ujson".to_string(),
+                "import json".to_string(),
+                // Function bodies (methods too) run on call: lazy.
+                l("from pkg.search.corpus import CorpusSearcher"),
+                l("from .sibling import helper"),
+                l("from .. import top"),
+                l("import os"),
+                l("from . import *"),
+            ]
+        );
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_type_only_imports_are_marked() {
+        let src = r#"
+import type { A } from "./a";
+import { type B, type C } from "./bc";
+import { type D, e } from "./de";
+import type from "./default-named-type";
+import f from "./f";
+export type { G } from "./g";
+export { h } from "./h";
+export type * from "./star";
+"#;
+        let out = ts_extract(Path::new("x.ts"), src).unwrap();
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        assert_eq!(
+            out.imports,
+            vec![
+                t("./a"),
+                t("./bc"),
+                "./de".to_string(),
+                "./default-named-type".to_string(),
+                "./f".to_string(),
+                t("./g"),
+                "./h".to_string(),
+                t("./star"),
+            ]
+        );
     }
 
     #[cfg(feature = "lang-rust")]

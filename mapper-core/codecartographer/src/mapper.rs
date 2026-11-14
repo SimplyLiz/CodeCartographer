@@ -221,6 +221,21 @@ pub enum DetailLevel {
 // MappedFile
 // ---------------------------------------------------------------------------
 
+/// Prefix an extractor puts in front of an entry in `MappedFile::imports` when
+/// the import is type-only — erased at runtime (TS `import type` / `export type
+/// … from`, all-`type` named imports, Python imports under `if TYPE_CHECKING:`).
+/// `"type ./attachments"`. The graph keeps these as `type` edges and leaves them
+/// out of cycle detection; resolvers that do not know the prefix still find the
+/// specifier as the last whitespace token.
+pub const TYPE_ONLY_PREFIX: &str = "type ";
+
+/// Prefix for a Python import inside a function body: it runs on the first
+/// call, not when the module loads, which is the usual way to break an import
+/// cycle on purpose. `"lazy from app.x import y"`. The graph keeps these as
+/// `lazy` edges: real dependencies (liveness, layers), but out of cycle
+/// detection. `TYPE_ONLY_PREFIX` wins when both apply.
+pub const LAZY_PREFIX: &str = "lazy ";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MappedFile {
     pub path: String,

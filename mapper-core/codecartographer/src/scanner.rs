@@ -396,6 +396,92 @@ fn load_ignore_file(path: &Path) -> Vec<CodeCartographerIgnorePattern> {
 pub struct IgnoreIndex {
     root: PathBuf,
     layers: Mutex<HashMap<String, Arc<Vec<CodeCartographerIgnorePattern>>>>,
+    /// Repository-wide excludes that live outside the tree: the global
+    /// `core.excludesFile` and `$GIT_COMMON_DIR/info/exclude`.
+    repo: RepoExcludes,
+}
+
+/// Excludes git reads from outside the working tree. Their patterns are
+/// relative to the repository's top level, which can sit above the scan root.
+#[derive(Default)]
+struct RepoExcludes {
+    /// Scan root relative to the git top level, with a trailing '/' (or "").
+    prefix: String,
+    /// `core.excludesFile` first, then `info/exclude`: lowest precedence first,
+    /// since the last matching rule wins.
+    patterns: Vec<CodeCartographerIgnorePattern>,
+}
+
+impl RepoExcludes {
+    fn load(root: &Path) -> Self {
+        let Some((toplevel, gitdir)) = find_git_dir(root) else {
+            return Self::default();
+        };
+        let prefix = root
+            .strip_prefix(&toplevel)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let prefix = if prefix.is_empty() { prefix } else { format!("{prefix}/") };
+
+        let mut patterns = Vec::new();
+        if let Some(global) = global_excludes_file(&toplevel) {
+            patterns.extend(load_ignore_file(&global));
+        }
+        patterns.extend(load_ignore_file(&common_dir(&gitdir).join("info").join("exclude")));
+        Self { prefix, patterns }
+    }
+}
+
+/// The repository containing `root`: (top level of the working tree, git dir).
+/// Handles a `.git` *file* (`gitdir: <path>`), which is what linked worktrees
+/// and submodules have.
+fn find_git_dir(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    for dir in root.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = fs::metadata(&dot_git) else {
+            continue;
+        };
+        if meta.is_dir() {
+            return Some((dir.to_path_buf(), dot_git));
+        }
+        let text = fs::read_to_string(&dot_git).ok()?;
+        let target = text.lines().find_map(|l| l.trim().strip_prefix("gitdir:"))?.trim();
+        return Some((dir.to_path_buf(), dir.join(target)));
+    }
+    None
+}
+
+/// `$GIT_COMMON_DIR`: a linked worktree's git dir names the main repository's
+/// git dir in its `commondir` file; `info/exclude` lives there.
+fn common_dir(gitdir: &Path) -> PathBuf {
+    match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(rel) if !rel.trim().is_empty() => gitdir.join(rel.trim()),
+        _ => gitdir.to_path_buf(),
+    }
+}
+
+/// `core.excludesFile` as git resolves it (repo, global and system config,
+/// `~` expanded), falling back to git's default `$XDG_CONFIG_HOME/git/ignore`
+/// or `~/.config/git/ignore`.
+fn global_excludes_file(toplevel: &Path) -> Option<PathBuf> {
+    let configured = std::process::Command::new("git")
+        .arg("-C")
+        .arg(toplevel)
+        .args(["config", "--path", "--get", "core.excludesFile"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(p) = configured {
+        let p = PathBuf::from(p);
+        return Some(if p.is_absolute() { p } else { toplevel.join(p) });
+    }
+    match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(xdg) => Some(PathBuf::from(xdg).join("git").join("ignore")),
+        None => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".config").join("git").join("ignore")),
+    }
 }
 
 impl IgnoreIndex {
@@ -403,6 +489,7 @@ impl IgnoreIndex {
         Self {
             root: root.to_path_buf(),
             layers: Mutex::new(HashMap::new()),
+            repo: RepoExcludes::load(root),
         }
     }
 
@@ -432,7 +519,11 @@ impl IgnoreIndex {
     /// ancestor directory's rules, outermost first — last match wins, so a
     /// deeper negation can re-include what an outer rule excluded.
     fn is_ignored(&self, rel: &str, is_dir: bool) -> bool {
-        let mut ignored = false;
+        // Repo-wide excludes have the lowest precedence; any .gitignore rule
+        // below can override them.
+        let mut ignored = !self.repo.patterns.is_empty()
+            && eval_layer(&format!("{}{rel}", self.repo.prefix), is_dir, &self.repo.patterns)
+                .unwrap_or(false);
         let mut dir_end = 0; // "" = root layer
         loop {
             let dir_rel = &rel[..dir_end];
@@ -939,5 +1030,104 @@ mod glob_class_tests {
         assert!(!m("src/*.rs", "src/a/b.rs"));
         assert!(m("src/**/*.rs", "src/a/b.rs"));
         assert!(m("f?o.txt", "foo.txt"));
+    }
+}
+
+#[cfg(test)]
+mod repo_exclude_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn write(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cc-repo-exclude-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn scanned(root: &Path) -> Vec<String> {
+        scan_files_with_noise_tracking(root)
+            .unwrap()
+            .files
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    /// The CKB case: `.claude/worktrees/` (two full repo copies) is excluded
+    /// only through `.git/info/exclude`. Without reading it the scan walked
+    /// both copies and MapProject took >10 min instead of 2.3 s.
+    #[test]
+    fn info_exclude_and_core_excludes_file_apply() {
+        let root = tmpdir("info");
+        git(&root, &["init", "-q"]);
+        let global = root.join("..").join(format!("cc-global-ignore-{}", std::process::id()));
+        write(&global, "*.scratch\n");
+        // Repo-local config wins over the user's real global setting, so the
+        // test does not depend on the machine's ~/.gitconfig.
+        git(&root, &["config", "core.excludesFile", global.to_str().unwrap()]);
+        write(&root.join(".git/info/exclude"), "# local\n.claude/worktrees/\n/only-root.rs\n");
+        write(&root.join("src/main.rs"), "fn main() {}\n");
+        write(&root.join(".claude/worktrees/copy/src/main.rs"), "fn main() {}\n");
+        write(&root.join("only-root.rs"), "\n");
+        write(&root.join("src/only-root.rs"), "\n");
+        write(&root.join("src/notes.scratch"), "\n");
+        // A .gitignore negation overrides the lower-precedence repo excludes.
+        write(&root.join("keep/.gitignore"), "!keep.scratch\n");
+        write(&root.join("keep/keep.scratch"), "\n");
+
+        let rels = scanned(&root);
+        assert!(rels.contains(&"src/main.rs".to_string()), "{rels:?}");
+        assert!(!rels.iter().any(|r| r.starts_with(".claude/")), "info/exclude ignored: {rels:?}");
+        assert!(!rels.contains(&"only-root.rs".to_string()), "{rels:?}");
+        assert!(rels.contains(&"src/only-root.rs".to_string()), "anchor is root-relative: {rels:?}");
+        assert!(!rels.contains(&"src/notes.scratch".to_string()), "core.excludesFile ignored: {rels:?}");
+        assert!(rels.contains(&"keep/keep.scratch".to_string()), "{rels:?}");
+
+        let _ = fs::remove_file(&global);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Scanning a subdirectory: info/exclude patterns stay relative to the
+    /// repository top level.
+    #[test]
+    fn info_exclude_applies_below_the_top_level() {
+        let root = tmpdir("sub");
+        git(&root, &["init", "-q"]);
+        write(&root.join(".git/info/exclude"), "/pkg/gen/\n");
+        write(&root.join("pkg/gen/a.rs"), "\n");
+        write(&root.join("pkg/lib.rs"), "\n");
+        let rels = scanned(&root.join("pkg"));
+        assert_eq!(rels, vec!["lib.rs".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A linked worktree has a `.git` file; info/exclude comes from the main
+    /// repository's git dir via `commondir`.
+    #[test]
+    fn worktree_reads_common_dir_exclude() {
+        let main = tmpdir("wt-main");
+        git(&main, &["init", "-q"]);
+        write(&main.join(".git/info/exclude"), "secret-out/\n");
+        let wt_gitdir = main.join(".git/worktrees/wt");
+        write(&wt_gitdir.join("commondir"), "../..\n");
+        let wt = tmpdir("wt");
+        write(&wt.join(".git"), &format!("gitdir: {}\n", wt_gitdir.display()));
+        write(&wt.join("src/a.rs"), "\n");
+        write(&wt.join("secret-out/b.rs"), "\n");
+        let rels = scanned(&wt);
+        assert_eq!(rels, vec!["src/a.rs".to_string()]);
+        let _ = fs::remove_dir_all(&wt);
+        let _ = fs::remove_dir_all(&main);
     }
 }

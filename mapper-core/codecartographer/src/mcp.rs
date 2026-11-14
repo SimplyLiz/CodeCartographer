@@ -2402,6 +2402,7 @@ impl McpServer {
                     .into_iter()
                     .filter(|p| p.count >= min_count)
                     .filter(|p| !edge_set.contains(&(p.file_a.clone(), p.file_b.clone())))
+                    .filter(|p| !crate::api::same_go_package(&p.file_a, &p.file_b))
                     .map(|p| serde_json::json!({
                         "fileA": p.file_a, "fileB": p.file_b,
                         "count": p.count,  "couplingScore": p.coupling_score,

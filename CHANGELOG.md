@@ -2,7 +2,230 @@
 
 All notable changes to CodeCartographer will be documented in this file.
 
-## [Unreleased]
+## [4.1.0] — 2026-11-14
+
+The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
+package, a Rust crate) before and after; numbers are from those runs.
+
+### Fixed — a function-local Python import does not close a cycle
+
+- Python imports inside a function body run on the first call, not when the
+  module loads — the usual way to break an import cycle on purpose. Since
+  imports inside functions are collected, such a pair came out as a HIGH
+  cycle (`profiles.py` ↔ `stage4_enrichment.py` in a Python package). They
+  are now `lazy` edges: dependencies for liveness, layers and coupling, but
+  out of cycle detection, like `type` edges. A runtime import of the same
+  pair still wins. The skeleton cache's extractor version moves to 3.
+
+### Fixed — shotgun surgery ranks source files only
+
+- Co-change dispersion (C ABI `shotgun_surgery`, MCP `shotgun_surgery`, the
+  CLI) ranked a changelog or a generated migration journal first, because
+  they change alongside everything, and counted them as partners of every
+  code file. Only source files count now, as file and as partner.
+
+### Fixed — test files are not bridges
+
+- Bridge detection (betweenness on the undirected import graph) counted test
+  imports: a test importing `a` and `b` sat on the path `a`–test–`b`, so test
+  files came out as bridges (36 of 154 bridges in a Next.js app, 6 of 29 in a
+  Python package) and lent shortest paths to the files they test. Test
+  imports are now left out of bridge analysis.
+- **A top-level `tests/` directory is test code.** `is_test_path` matched
+  `/tests/` only, which graph module ids (repo-relative) never start with, so
+  `tests/support/e2e.ts` or `tests/test_api.py` counted as production code:
+  runtime edges, bridges, god-module candidates. Python `test_*.py` and
+  `conftest.py` count as tests anywhere.
+
+### Fixed — a Go package import is one layer violation, not one per file
+
+- Go imports resolve to every file of the package (`"package"` edges), so one
+  `import ".../internal/query"` across a layer boundary was reported once per
+  file of the package — 81 violations in CKB for a single import, and the
+  inflated count fed the health score. Layer checks (C ABI `check_layers`, the
+  graph's `layer_violations`, `check-layers` CLI) now see one edge to the
+  package directory, written `internal/query/`.
+
+### Fixed — skeleton cache survives upgrades and uncommitted edits
+
+- **`.codecartographer_cache.json` is stamped with the crate version and a new
+  `EXTRACTOR_VERSION`** (src/skeleton_cache.rs, bump it with every change to
+  extraction output). A cache from another build is discarded as a whole.
+  Without it, unchanged files kept the imports a previous release extracted,
+  so the graph fixes below never reached repositories that already had a
+  cache — neither through the C ABI nor through the CLI.
+- **The CLI cache (`serve`, `switch_project`) is validated per file** (size and
+  mtime), like the C ABI one. It was keyed by git HEAD alone and served stale
+  skeletons for every uncommitted edit. Both now share one implementation;
+  caches written by 4.0.3 are rebuilt once on first use.
+
+### Fixed — Rust inline paths, grouped uses, re-exports, precise anchoring
+
+- **Inline paths count**: `crate::readout::ReadoutMlp::new()`,
+  `crate::epistemic::score(…)`, `super::x::f` written without a `use` are
+  imports (outermost path only; `super::`/`self::` inside an inline
+  `mod tests { … }` refer back into the same file and are skipped).
+- **`pub use` / `pub(crate) use` resolve.** The extractor kept the visibility
+  (`"pub use x::Y"`), which resolved nowhere, so every re-export was missing.
+- **Paths anchor where Rust anchors them**: `crate::` at the source's crate
+  root (nearest `lib.rs`/`main.rs`, so workspace crates do not bleed into each
+  other), `self::`/`super::` (repeatable) at the source module, bare
+  `types::X` at the current module first (2018 uniform paths). The longest
+  prefix naming `x.rs` or `x/mod.rs` wins (`exact`); suffix matching remains
+  the fallback.
+- **Grouped uses name every module**: `use crate::{a, b::{c, D}}` gives an
+  edge to `a`, `b/c` and `b` (for `D`), not just the text before the brace.
+- **`crate::Item` follows the crate root's re-export** (`pub use
+  types::Item;`) to the defining module instead of pointing at `lib.rs`.
+- In the Rust crate: code edges 107 → 146 (`system.rs` → `readout.rs` and
+  `epistemic.rs` were among the missing), `exact` 1 → 127. One cycle appears
+  and is real: `morphogenesis` uses `governance`, `epistemic` and `homeostasis`
+  inline, all three import `morphogenesis::Cluster`.
+
+### Fixed — Python imports inside functions, relative imports, stdlib names
+
+- **Imports anywhere in a module count**, not only top-level ones: inside
+  functions (lazy imports), `try/except` fallbacks and classes. Imports under
+  `if TYPE_CHECKING:` are type-only (`type` edges, out of cycle detection);
+  the `else:` branch runs and stays runtime. In the Python package the
+  structural code edges go 390 → 533 (`web.py` → `search/corpus.py` was
+  one of the missing).
+- **Relative imports anchor at the source package** (`from .x import y`,
+  `from .. import z`, one edge per name, submodule before module). They used to
+  be emitted as bare `.x` and resolved by chance.
+- **Absolute imports need a top-level package.** `a` in `a.b` must sit in a
+  directory without `__init__.py` (repo root, `src/` layout, a scripts dir);
+  anything else is stdlib or third-party and gets no edge. A stdlib
+  `import logging` had fuzzy-matched the package's own `logging.py` from 44
+  modules. Python sources never fuzzy-match any more. One new cycle shows up:
+  `profiles.py` imports `stage4_enrichment` inside a function, which imports
+  `profiles` at the top — a real mutual dependency, deferred to break the
+  import-time loop.
+
+### Fixed — TypeScript path aliases, type-only imports, fuzzy guesses
+
+- **tsconfig/jsconfig `paths` and `baseUrl` resolve.** 0 of 1,454 `@/…`
+  imports in the Next.js app became edges; now 1,453 do (the last names a
+  `.jpg` that is not scanned), and the app's edges go 816 → 2,146. Each source
+  uses its nearest config (nested per-package configs in monorepos), relative
+  `extends` chains and solution-style `references` are followed, comments and
+  trailing commas are accepted. Lookup follows TypeScript: the file, `.js` →
+  `.ts`, `.ts/.tsx/.d.ts/.js/…`, then `index.*`; relative imports from JS/TS
+  use the same order.
+- **Type-only imports are `type` edges and never close a cycle.**
+  `import type`, `export type … from` and all-`type` named imports are marked
+  by the extractor (`TYPE_ONLY_PREFIX`); the edge stays, cycle detection and
+  `simulate_change`'s cycle check skip it, and a pair imported both ways keeps
+  the runtime edge. Cycles in the app 3 → 1: the two that closed only through
+  `import type` are gone, `DesignPanel ↔ SignatureControls/Hyphenation` stays.
+  The directory rollup keeps a pair `type` when all its imports are.
+- **Fuzzy resolution is narrower.** A bare JS/TS specifier no relative path,
+  alias or `baseUrl` resolved is an npm package and gets no edge (it used to
+  segment-match, e.g. `drizzle-orm` → `drizzle/0000_init.sql`, the app's most
+  "imported" file). Other code imports only fuzzy-match files of their own
+  language family. Fuzzy edges in the app 118 → 0; code → non-code edges
+  66 → 7, all explicit `.css` imports.
+
+### Fixed — Go imports resolve to the package, not one arbitrary file
+
+- **An import connects to every non-test `.go` file of the package**
+  (resolution `package`). Before, all 97 imports of `internal/query` in CKB
+  pointed at one file (`pr.go`, tagged `exact`), which produced five false god
+  modules — the five most-imported files. `_test.go` files and non-Go files in
+  the package directory are never targets. The module-root package resolves too.
+- **Files of one Go package are linked without imports.** `same_go_package`
+  is used by `hidden_coupling` (MCP and FFI) and the context document, so
+  co-changing siblings are no longer reported as hidden coupling: CKB 1,214 →
+  688 pairs. The context document's "Hidden Coupling (no import …)" list did not
+  check imports at all; it now does. The links are not edges: a package is a
+  clique (CKB's largest has 157 files), it would read as cycles, and every
+  `edges` consumer would see siblings as importers.
+- **Dead code is per package for Go**: a file is alive when its package is
+  imported or holds `main.go`. CKB dead files 852 → 288.
+- **God modules are a file's own outgoing breadth, not its fan-in.** The old
+  rule (undirected degree > 50 plus an import-text "cohesion") flagged the most
+  imported files. Now: at least 15 distinct dependencies (a Go package counts
+  once) and at least 40 signatures; `degree` is that breadth and
+  `cohesion_score` the share of dependencies in the file's own area. CKB 5 → 0,
+  the TS app 1 → 0 (it was a test helper), the Python package 1 → 0
+  (`config.py`, imported by 59), the Rust crate 0 → 1 (`src/system.rs`, 15
+  modules, 110 signatures).
+- **A bridge needs `bridge_score >= 1.0`** (on 0.1% of shortest paths)
+  instead of `> 0`, which flagged any node on any shortest path (CKB 233 of
+  1,321 files, the TS app 176 of 698). Package fan-out spread paths over all
+  members and would have raised CKB to 544; the count at >= 1.0 went 66 → 77.
+  CKB health 65.0 → 86.1.
+
+### Fixed — co-change coupling accounts for support
+
+- **`coupling_score` is shrunk by a prior.** It was Tornhill's
+  `count / min(churn_a, churn_b)`, so a file changed twice, both times with X,
+  scored 1.0 and outranked a partner that changed with X in 14 of its 16
+  commits (CKB's `prepareChange` showed exactly that, plus a false "High
+  coupling" risk factor). The score is now `count / (min(churn_a, churn_b) + 2)`:
+  2 of 2 scores 0.5, 5 of 5 0.71, 14 of 16 0.78, 10 of 10 0.83. Ties are broken
+  by the co-change count. Applies to `git_cochange`, `hidden_coupling`, shotgun
+  surgery's input, the MCP tools and the CLI.
+- The FFI's default minimum co-change count (`min_count` 0) is 3 instead of 2.
+
+### Changed — FFI calls reuse built state
+
+- **Process-level cache for the C ABI.** Every FFI call scanned the tree,
+  loaded or rebuilt the skeletons, created a fresh `ApiState` and rebuilt the
+  graph. Built state is now kept per canonical root (up to 4 roots, least
+  recently used evicted) and re-validated on each call with a stat walk through
+  the same scanner (file set, size, mtime). Unchanged tree: reused as is.
+  Changed files: only those are re-parsed, and the new state inherits the
+  topology-keyed centrality cache. Concurrent calls on one root build once.
+- **Git history results are cached by HEAD.** `git_churn`, `git_cochange`,
+  `hidden_coupling` and `shotgun_surgery` each ran `git log -n 500` per call
+  (~350 ms on CKB); they now share results keyed by (root, HEAD, limit).
+- `hidden_coupling` no longer re-parses the whole tree single-threaded (6.3 s
+  on a CKB clone; 0.4–0.7 s now, most of it the first `git log`).
+
+### Fixed — the skeleton cache served stale skeletons for uncommitted edits
+
+- `.codecartographer_cache.json` was keyed by git HEAD alone, so a file edited
+  but not committed kept its old skeleton in every new process. The cache now
+  stores size and mtime per file and reuses only entries whose file is
+  unchanged. Caches written by older versions are re-parsed once.
+
+### Fixed — the scanner reads git's out-of-tree excludes
+
+- **`.git/info/exclude` and `core.excludesFile` apply.** The scanner resolved
+  `.gitignore` files itself but never read the two exclude sources outside the
+  tree. A checkout that keeps `.claude/worktrees/` (two full copies of the repo)
+  out of git only through `info/exclude` was scanned three times over: on CKB's
+  checkout the scan found 3,693 files instead of 1,323, and `MapProject` took
+  more than 10 minutes instead of 2.3 s. Both sources are read with git's
+  semantics: patterns relative to the repository top level (also when the scan
+  root is a subdirectory), lowest precedence, so a `.gitignore` negation still
+  wins. A `.git` file (linked worktree, submodule) is followed, and a worktree
+  reads `info/exclude` from the common git dir. `core.excludesFile` comes from
+  `git config` (repo, global, system), defaulting to
+  `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`.
+
+### Fixed — the C ABI speaks camelCase
+
+- **FFI results are camelCase, as documented.** Most result structs
+  (`ProjectGraphResponse`, `GraphNode`, `GraphMetadata`, `CycleInfo`,
+  `GodModuleInfo`, `SimulatedChange`/`ImpactAnalysis`, `LayerViolation`,
+  `ArchitectureEvolution`, `CoChangeDispersion`, `DependencyInfo`, `DocNode`)
+  serialize snake_case for the MCP server and the CLI, and the FFI passed that
+  through. CKB's Go types decode camelCase, so `isBridge`, `healthScore`,
+  `godModules`, `moduleId`, `predictedImpact`, `sourcePath`, `partnerCount` and
+  more came back as zero values: the bridge risk multiplier never fired, the
+  layers check always passed, shotgun surgery and evolution reported zeros. The
+  FFI now re-serializes struct field names to camelCase through a serializer
+  adapter (`ffi_json`); map keys (paths in `git_churn`, extensions in
+  `metadata.languages`) and string values are never touched. MCP and CLI output
+  is unchanged.
+- `context_health` (and the `health` object inside `query_context` /
+  `query_docs`) stays snake_case: CKB decodes it with snake_case tags.
+- `ranked_skeleton` returns `{ "files": [...] }`, the shape CKB decodes; the
+  bare array failed to unmarshal there.
+- A contract test calls every FFI function CKB uses and checks the keys
+  `types.go` expects.
 
 ## [4.0.3] — 2026-11-14
 

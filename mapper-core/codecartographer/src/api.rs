@@ -139,10 +139,16 @@ pub struct Range {
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
+    /// Kind of the importing file — `"runtime"`, `"test"`, `"doc"` — or
+    /// `"type"` for a type-only import, or `"lazy"` for a Python import inside a
+    /// function body. Both stay out of cycle detection; `lazy` is otherwise a
+    /// runtime dependency.
     pub edge_type: String,
     pub at_range: Option<Range>,
     /// How confidently this edge was resolved from the import text:
-    /// `"exact"`  — exact module-id or Go package-directory match;
+    /// `"exact"`  — exact module-id match;
+    /// `"package"` — a Go import resolved to its package directory: one edge to
+    ///              every (non-test) file of the package;
     /// `"suffix"` — path-suffix / unique-basename agreement (C/C++ includes, etc.);
     /// `"fuzzy"`  — bare stem / segment / symbol guess with no path agreement.
     /// Consumers should treat `fuzzy` edges as low-confidence (they are the ones
@@ -236,10 +242,21 @@ pub struct CycleInfo {
 pub struct GodModuleInfo {
     pub module_id: String,
     pub path: String,
+    /// Outgoing dependency breadth: distinct modules this file depends on (a Go
+    /// package counts once). Not fan-in — see `detect_god_modules`.
     pub degree: usize,
     pub cohesion_score: f64,
     pub severity: String,
 }
+
+/// Minimum `bridge_score` (normalised betweenness × 1000) for `is_bridge`:
+/// the node lies on at least 0.1% of all shortest paths. See `analyze_bridges`.
+const BRIDGE_MIN_SCORE: f64 = 1.0;
+
+/// God-module thresholds (see `ApiState::detect_god_modules`): minimum outgoing
+/// dependency breadth and minimum signature count, both required.
+const GOD_MIN_BREADTH: usize = 15;
+const GOD_MIN_SIGNATURES: usize = 40;
 
 /// Compression level configuration
 #[allow(dead_code)]
@@ -595,6 +612,16 @@ impl ApiState {
         }
     }
 
+    /// Carry over the topology-keyed centrality cache from an earlier state of
+    /// the same tree. Entries self-invalidate by fingerprint (see `bc_cache`),
+    /// so an edit that leaves the import graph alone skips betweenness.
+    #[allow(dead_code)] // used by the C-ABI state cache (lib), not the binary
+    pub(crate) fn inherit_bc_cache(&self, other: &ApiState) {
+        if let (Ok(src), Ok(mut dst)) = (other.bc_cache.lock(), self.bc_cache.lock()) {
+            *dst = src.clone();
+        }
+    }
+
     pub fn rebuild_graph(&self) -> Result<ProjectGraphResponse, String> {
         // Serve the cached graph if present. Building it is expensive (cycle detection,
         // betweenness centrality, god-module analysis) and it's recomputed on every tool
@@ -615,7 +642,9 @@ impl ApiState {
 
         // Build the import-resolution index ONCE for the whole rebuild (O(N)); each import
         // then resolves via hash lookups instead of scanning every file (was O(N²)).
-        let import_index = ImportIndex::build(&files).with_go_module(&self.root_path);
+        let import_index = ImportIndex::build(&files)
+            .with_go_module(&self.root_path)
+            .with_ts_paths(&self.root_path);
         phase!("index_build");
 
         // Resolve every file's imports in parallel — resolution is a read-only lookup
@@ -664,7 +693,13 @@ impl ApiState {
 
                 let mut file_edges = Vec::new();
                 for import in &file.imports {
-                    if let Some((target, resolution)) = import_index.resolve(import, module_id) {
+                    // A type-only import (TS `import type`, Python `if TYPE_CHECKING:`)
+                    // is a real dependency but erased at runtime: typed `type` so cycle
+                    // detection can ignore it. A function-local Python import runs on
+                    // call, not on load: typed `lazy`, also out of cycle detection.
+                    let (import, kind) = split_import_kind(import);
+                    let edge_type = if source_kind == "runtime" { kind.unwrap_or(source_kind) } else { source_kind };
+                    for (target, resolution) in import_index.resolve_all(import, module_id) {
                         // Reject cross-type edges: a source file importing "json" must not
                         // resolve to a fixture like testdata/review/json.json (doc), and a
                         // doc file must not depend on a source module just for mentioning it.
@@ -677,7 +712,7 @@ impl ApiState {
                         file_edges.push(GraphEdge {
                             source: module_id.clone(),
                             target,
-                            edge_type: source_kind.to_string(),
+                            edge_type: edge_type.to_string(),
                             at_range: None,
                             resolution: resolution.to_string(),
                         });
@@ -707,14 +742,20 @@ impl ApiState {
         fn res_rank(r: &str) -> u8 {
             match r {
                 "exact" => 0,
-                "suffix" => 1,
-                _ => 2,
+                "package" => 1,
+                "suffix" => 2,
+                _ => 3,
             }
+        }
+        // A runtime import beats a lazy one, which beats a type-only one.
+        fn type_rank(t: &str) -> u8 {
+            edge_kind_rank(t)
         }
         edges.sort_unstable_by(|a, b| {
             a.source
                 .cmp(&b.source)
                 .then(a.target.cmp(&b.target))
+                .then(type_rank(&a.edge_type).cmp(&type_rank(&b.edge_type)))
                 .then(res_rank(&a.resolution).cmp(&res_rank(&b.resolution)))
         });
         edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
@@ -767,7 +808,13 @@ impl ApiState {
             structural.iter().filter(|e| e.edge_type != "doc").cloned().collect();
         let code_node_count = nodes.iter().filter(|n| !is_doc_path(&n.path)).count();
 
-        let bridge_analysis = self.analyze_bridges(&nodes, &code_structural);
+        // Bridges are measured on the graph without test imports. Betweenness
+        // runs on the undirected graph, where a test importing A and B is a
+        // path A–test–B: test files came out as bridges (36 of 154 in a TS app)
+        // and lent their shortest paths to the production files they import.
+        let bridge_edges: Vec<GraphEdge> =
+            code_structural.iter().filter(|e| e.edge_type != "test").cloned().collect();
+        let bridge_analysis = self.analyze_bridges(&nodes, &bridge_edges);
 
         for node in &mut nodes {
             if let Some(analysis) = bridge_analysis.get(&node.module_id) {
@@ -786,10 +833,7 @@ impl ApiState {
         let god_modules = self.detect_god_modules(&nodes, &code_structural, files);
         let god_module_count = god_modules.len();
 
-        let edge_tuples: Vec<(String, String)> = code_structural
-            .iter()
-            .map(|e| (e.source.clone(), e.target.clone()))
-            .collect();
+        let edge_tuples = layer_edge_tuples(&code_structural);
 
         let layer_violations = self.detect_layer_violations(&edge_tuples);
         let layer_violation_count = layer_violations.len();
@@ -817,8 +861,22 @@ impl ApiState {
         for edge in &structural {
             *out_degree.entry(edge.source.clone()).or_insert(0) += 1;
             *in_degree.entry(edge.target.clone()).or_insert(0) += 1;
-            if edge.edge_type == "runtime" {
+            // A type-only import still uses the target (a types module that is
+            // only ever `import type`d is not dead).
+            if matches!(edge.edge_type.as_str(), "runtime" | "type" | "lazy") {
                 *runtime_in_degree.entry(edge.target.clone()).or_insert(0) += 1;
+            }
+        }
+        // Go: liveness is per package. A file is reachable when its package is —
+        // imported from outside (any member has runtime in-degree) or holding an
+        // entry file (`main.go` makes the rest of package main alive).
+        let mut live_go_pkgs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &nodes {
+            if is_go_package_member(&node.path)
+                && (is_entry_point_path(&node.path)
+                    || runtime_in_degree.get(&node.module_id).copied().unwrap_or(0) > 0)
+            {
+                live_go_pkgs.insert(go_dir(&node.module_id).to_string());
             }
         }
 
@@ -855,7 +913,9 @@ impl ApiState {
             });
 
             // Dead-code flag: no runtime callers AND not an entry point or test.
-            let dead = runtime_ind == 0 && !is_entry_name && !is_test;
+            let pkg_live = is_go_package_member(&node.path)
+                && live_go_pkgs.contains(go_dir(&node.module_id));
+            let dead = runtime_ind == 0 && !is_entry_name && !is_test && !pkg_live;
             node.is_dead = Some(dead);
             if dead {
                 dead_code_count += 1;
@@ -1033,7 +1093,10 @@ impl ApiState {
             .collect();
 
         // Aggregate cross-directory edges (deduped presence, self-loops dropped).
-        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        // A directory pair linked only by type-only imports stays a `type` edge,
+        // only by type-only and lazy ones a `lazy` edge (both out of cycle
+        // detection); any runtime import makes it `runtime`.
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
         for e in &file_graph.edges {
             if e.resolution == "fuzzy" {
@@ -1045,14 +1108,27 @@ impl ApiState {
             if sf == tf {
                 continue;
             }
-            if seen.insert((sf.clone(), tf.clone())) {
-                edges.push(GraphEdge {
-                    source: sf.clone(),
-                    target: tf.clone(),
-                    edge_type: "runtime".into(),
-                    at_range: None,
-                    resolution: "exact".into(),
-                });
+            let kind = match e.edge_type.as_str() {
+                "type" => "type",
+                "lazy" => "lazy",
+                _ => "runtime",
+            };
+            match seen.get(&(sf.clone(), tf.clone())) {
+                Some(&i) => {
+                    if edge_kind_rank(kind) < edge_kind_rank(&edges[i].edge_type) {
+                        edges[i].edge_type = kind.into();
+                    }
+                }
+                None => {
+                    seen.insert((sf.clone(), tf.clone()), edges.len());
+                    edges.push(GraphEdge {
+                        source: sf.clone(),
+                        target: tf.clone(),
+                        edge_type: kind.into(),
+                        at_range: None,
+                        resolution: "exact".into(),
+                    });
+                }
             }
         }
 
@@ -1505,6 +1581,148 @@ fn path_no_ext(p: &str) -> &str {
     }
 }
 
+/// Join `rel` onto the repo-relative directory `dir` and normalise `.`/`..`
+/// (never above the repo root). `normalize_rel("src/a", "../b/c")` → `"src/b/c"`.
+fn normalize_rel(dir: &str, rel: &str) -> String {
+    let mut parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// Strip `//` and `/* */` comments (outside strings) and trailing commas, so a
+/// tsconfig (JSONC) parses as JSON.
+fn strip_jsonc(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_str = false;
+    while i < c.len() {
+        if in_str {
+            out.push(c[i]);
+            if c[i] == '\\' && i + 1 < c.len() {
+                out.push(c[i + 1]);
+                i += 2;
+                continue;
+            }
+            in_str = c[i] != '"';
+            i += 1;
+        } else if c[i] == '"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+        } else if c[i] == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' {
+                i += 1;
+            }
+        } else if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(c[i]);
+            i += 1;
+        }
+    }
+    let re = regex::Regex::new(r",(\s*[}\]])").unwrap();
+    re.replace_all(&out, "$1").into_owned()
+}
+
+/// Load `baseUrl` + `paths` from the tsconfig/jsconfig at repo-relative
+/// `rel`, following relative `extends` (string or array; the child overrides)
+/// up to a small depth, and — for a solution-style config that sets no
+/// `paths` itself — the configs it lists under `references` (Vite's
+/// tsconfig.json → tsconfig.app.json layout). `None` when nothing applies.
+fn load_ts_paths(root: &Path, rel: &str) -> Option<TsPaths> {
+    fn load(root: &Path, rel: &str, depth: usize, out: &mut TsPaths, have_paths: &mut bool, have_base: &mut bool) -> Option<serde_json::Value> {
+        if depth > 5 {
+            return None;
+        }
+        let text = std::fs::read_to_string(root.join(rel)).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&strip_jsonc(&text)).ok()?;
+        let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let opts = v.get("compilerOptions");
+        // The child's own settings win; only fill what is still unset.
+        if !*have_base {
+            if let Some(b) = opts.and_then(|o| o.get("baseUrl")).and_then(|b| b.as_str()) {
+                out.base_url = Some(normalize_rel(dir, b));
+                *have_base = true;
+            }
+        }
+        if !*have_paths {
+            if let Some(p) = opts.and_then(|o| o.get("paths")).and_then(|p| p.as_object()) {
+                out.paths = p
+                    .iter()
+                    .map(|(k, v)| {
+                        let subs = v
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default();
+                        (k.clone(), subs)
+                    })
+                    .collect();
+                out.paths_dir = dir.to_string();
+                *have_paths = true;
+            }
+        }
+        let parents: Vec<String> = match v.get("extends") {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => {
+                // Later entries override earlier ones: visit them last-first.
+                a.iter().rev().filter_map(|x| x.as_str().map(str::to_string)).collect()
+            }
+            _ => vec![],
+        };
+        for parent in parents {
+            if !(parent.starts_with("./") || parent.starts_with("../")) {
+                continue; // package-provided base (node_modules): not in the scan
+            }
+            let mut p = normalize_rel(dir, &parent);
+            if !p.ends_with(".json") {
+                p.push_str(".json");
+            }
+            load(root, &p, depth + 1, out, have_paths, have_base);
+        }
+        Some(v)
+    }
+    let mut out = TsPaths::default();
+    let (mut have_paths, mut have_base) = (false, false);
+    let v = load(root, rel, 0, &mut out, &mut have_paths, &mut have_base)?;
+    if !have_paths && !have_base {
+        let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        for r in v.get("references").and_then(|r| r.as_array()).into_iter().flatten() {
+            let Some(path) = r.get("path").and_then(|p| p.as_str()) else { continue };
+            let mut p = normalize_rel(dir, path);
+            if !p.ends_with(".json") {
+                p.push_str("/tsconfig.json");
+            }
+            let mut sub = TsPaths::default();
+            let (mut hp, mut hb) = (false, false);
+            if load(root, &p, 1, &mut sub, &mut hp, &mut hb).is_some() && (hp || hb) {
+                if let (true, Some(b)) = (hp, sub.base_url.clone()) {
+                    sub.paths_dir = b;
+                }
+                return Some(sub);
+            }
+        }
+        return None;
+    }
+    // `paths` with a baseUrl are relative to baseUrl.
+    if let (true, Some(b)) = (have_paths, out.base_url.clone()) {
+        out.paths_dir = b;
+    }
+    Some(out)
+}
+
 /// Read the `module` path declared in `<root>/go.mod`, if present.
 /// e.g. a go.mod with `module github.com/acme/widget` → `Some("github.com/acme/widget")`.
 fn read_go_module(root: &Path) -> Option<String> {
@@ -1538,6 +1756,58 @@ fn derive_module_stem(module_path: &str) -> String {
         .to_string()
 }
 
+/// Expand a Rust use tree into one path per leaf:
+/// `crate::{a, b::{c, D}, e::{self, F}}` → `crate::a`, `crate::b::c`,
+/// `crate::b::D`, `crate::e`, `crate::e::F`. `as` aliases are dropped.
+fn expand_rust_use_tree(import: &str) -> Vec<String> {
+    fn split_top(s: &str) -> Vec<&str> {
+        let (mut out, mut depth, mut start) = (Vec::new(), 0usize, 0usize);
+        for (i, c) in s.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(&s[start..]);
+        out
+    }
+    fn go(prefix: &str, tree: &str, out: &mut Vec<String>) {
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return;
+        }
+        match tree.find('{') {
+            Some(open) if tree.ends_with('}') => {
+                let head = tree[..open].trim().trim_end_matches("::");
+                let p = match (prefix.is_empty(), head.is_empty()) {
+                    (true, _) => head.to_string(),
+                    (false, true) => prefix.to_string(),
+                    (false, false) => format!("{prefix}::{head}"),
+                };
+                for part in split_top(&tree[open + 1..tree.len() - 1]) {
+                    go(&p, part, out);
+                }
+            }
+            _ => {
+                let leaf = tree.split(" as ").next().unwrap_or(tree).trim();
+                out.push(match (prefix.is_empty(), leaf) {
+                    (true, l) => l.to_string(),
+                    (false, "self") => prefix.to_string(),
+                    (false, l) => format!("{prefix}::{l}"),
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go("", import.trim().trim_start_matches("use ").trim_end_matches(';'), &mut out);
+    out
+}
+
 /// Precomputed lookup tables for import resolution. Built once per `rebuild_graph`
 /// so resolving every file's imports is O(N + edges) instead of O(N²): the previous
 /// resolver scanned every file for every import, which made large C/C++ trees
@@ -1565,6 +1835,27 @@ struct ImportIndex<'a> {
     /// project root is a Go module. Enables namespace-exact import resolution:
     /// internal imports resolve to their package directory, external ones to no edge.
     go_module: Option<String>,
+    /// Rust file → the leaf paths of its `use` declarations (use trees
+    /// expanded). Lets `crate::Item` follow a crate-root re-export
+    /// (`pub use types::Item;` in lib.rs) to the module that defines it.
+    rust_uses: HashMap<&'a str, Vec<String>>,
+    /// tsconfig/jsconfig path-alias configs by the directory holding the config
+    /// (repo-relative, "" for the root). A JS/TS source uses the nearest one.
+    ts_configs: HashMap<String, TsPaths>,
+}
+
+/// The module-resolution part of a tsconfig.json / jsconfig.json after
+/// `extends` is applied: `baseUrl` and `paths`, both already anchored to
+/// repo-relative directories (TS resolves `baseUrl` against the config that
+/// sets it, and `paths` against `baseUrl` or, without one, against the config
+/// that sets `paths`).
+#[derive(Debug, Clone, Default)]
+struct TsPaths {
+    base_url: Option<String>,
+    /// (pattern, substitutions), e.g. ("@/*", ["./src/*"]).
+    paths: Vec<(String, Vec<String>)>,
+    /// Directory the `paths` substitutions are relative to.
+    paths_dir: String,
 }
 
 impl<'a> ImportIndex<'a> {
@@ -1575,6 +1866,7 @@ impl<'a> ImportIndex<'a> {
         let mut by_segment: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_symbol: HashMap<String, Vec<&'a str>> = HashMap::new();
         let mut by_dir: HashMap<String, Vec<&'a str>> = HashMap::new();
+        let mut rust_uses: HashMap<&'a str, Vec<String>> = HashMap::new();
 
         for (module_id, file) in files.iter() {
             let id = module_id.as_str();
@@ -1609,6 +1901,17 @@ impl<'a> ImportIndex<'a> {
                     }
                 }
             }
+            if id.ends_with(".rs") {
+                let uses: Vec<String> = file
+                    .imports
+                    .iter()
+                    .filter(|i| i.contains("::"))
+                    .flat_map(|i| expand_rust_use_tree(i))
+                    .collect();
+                if !uses.is_empty() {
+                    rust_uses.insert(id, uses);
+                }
+            }
         }
         // Index directories by their last segment for O(candidates) suffix probing.
         let mut by_dir_last: HashMap<String, Vec<String>> = HashMap::new();
@@ -1630,7 +1933,18 @@ impl<'a> ImportIndex<'a> {
         for v in by_dir.values_mut() { v.sort_unstable(); }
         for v in by_dir_last.values_mut() { v.sort_unstable(); }
 
-        Self { ids, by_basename, by_stem, by_segment, by_symbol, by_dir, by_dir_last, go_module: None }
+        Self {
+            ids,
+            by_basename,
+            by_stem,
+            by_segment,
+            by_symbol,
+            by_dir,
+            by_dir_last,
+            go_module: None,
+            rust_uses,
+            ts_configs: HashMap::new(),
+        }
     }
 
     /// Directories whose path ends with `/rel` (or equals `rel`), returning the
@@ -1652,6 +1966,131 @@ impl<'a> ImportIndex<'a> {
     fn with_go_module(mut self, root: &Path) -> Self {
         self.go_module = read_go_module(root);
         self
+    }
+
+    /// Load the tsconfig.json / jsconfig.json `baseUrl` + `paths` of every
+    /// directory that holds scanned files (and its ancestors), so alias imports
+    /// like `@/lib/db` resolve. No-op for trees without such configs.
+    fn with_ts_paths(mut self, root: &Path) -> Self {
+        let mut dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for d in self.by_dir.keys() {
+            let mut cur = d.as_str();
+            loop {
+                if !dirs.insert(cur.to_string()) {
+                    break;
+                }
+                match cur.rsplit_once('/') {
+                    Some((parent, _)) => cur = parent,
+                    None if !cur.is_empty() => cur = "",
+                    None => break,
+                }
+            }
+        }
+        for d in dirs {
+            if d.split('/').any(|seg| seg == "node_modules") {
+                continue;
+            }
+            for name in ["tsconfig.json", "jsconfig.json"] {
+                let rel = if d.is_empty() { name.to_string() } else { format!("{d}/{name}") };
+                if root.join(&rel).is_file() {
+                    if let Some(cfg) = load_ts_paths(root, &rel) {
+                        self.ts_configs.insert(d.clone(), cfg);
+                    }
+                    break;
+                }
+            }
+        }
+        self
+    }
+
+    /// The tsconfig governing `source`: the one in its nearest ancestor directory.
+    fn ts_config_for(&self, source: &str) -> Option<&TsPaths> {
+        if self.ts_configs.is_empty() {
+            return None;
+        }
+        let mut cur = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        loop {
+            if let Some(c) = self.ts_configs.get(cur) {
+                return Some(c);
+            }
+            if cur.is_empty() {
+                return None;
+            }
+            cur = cur.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        }
+    }
+
+    /// Resolve a normalised repo-relative path the way TypeScript's module
+    /// resolution looks it up: the file itself, a `.js`-family specifier
+    /// pointing at its `.ts` source, the path plus a TS/JS extension (incl.
+    /// `.d.ts`), then a directory `index`.
+    fn resolve_js_file(&self, cand: &str) -> Option<String> {
+        const EXTS: [&str; 9] = ["ts", "tsx", "d.ts", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+        if cand.is_empty() {
+            return None;
+        }
+        if self.ids.contains(cand) {
+            return Some(cand.to_string());
+        }
+        for (js, ts) in [(".js", [".ts", ".tsx"]), (".jsx", [".tsx", ".tsx"]), (".mjs", [".mts", ".mts"]), (".cjs", [".cts", ".cts"])] {
+            if let Some(stem) = cand.strip_suffix(js) {
+                for t in ts {
+                    let c = format!("{stem}{t}");
+                    if self.ids.contains(c.as_str()) {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        for ext in EXTS {
+            let c = format!("{cand}.{ext}");
+            if self.ids.contains(c.as_str()) {
+                return Some(c);
+            }
+        }
+        for ext in EXTS {
+            let c = format!("{cand}/index.{ext}");
+            if self.ids.contains(c.as_str()) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// Resolve a bare (non-relative) JS/TS specifier through the governing
+    /// tsconfig: `paths` first (longest matching prefix wins, substitutions in
+    /// order), then `baseUrl`. `Some(None)` = an alias pattern matched but names
+    /// nothing scanned (dangling, no edge); `None` = no alias applies.
+    fn resolve_ts_alias(&self, spec: &str, source: &str) -> Option<Option<String>> {
+        let cfg = self.ts_config_for(source)?;
+        let mut best: Option<(&str, &Vec<String>, &str)> = None; // (prefix, subs, captured)
+        for (pat, subs) in &cfg.paths {
+            let captured = match pat.split_once('*') {
+                None if pat == spec => Some(""),
+                None => None,
+                Some((pre, suf)) => spec
+                    .strip_prefix(pre)
+                    .and_then(|r| r.strip_suffix(suf))
+                    .filter(|_| spec.len() >= pre.len() + suf.len()),
+            };
+            if let Some(cap) = captured {
+                let pre = pat.split('*').next().unwrap_or(pat);
+                if best.map(|(p, _, _)| pre.len() > p.len()).unwrap_or(true) {
+                    best = Some((pre, subs, cap));
+                }
+            }
+        }
+        if let Some((_, subs, cap)) = best {
+            for sub in subs {
+                let target = normalize_rel(&cfg.paths_dir, &sub.replace('*', cap));
+                if let Some(hit) = self.resolve_js_file(&target) {
+                    return Some(Some(hit));
+                }
+            }
+            return Some(None);
+        }
+        let base = cfg.base_url.as_ref()?;
+        self.resolve_js_file(&normalize_rel(base, spec)).map(Some)
     }
 
     /// Pick the candidate whose module_id best matches the import path, preferring a
@@ -1830,17 +2269,308 @@ impl<'a> ImportIndex<'a> {
         None
     }
 
+    /// Go module-aware resolution, authoritative for `.go` sources when a go.mod
+    /// is present (`Some`, possibly empty). `None` means "not a Go import here",
+    /// so the generic ladder runs.
+    fn resolve_go(&self, norm: &str, source: &str) -> Option<Vec<(String, &'static str)>> {
+        // An import is INTERNAL iff it lives under the module path; anything else
+        // is stdlib/third-party and has NO internal edge (never a same-stem guess).
+        if !source.ends_with(".go") {
+            return None;
+        }
+        let module = self.go_module.as_ref()?;
+        let internal_rel: Option<&str> = if norm == module {
+            Some("")
+        } else {
+            norm.strip_prefix(module.as_str())
+                .filter(|r| r.starts_with('/'))
+                .map(|r| &r[1..])
+        };
+        // An internal import names a package DIRECTORY, never a file: the importer
+        // depends on the whole package, so it gets an edge to every non-test `.go`
+        // file of it (resolution `package`). Picking one member — the old
+        // behaviour — sent all 97 imports of a package to one arbitrary file and
+        // manufactured god modules and bridges out of it.
+        let members = internal_rel.and_then(|rel| {
+            self.by_dir.get(rel).or_else(|| {
+                // Package dir not scanned as-is (nested module, generated code):
+                // the shortest directory ending with the suffix.
+                if rel.is_empty() { None } else { self.dir_suffix_files(rel) }
+            })
+        });
+        Some(
+            members
+                .map(|cands| {
+                    cands
+                        .iter()
+                        .filter(|m| **m != source && is_go_package_member(m))
+                        .map(|m| (m.to_string(), "package"))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Resolve an import to every module it names, each with a confidence tag.
+    /// Most imports name one file; a Go import names a package (all its files).
+    fn resolve_all(&self, import: &str, source: &str) -> Vec<(String, &'static str)> {
+        if source.ends_with(".go") && self.go_module.is_some() {
+            let (module_path, _) = parse_import_parts(import);
+            let norm = module_path.trim_start_matches("./").trim_start_matches('/');
+            if let Some(hits) = self.resolve_go(norm, source) {
+                return hits;
+            }
+        }
+        // Rust grouped `use crate::{a, b::{c, D}}` names several modules.
+        if source.ends_with(".rs") && import.contains('{') {
+            let mut out: Vec<(String, &'static str)> = Vec::new();
+            for path in expand_rust_use_tree(import) {
+                if let Some(hit) = self.resolve(&path, source) {
+                    if !out.iter().any(|(t, _)| *t == hit.0) {
+                        out.push(hit);
+                    }
+                }
+            }
+            return out;
+        }
+        self.resolve(import, source).into_iter().collect()
+    }
+
+    /// Rust path anchored precisely: `crate::` at the crate root (nearest
+    /// ancestor directory with `lib.rs`/`main.rs`), `self::`/`super::` at the
+    /// source module. The longest prefix naming a module file (`x.rs` or
+    /// `x/mod.rs`) wins; with no module segment left (`super::Foo`) it is the
+    /// anchor module's own file. `None` → caller falls back to suffix matching.
+    fn resolve_rust_anchored(&self, path: &str, source: &str) -> Option<String> {
+        self.resolve_rust_anchored_at(path, source, 0)
+    }
+
+    fn resolve_rust_anchored_at(&self, path: &str, source: &str, depth: usize) -> Option<String> {
+        if depth > 3 {
+            return None;
+        }
+        // Rust 2018 uniform paths: `use types::X` names a child module of the
+        // current module when one exists (lib.rs `pub use types::X;`).
+        let first = path.trim_start_matches("::").split("::").next().unwrap_or("").trim();
+        if !first.is_empty() && !matches!(first, "crate" | "self" | "super") && path.contains("::") {
+            return self.resolve_rust_anchored_at(&format!("self::{}", path.trim()), source, depth + 1);
+        }
+        let head = path.split('{').next().unwrap_or(path);
+        let head = head.split(" as ").next().unwrap_or(head).trim().trim_end_matches("::");
+        let mut segs: Vec<&str> = head.split("::").map(str::trim).filter(|s| !s.is_empty()).collect();
+        if segs.is_empty() {
+            return None;
+        }
+        let dir_of = |p: &str| p.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        // Directory holding the CHILD modules of the source file's module.
+        let children_dir = |file: &str| -> String {
+            let (d, name) = file.rsplit_once('/').unwrap_or(("", file));
+            match name {
+                "mod.rs" | "lib.rs" | "main.rs" => d.to_string(),
+                _ => normalize_rel(d, name.trim_end_matches(".rs")),
+            }
+        };
+        let anchor: String = match segs[0] {
+            "crate" => {
+                let mut d = dir_of(source);
+                loop {
+                    let has_root = ["lib.rs", "main.rs"].iter().any(|r| {
+                        let c = if d.is_empty() { r.to_string() } else { format!("{d}/{r}") };
+                        self.ids.contains(c.as_str())
+                    });
+                    if has_root {
+                        break d;
+                    }
+                    if d.is_empty() {
+                        return None;
+                    }
+                    d = dir_of(&d);
+                }
+            }
+            "self" => children_dir(source),
+            "super" => {
+                let mut d = children_dir(source);
+                let mut i = 0;
+                while segs.get(i) == Some(&"super") {
+                    if d.is_empty() {
+                        return None;
+                    }
+                    d = dir_of(&d);
+                    i += 1;
+                }
+                segs.drain(..i.saturating_sub(1));
+                d
+            }
+            _ => return None,
+        };
+        segs.remove(0);
+        let module_file = |p: &str| -> Option<String> {
+            [format!("{p}.rs"), format!("{p}/mod.rs")]
+                .into_iter()
+                .find(|c| self.ids.contains(c.as_str()))
+        };
+        for k in (1..=segs.len()).rev() {
+            let cand = normalize_rel(&anchor, &segs[..k].join("/"));
+            if let Some(hit) = module_file(&cand) {
+                return (hit != source).then_some(hit);
+            }
+        }
+        // No module segment (`crate::Item`, `super::Item`): the item lives in
+        // the anchor module's own file — or that file re-exports it (`pub use
+        // types::Item;`), in which case follow the re-export to the module
+        // that defines it instead of pointing at the facade.
+        let own = [
+            module_file(&anchor),
+            ["lib.rs", "main.rs"].iter().find_map(|r| {
+                let c = if anchor.is_empty() { r.to_string() } else { format!("{anchor}/{r}") };
+                self.ids.contains(c.as_str()).then_some(c)
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .next()?;
+        if let (Some(item), Some(uses)) = (segs.first(), self.rust_uses.get(own.as_str())) {
+            let suffix = format!("::{item}");
+            if let Some(reexport) = uses.iter().find(|u| u.ends_with(&suffix)) {
+                if let Some(hit) = self.resolve_rust_anchored_at(reexport, &own, depth + 1) {
+                    return (hit != source).then_some(hit);
+                }
+            }
+        }
+        (own != source).then_some(own)
+    }
+
+    /// Python relative import (`from .x import y`, `from .. import z`),
+    /// anchored at the source file's package: one dot is the file's own
+    /// directory, each further dot one level up. Tries the submodule
+    /// `<pkg>/<x>/<y>` first, then the module `<pkg>/<x>` (file or package
+    /// `__init__`). `None` = not a relative import; `Some(None)` = dangling.
+    fn resolve_py_relative(&self, import: &str, source: &str) -> Option<Option<String>> {
+        let rest = import.trim().strip_prefix("from ")?;
+        if !rest.starts_with('.') {
+            return None;
+        }
+        let (module, names) = rest.split_once(" import ").unwrap_or((rest, ""));
+        let module = module.trim();
+        let dots = module.chars().take_while(|c| *c == '.').count();
+        let tail = module[dots..].replace('.', "/");
+        let mut base: Vec<&str> = source.split('/').collect();
+        base.pop(); // file name
+        for _ in 1..dots {
+            base.pop()?;
+        }
+        let pkg = normalize_rel(&base.join("/"), &tail);
+        let name = names.split(',').next().unwrap_or("").trim();
+        let name = name.split(" as ").next().unwrap_or("").trim();
+        let lookup = |p: &str| -> Option<String> {
+            if p.is_empty() {
+                return None;
+            }
+            [format!("{p}.py"), format!("{p}.pyi"), format!("{p}/__init__.py")]
+                .into_iter()
+                .find(|c| c != source && self.ids.contains(c.as_str()))
+        };
+        if !name.is_empty() && name != "*" {
+            if let Some(hit) = lookup(&normalize_rel(&pkg, name)) {
+                return Some(Some(hit));
+            }
+        }
+        Some(lookup(&pkg))
+    }
+
+    /// Python absolute import (`import a.b`, `from a.b import c`): the module
+    /// file `a/b.py` / `a/b.pyi` or package `a/b/__init__.py`, where `a` must
+    /// be TOP-LEVEL — its directory holds no `__init__.py` (repo root, `src/`
+    /// layout, a scripts dir). That is how `sys.path` sees it: inside package
+    /// `ingestible`, `logging.py` is `ingestible.logging`, so a stdlib
+    /// `import logging` no longer lands on it (it did, as a fuzzy stem match,
+    /// for every module that logs). The submodule `a/b/c` is tried before
+    /// `a/b`. No match → external (stdlib / third-party), no edge.
+    fn resolve_py_absolute(&self, module: &str, symbol: Option<&str>, source: &str) -> Option<String> {
+        let module = module.trim_matches('/');
+        if module.is_empty() || module.starts_with('.') {
+            return None;
+        }
+        // `prefix` = the directory the first module segment lives in.
+        let top_level_at = |prefix: &str| -> bool {
+            let init = if prefix.is_empty() { "__init__.py".to_string() } else { format!("{prefix}/__init__.py") };
+            !self.ids.contains(init.as_str())
+        };
+        let find = |m: &str| -> Option<String> {
+            let last = m.rsplit('/').next().unwrap_or(m);
+            let mut hits: Vec<&'a str> = Vec::new();
+            let mut consider = |c: &'a str, named: &str| {
+                if named == m {
+                    if top_level_at("") {
+                        hits.push(c);
+                    }
+                } else if let Some(prefix) = named.strip_suffix(m).and_then(|p| p.strip_suffix('/')) {
+                    if top_level_at(prefix) {
+                        hits.push(c);
+                    }
+                }
+            };
+            for &c in self.by_stem.get(last).into_iter().flatten() {
+                if c.ends_with(".py") || c.ends_with(".pyi") {
+                    consider(c, path_no_ext(c));
+                }
+            }
+            for &c in self.by_stem.get("__init__").into_iter().flatten() {
+                if let Some(pkg) = c.strip_suffix("/__init__.py") {
+                    consider(c, pkg);
+                }
+            }
+            Self::pick_deterministic(&hits, source)
+        };
+        if let Some(sym) = symbol.filter(|s| !s.is_empty() && *s != "*") {
+            if let Some(hit) = find(&format!("{module}/{sym}")) {
+                return Some(hit);
+            }
+        }
+        find(module)
+    }
+
     fn resolve(&self, import: &str, source: &str) -> Option<(String, &'static str)> {
         let (module_path, symbol_hint) = parse_import_parts(import);
+        if source.ends_with(".py") || source.ends_with(".pyi") {
+            if let Some(hit) = self.resolve_py_relative(import, source) {
+                return hit.map(|h| (h, "exact"));
+            }
+            return self
+                .resolve_py_absolute(&module_path, symbol_hint.as_deref(), source)
+                .map(|h| (h, "suffix"));
+        }
 
         // Relative specifier (JS/TS `./`, `../`; relative C includes): resolve
         // against the source directory. Path-precise, and authoritative — a
         // relative import names something local, so a miss is a dangling ref
         // (no edge), never a reason to fuzzy-guess a same-name file elsewhere.
+        let js_source = lang_family(source) == Some("js");
         if module_path.starts_with("./") || module_path.starts_with("../") {
+            // JS/TS: TypeScript's lookup order (`.ts` before `.css`, `.d.ts`,
+            // `.js` → `.ts`, `index.*`) before the generic any-extension match.
+            if js_source {
+                let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                if let Some(hit) = self.resolve_js_file(&normalize_rel(dir, &module_path)) {
+                    if hit != source {
+                        return Some((hit, "exact"));
+                    }
+                }
+            }
             return self
                 .resolve_relative(&module_path, source)
                 .map(|hit| (hit, "exact"));
+        }
+
+        // JS/TS path aliases (tsconfig/jsconfig `paths`, then `baseUrl`), e.g.
+        // `@/lib/db` → src/lib/db.ts. An alias that matches but names nothing
+        // scanned is a dangling import, not a reason to guess.
+        if js_source {
+            match self.resolve_ts_alias(&module_path, source) {
+                Some(Some(hit)) if hit != source => return Some((hit, "exact")),
+                Some(_) => return None,
+                None => {}
+            }
         }
 
         let norm = module_path
@@ -1854,42 +2584,11 @@ impl<'a> ImportIndex<'a> {
             .map(str::to_string);
         let stem = derive_module_stem(&module_path);
 
-        // 0. Go module-aware resolution. Authoritative for .go sources when a go.mod
-        //    is present: an import is INTERNAL iff it lives under the module path, in
-        //    which case it names a package DIRECTORY — resolve to that directory's
-        //    files, never to a same-stem file in an unrelated package. Anything not
-        //    under the module path is stdlib/third-party and has NO internal edge.
-        //    This branch always returns, so Go imports never reach the fuzzy
-        //    basename/stem/segment fallbacks below (which fabricate cross-package edges).
-        if source.ends_with(".go") {
-            if let Some(module) = &self.go_module {
-                let internal_rel: Option<&str> = if norm == *module {
-                    Some("")
-                } else {
-                    norm.strip_prefix(module.as_str())
-                        .filter(|r| r.starts_with('/'))
-                        .map(|r| &r[1..])
-                };
-                match internal_rel {
-                    // The module root package itself — no single file to point at.
-                    Some("") => return None,
-                    Some(rel) => {
-                        // Exact package directory.
-                        if let Some(cands) = self.by_dir.get(rel) {
-                            return Self::pick_deterministic(cands, source).map(|t| (t, "exact"));
-                        }
-                        // Package dir not scanned as-is (nested module, generated code):
-                        // accept the shortest directory whose path ends with the suffix.
-                        if let Some(cands) = self.dir_suffix_files(rel) {
-                            return Self::pick_deterministic(cands, source).map(|t| (t, "suffix"));
-                        }
-                        // Internal by namespace but absent from the scan → honest miss.
-                        return None;
-                    }
-                    // Not under the module path → external (stdlib / third-party).
-                    None => return None,
-                }
-            }
+        // 0. Go module-aware resolution (see `resolve_go`); authoritative, so Go
+        //    imports never reach the fuzzy basename/stem/segment fallbacks below.
+        //    Single-target callers get the package's first file.
+        if let Some(hits) = self.resolve_go(&norm, source) {
+            return hits.into_iter().next();
         }
 
         // 0.5 Rust module-path resolution. Authoritative for .rs sources: a
@@ -1903,6 +2602,9 @@ impl<'a> ImportIndex<'a> {
         //     structural (bridges/cycles/health/roles) analysis. An external crate
         //     (serde, std, tokio, …) matches nothing local and yields no edge.
         if source.ends_with(".rs") {
+            if let Some(hit) = self.resolve_rust_anchored(import, source) {
+                return Some((hit, "exact"));
+            }
             if let Some(module_rel) = rust_module_path(import) {
                 let mut segs: Vec<&str> = module_rel.split('/').collect();
                 while !segs.is_empty() {
@@ -1962,10 +2664,32 @@ impl<'a> ImportIndex<'a> {
                 .map(|hit| (hit, "suffix"));
         }
 
-        // 3. Extensionless import (Rust `mod`, Python `import`, Go package): match by stem.
+        // Fuzzy fallbacks (3–5) below are guesses. Two limits keep them honest:
+        // - A bare JS/TS specifier that no relative path, alias or baseUrl
+        //   resolved is an npm package (`drizzle-orm`, `react`): never guessed.
+        //   The segment guess used to send `drizzle-orm` to drizzle/0000_init.sql.
+        // - A code import only lands on a file of the same language family —
+        //   never on SQL, docs or another language's file. Non-code sources
+        //   (doc cross-references) keep the old behaviour.
+        if js_source {
+            return None;
+        }
+        let family = lang_family(source);
+        let fuzzy_pick = |cands: &[&'a str]| -> Option<String> {
+            match family {
+                Some(f) => {
+                    let same: Vec<&'a str> =
+                        cands.iter().copied().filter(|m| lang_family(m) == Some(f)).collect();
+                    Self::pick_deterministic(&same, source)
+                }
+                None => Self::pick_deterministic(cands, source),
+            }
+        };
+
+        // 3. Extensionless import (Rust `mod`, Python `import`): match by stem.
         if !has_ext {
             if let Some(cands) = self.by_stem.get(&stem) {
-                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                if let Some(hit) = fuzzy_pick(cands) {
                     return Some((hit, "fuzzy"));
                 }
             }
@@ -1974,7 +2698,7 @@ impl<'a> ImportIndex<'a> {
         // 4. Loose segment fallback: stem appears as a path component.
         if stem.len() >= 3 {
             if let Some(cands) = self.by_segment.get(&stem.to_lowercase()) {
-                if let Some(hit) = Self::pick_deterministic(cands, source) {
+                if let Some(hit) = fuzzy_pick(cands) {
                     return Some((hit, "fuzzy"));
                 }
             }
@@ -1984,7 +2708,7 @@ impl<'a> ImportIndex<'a> {
         if let Some(sym) = &symbol_hint {
             if sym.len() >= 4 {
                 if let Some(cands) = self.by_symbol.get(sym) {
-                    if let Some(hit) = Self::pick_deterministic(cands, source) {
+                    if let Some(hit) = fuzzy_pick(cands) {
                         return Some((hit, "fuzzy"));
                     }
                 }
@@ -1993,6 +2717,103 @@ impl<'a> ImportIndex<'a> {
 
         None
     }
+}
+
+/// Split the marker the extractors put in front of an import (`"type ./x"`,
+/// `"lazy from a import b"`, see `TYPE_ONLY_PREFIX` and `LAZY_PREFIX`) from the
+/// import text: the bare import and the edge kind it asks for, if any.
+fn split_import_kind(import: &str) -> (&str, Option<&'static str>) {
+    if let Some(rest) = import.strip_prefix(crate::mapper::TYPE_ONLY_PREFIX) {
+        (rest, Some("type"))
+    } else if let Some(rest) = import.strip_prefix(crate::mapper::LAZY_PREFIX) {
+        (rest, Some("lazy"))
+    } else {
+        (import, None)
+    }
+}
+
+/// Strength of a code edge kind for merging duplicates: `runtime` (and any
+/// other kind) beats `lazy`, which beats `type`.
+fn edge_kind_rank(t: &str) -> u8 {
+    match t {
+        "type" => 2,
+        "lazy" => 1,
+        _ => 0,
+    }
+}
+
+/// Language family of a source file by extension, `None` for non-code
+/// (docs, data, SQL, styles, …). Files of one family can import each other.
+fn lang_family(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        "py" | "pyi" => "py",
+        "go" => "go",
+        "rs" => "rs",
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => "c",
+        "java" | "kt" | "kts" | "scala" => "jvm",
+        "cs" => "cs",
+        "rb" => "rb",
+        "php" => "php",
+        "swift" => "swift",
+        "lua" => "lua",
+        "sh" | "bash" | "zsh" | "fish" => "sh",
+        _ => return None,
+    })
+}
+
+/// Edges that can close a dependency cycle: confidently resolved (not
+/// `fuzzy`) and present when the module loads (not a type-only `type` edge,
+/// not a function-local `lazy` one).
+fn is_cycle_edge(e: &GraphEdge) -> bool {
+    e.resolution != "fuzzy" && e.edge_type != "type" && e.edge_type != "lazy"
+}
+
+/// True when `a` and `b` are files of one Go package (same directory). Go has
+/// no file-level imports: every file of a package sees every other one, so two
+/// such files are linked without an import edge and their co-change is not
+/// "hidden" coupling. Hidden-coupling filters must treat this as a link. The
+/// graph does not materialise these links as edges — a package is a clique by
+/// definition (157 files in one CKB package = 12k edges), it would turn every
+/// package into a cycle, and every consumer of `edges` (dependents, blast
+/// radius, PageRank) would read siblings as importers.
+pub fn same_go_package(a: &str, b: &str) -> bool {
+    a != b && a.ends_with(".go") && b.ends_with(".go") && go_dir(a) == go_dir(b)
+}
+
+/// Directory of a repo-relative path ("" at the root) — a Go file's package.
+fn go_dir(p: &str) -> &str {
+    p.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// A file that is part of a Go package's compiled API: a non-test `.go` file.
+/// Importers of the package see these; `_test.go` files are only visible to
+/// the package's own tests.
+/// Edges as a layer check counts them. A Go import resolves to every file of
+/// the imported package (`"package"` edges), but it is one dependency: it
+/// becomes one edge to the package directory, written with a trailing `/`
+/// (`internal/query/`) so layer folders match with or without one. Without
+/// this, one `import ".../internal/query"` across a boundary was reported once
+/// per file of the package (81 violations for a single import in CKB).
+/// Root-package files keep their per-file edges: there is no directory to name.
+pub(crate) fn layer_edge_tuples(edges: &[GraphEdge]) -> Vec<(String, String)> {
+    let mut seen: std::collections::HashSet<(&str, String)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in edges {
+        let target = match (e.resolution.as_str(), e.target.rsplit_once('/')) {
+            ("package", Some((dir, _))) => format!("{dir}/"),
+            _ => e.target.clone(),
+        };
+        if seen.insert((e.source.as_str(), target.clone())) {
+            out.push((e.source.clone(), target));
+        }
+    }
+    out
+}
+
+fn is_go_package_member(path: &str) -> bool {
+    path.ends_with(".go") && !path.ends_with("_test.go")
 }
 
 pub fn is_entry_point_path(path: &str) -> bool {
@@ -2020,8 +2841,14 @@ pub fn is_entry_point_path(path: &str) -> bool {
 }
 
 pub(crate) fn is_test_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("_test.")
+    // Leading `/` so a repo-relative `tests/x.ts` matches `/tests/` like an
+    // absolute path does; graph module ids are relative and a top-level
+    // `tests/` directory used to count as production code.
+    let lower = format!("/{}", path.to_lowercase().trim_start_matches('/'));
+    let name = lower.rsplit('/').next().unwrap_or("");
+    (name.starts_with("test_") && name.ends_with(".py"))
+        || name == "conftest.py"
+        || lower.contains("_test.")
         || lower.contains(".test.")
         || lower.contains(".spec.")
         || lower.contains("/test/")
@@ -2162,7 +2989,14 @@ impl ApiState {
             // bc is already normalized by (n-1)*(n-2) inside compute_betweenness_centrality
             let bridge_score = if is_hub { 0.0 } else { bc * 1000.0 };
 
-            let is_bridge = !is_hub && bridge_score > 0.0;
+            // A bridge carries a real share of the graph's shortest paths, not a
+            // sliver: `bridge_score > 0` flagged any node on ANY shortest path
+            // (233 of 1,321 CKB files, 176 of 698 in a TS app — mostly scores
+            // under 0.5). A Go package import fanning out to every package file
+            // spreads paths over all members and pushed that to 544, while the
+            // count at >= 1.0 barely moved (66 → 77). BRIDGE_MIN_SCORE is that
+            // floor: on at least 0.1% of all shortest paths.
+            let is_bridge = !is_hub && bridge_score >= BRIDGE_MIN_SCORE;
 
             let risk_level = if is_bridge && bridge_score > 10.0 {
                 "CRITICAL".to_string()
@@ -2445,7 +3279,11 @@ impl ApiState {
         // low-confidence stem/segment guesses — counting them fabricated the
         // false import cycles this graph used to report (e.g. 22 "cycles" in a Go
         // repo, which the language forbids).
-        for edge in edges.iter().filter(|e| e.resolution != "fuzzy") {
+        //
+        // Type-only edges (`import type`, `if TYPE_CHECKING:`) are erased at
+        // runtime, so a loop that closes only through one is not a dependency
+        // cycle — two of three "cycles" in a TS app were exactly that.
+        for edge in edges.iter().filter(|e| is_cycle_edge(e)) {
             graph.add_edge(edge.source.as_str(), edge.target.as_str(), ());
         }
 
@@ -2492,61 +3330,79 @@ impl ApiState {
         cycles
     }
 
+    /// God modules: files that do too much THEMSELVES — wide outgoing
+    /// dependency breadth on top of a large surface. Fan-in plays no part: a
+    /// file many others import is a popular utility or a package's API, and the
+    /// old degree-based rule (undirected degree > 50 plus an import-text
+    /// "cohesion") flagged exactly those.
+    ///
+    /// For each non-test node:
+    /// - `breadth` (reported as `degree`) = distinct modules it depends on over
+    ///   runtime and type edges. A Go package import fans out to every file of
+    ///   the package, so `package`-resolved targets count once per package
+    ///   directory, not once per file.
+    /// - `size` = its signature count.
+    /// - `cohesion_score` = share of those dependencies inside the node's own
+    ///   area (first two directory components, e.g. `internal/query`); low =
+    ///   it reaches across the codebase.
+    ///
+    /// Flagged when `breadth >= GOD_MIN_BREADTH && size >= GOD_MIN_SIGNATURES`.
+    /// Severity: CRITICAL at 2× both thresholds, HIGH at 1.5×, else MEDIUM.
     fn detect_god_modules(
         &self,
         nodes: &[GraphNode],
-        _edges: &[GraphEdge],
-        files: &HashMap<String, MappedFile>,
+        edges: &[GraphEdge],
+        _files: &HashMap<String, MappedFile>,
     ) -> Vec<GodModuleInfo> {
-        let god_threshold = 50;
-        let mut god_modules = Vec::new();
-
-        for node in nodes {
-            let degree = node.degree.unwrap_or(0);
-
-            if degree > god_threshold {
-                let file = files.get(&node.module_id);
-
-                let import_types: std::collections::HashSet<&str> = file
-                    .map(|f| {
-                        f.imports
-                            .iter()
-                            .filter_map(|i| {
-                                let parts: Vec<&str> = i.split('/').collect();
-                                parts.get(1).or(parts.first()).map(|s| *s)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                let unique_types = import_types.len() as f64;
-                let cohesion = if degree > 0 {
-                    (unique_types / degree as f64).min(1.0)
-                } else {
-                    0.0
-                };
-
-                if cohesion < 0.3 {
-                    let severity = if degree > 100 {
-                        "CRITICAL"
-                    } else if degree > 75 {
-                        "HIGH"
-                    } else {
-                        "MEDIUM"
-                    };
-
-                    god_modules.push(GodModuleInfo {
-                        module_id: node.module_id.clone(),
-                        path: self.rel(&node.path),
-                        degree,
-                        cohesion_score: cohesion,
-                        severity: severity.to_string(),
-                    });
-                }
+        fn dir_of(p: &str) -> &str {
+            p.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+        }
+        // First two directory components of a directory path.
+        fn area(dir: &str) -> String {
+            dir.split('/').take(2).collect::<Vec<_>>().join("/")
+        }
+        // node → dependency unit → that unit's directory.
+        let mut deps: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+        for e in edges {
+            if !matches!(e.edge_type.as_str(), "runtime" | "type" | "lazy") {
+                continue;
             }
+            let dir = dir_of(&e.target);
+            let unit = if e.resolution == "package" { dir } else { e.target.as_str() };
+            deps.entry(e.source.as_str()).or_default().insert(unit, dir);
         }
 
-        god_modules.sort_by(|a, b| b.degree.cmp(&a.degree));
+        let mut god_modules = Vec::new();
+        for node in nodes {
+            if is_test_path(&node.path) {
+                continue;
+            }
+            let Some(units) = deps.get(node.module_id.as_str()) else { continue };
+            let breadth = units.len();
+            let size = node.signature_count;
+            if breadth < GOD_MIN_BREADTH || size < GOD_MIN_SIGNATURES {
+                continue;
+            }
+            let own = area(dir_of(&node.module_id));
+            let local = units.values().filter(|d| area(d) == own).count();
+            let cohesion = local as f64 / breadth as f64;
+            let severity = if breadth >= 2 * GOD_MIN_BREADTH && size >= 2 * GOD_MIN_SIGNATURES {
+                "CRITICAL"
+            } else if breadth * 2 >= 3 * GOD_MIN_BREADTH && size * 2 >= 3 * GOD_MIN_SIGNATURES {
+                "HIGH"
+            } else {
+                "MEDIUM"
+            };
+            god_modules.push(GodModuleInfo {
+                module_id: node.module_id.clone(),
+                path: self.rel(&node.path),
+                degree: breadth,
+                cohesion_score: cohesion,
+                severity: severity.to_string(),
+            });
+        }
+
+        god_modules.sort_by(|a, b| b.degree.cmp(&a.degree).then(a.module_id.cmp(&b.module_id)));
         god_modules
     }
 
@@ -2665,7 +3521,7 @@ impl ApiState {
         // Predict cycles only from structural (non-fuzzy) edges, matching
         // detect_cycles — a "will create a cycle" warning must not rest on a
         // low-confidence stem guess.
-        let structural = || edges.iter().filter(|e| e.resolution != "fuzzy");
+        let structural = || edges.iter().filter(|e| is_cycle_edge(e));
 
         for edge in structural() {
             if edge.source != target_module && edge.target != target_module {
@@ -2906,10 +3762,10 @@ mod tests {
         let src = "internal/backends/orch.go";
 
         // Internal import → the CORRECT package directory (not internal/a2a/errors.go),
-        // tagged as an exact resolution.
+        // tagged as a package resolution.
         assert_eq!(
             idx.resolve("github.com/acme/widget/internal/errors", src),
-            Some(("internal/errors/errors.go".to_string(), "exact")),
+            Some(("internal/errors/errors.go".to_string(), "package")),
         );
         // Stdlib import → no fabricated internal edge.
         assert_eq!(idx.resolve("sync", src), None);
@@ -2947,7 +3803,7 @@ mod tests {
         );
         // Monorepo/aliased path import → the exact file by suffix.
         assert_eq!(
-            idx.resolve("import Button from 'packages/ui/Button'", src),
+            idx.resolve("import Button from 'packages/ui/Button'", "app/page.tsx"),
             Some(("packages/ui/Button.tsx".to_string(), "suffix")),
         );
         // A qualified import that matches nothing local is external → no edge
@@ -2980,25 +3836,82 @@ mod tests {
         // `use crate::substrate::Substrate` — trailing type stripped, module file.
         assert_eq!(
             idx.resolve("crate::substrate::Substrate", src),
-            Some(("src/substrate.rs".to_string(), "suffix")),
+            Some(("src/substrate.rs".to_string(), "exact")),
         );
         // Qualified path disambiguates the same-stem trap: io, not selfhood.
         assert_eq!(
             idx.resolve("crate::io::language::converse", src),
-            Some(("src/io/language.rs".to_string(), "suffix")),
+            Some(("src/io/language.rs".to_string(), "exact")),
         );
         // `use crate::io` → the module directory's `mod.rs` entry point.
         assert_eq!(
             idx.resolve("crate::io", src),
-            Some(("src/io/mod.rs".to_string(), "suffix")),
+            Some(("src/io/mod.rs".to_string(), "exact")),
         );
         // Grouped import: module before the `{…}` resolves.
         assert_eq!(
             idx.resolve("crate::lifecycle::daemon::{Daemon, tick}", src),
-            Some(("src/lifecycle/daemon.rs".to_string(), "suffix")),
+            Some(("src/lifecycle/daemon.rs".to_string(), "exact")),
         );
         // External crate names nothing local → no edge (no fuzzy fabrication).
         assert_eq!(idx.resolve("serde::Deserialize", "src/substrate.rs"), None);
+    }
+
+    // Rust paths anchor precisely: `crate::` at the crate root of the SOURCE
+    // (workspace crates do not bleed into each other), `super::`/`self::` at the
+    // source module, a grouped use tree names every module in it, and
+    // `super::Item` with no module segment is the parent module's own file.
+    #[test]
+    fn rust_paths_anchor_at_crate_root_and_module() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in [
+            "core/src/lib.rs",
+            "core/src/readout.rs",
+            "core/src/net/mod.rs",
+            "core/src/net/tcp.rs",
+            "core/src/net/udp.rs",
+            "cli/src/main.rs",
+            "cli/src/readout.rs", // trap: same path inside another crate
+        ] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        let ex = |t: &str| Some((t.to_string(), "exact"));
+        assert_eq!(idx.resolve("crate::readout::ReadoutMlp", "core/src/net/tcp.rs"), ex("core/src/readout.rs"));
+        assert_eq!(idx.resolve("crate::readout::f", "cli/src/main.rs"), ex("cli/src/readout.rs"));
+        assert_eq!(idx.resolve("super::udp::Socket", "core/src/net/tcp.rs"), ex("core/src/net/udp.rs"));
+        assert_eq!(idx.resolve("super::Config", "core/src/net/tcp.rs"), ex("core/src/net/mod.rs"));
+        assert_eq!(idx.resolve("super::readout::x", "core/src/net/mod.rs"), ex("core/src/readout.rs"));
+        assert_eq!(idx.resolve("self::tcp::connect", "core/src/net/mod.rs"), ex("core/src/net/tcp.rs"));
+        assert_eq!(idx.resolve("super::super::readout::x", "core/src/net/tcp.rs"), ex("core/src/readout.rs"));
+        let mut grouped: Vec<String> = idx
+            .resolve_all("crate::{readout::ReadoutMlp, net::{self, tcp::connect, udp}}", "core/src/lib.rs")
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        grouped.sort();
+        assert_eq!(
+            grouped,
+            vec!["core/src/net/mod.rs", "core/src/net/tcp.rs", "core/src/net/udp.rs", "core/src/readout.rs"]
+        );
+        // `crate::Item` follows the crate root's re-export to the defining
+        // module; a bare `use types::X` in lib.rs is the child module.
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        files.insert(
+            "src/lib.rs".into(),
+            MappedFile::from_minimal("src/lib.rs".into(), vec!["types".into(), "types::{MorphonId, Other}".into()]),
+        );
+        for p in ["src/types.rs", "src/system.rs"] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx2 = ImportIndex::build(&files);
+        assert_eq!(idx2.resolve("crate::MorphonId", "src/system.rs"), ex("src/types.rs"));
+        assert_eq!(idx2.resolve("types::{MorphonId, Other}", "src/lib.rs"), ex("src/types.rs"));
+        assert_eq!(idx2.resolve("crate::Unknown", "src/system.rs"), ex("src/lib.rs"));
+        assert_eq!(
+            expand_rust_use_tree("crate::{a, b::{c, D as E}, f::{self, G}}"),
+            vec!["crate::a", "crate::b::c", "crate::b::D", "crate::f", "crate::f::G"]
+        );
     }
 
     // JS/TS relative specifiers resolve against the SOURCE directory, not a
@@ -3138,6 +4051,376 @@ mod tests {
             "expected resolved a->b edge, got edges: {:?}",
             graph.edges
         );
+    }
+
+    /// A graph over `files` (module_id → imports) rooted in a temp dir that holds
+    /// the given extra files (go.mod, tsconfig.json, …).
+    fn graph_with(
+        tag: &str,
+        disk: &[(&str, &str)],
+        files: &[(&str, Vec<&str>)],
+    ) -> ProjectGraphResponse {
+        let tmp = std::env::temp_dir().join(format!("cg_graph_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (rel, body) in disk {
+            let p = tmp.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        let state = ApiState::new(tmp.clone());
+        {
+            let mut m = state.mapped_files.lock().unwrap();
+            for (id, imports) in files {
+                m.insert(
+                    id.to_string(),
+                    MappedFile::from_minimal(
+                        id.to_string(),
+                        imports.iter().map(|s| s.to_string()).collect(),
+                    ),
+                );
+            }
+        }
+        let g = state.rebuild_graph().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        g
+    }
+
+    fn has_edge(g: &ProjectGraphResponse, s: &str, t: &str) -> Option<(String, String)> {
+        g.edges
+            .iter()
+            .find(|e| e.source == s && e.target == t)
+            .map(|e| (e.edge_type.clone(), e.resolution.clone()))
+    }
+
+    #[test]
+    fn top_level_test_dirs_are_tests() {
+        for p in ["tests/support/e2e.ts", "tests/_gen.py", "test/x.go", "src/pkg/test_io.py",
+                  "conftest.py", "/abs/repo/tests/a.rs", "web/a.spec.ts", "x_test.go"] {
+            assert!(is_test_path(p), "{p}");
+        }
+        for p in ["src/attestation.rs", "src/latest.ts", "contest/main.py", "src/testing_utils.py"] {
+            assert!(!is_test_path(p), "{p}");
+        }
+    }
+
+    // Betweenness runs on the undirected graph: a test importing a and b would
+    // sit on a path a–test–b and come out as a bridge. Test imports are left
+    // out of bridge analysis; the production file joining a and b stays one.
+    #[test]
+    fn test_files_are_not_bridges() {
+        let g = graph_with(
+            "bridgetest",
+            &[],
+            &[
+                ("src/a.ts", vec![]),
+                ("src/b.ts", vec![]),
+                ("src/c.ts", vec!["./a", "./b"]),
+                ("tests/ab.test.ts", vec!["../src/a", "../src/b"]),
+            ],
+        );
+        assert!(has_edge(&g, "tests/ab.test.ts", "src/a.ts").is_some(), "{:?}", g.edges);
+        let bridge = |id: &str| g.nodes.iter().find(|n| n.module_id == id).and_then(|n| n.is_bridge);
+        assert_eq!(bridge("src/c.ts"), Some(true));
+        assert_ne!(bridge("tests/ab.test.ts"), Some(true));
+    }
+
+    // A Go import names a package: the importer gets an edge to every non-test
+    // .go file of it (resolution `package`), not to one arbitrary member, and
+    // never to a non-Go file or a _test.go file that lives in the same directory.
+    #[test]
+    fn go_import_fans_out_to_every_package_file() {
+        let imp = "github.com/acme/w/internal/query";
+        let g = graph_with(
+            "gofan",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[
+                ("cmd/w/main.go", vec![imp]),
+                ("internal/api/h.go", vec![imp, "fmt"]),
+                ("internal/query/engine.go", vec![]),
+                ("internal/query/pr.go", vec![]),
+                ("internal/query/pr_test.go", vec![]),
+                ("internal/query/README.md", vec![]),
+            ],
+        );
+        for src in ["cmd/w/main.go", "internal/api/h.go"] {
+            for t in ["internal/query/engine.go", "internal/query/pr.go"] {
+                assert_eq!(
+                    has_edge(&g, src, t),
+                    Some(("runtime".into(), "package".into())),
+                    "{src} -> {t}: {:?}",
+                    g.edges
+                );
+            }
+            assert!(has_edge(&g, src, "internal/query/pr_test.go").is_none());
+            assert!(has_edge(&g, src, "internal/query/README.md").is_none());
+        }
+        // The module root import names the root package.
+        let g = graph_with(
+            "goroot",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[("w.go", vec![]), ("sub/s.go", vec!["github.com/acme/w"])],
+        );
+        assert_eq!(has_edge(&g, "sub/s.go", "w.go"), Some(("runtime".into(), "package".into())));
+    }
+
+    // Files of one Go package are linked without imports: same_go_package says so
+    // (hidden-coupling filters use it), and dead-code analysis treats the package
+    // as the unit — the rest of package main is alive through main.go, and every
+    // file of an imported package is alive.
+    #[test]
+    fn go_same_package_links_and_liveness() {
+        assert!(same_go_package("internal/q/a.go", "internal/q/b.go"));
+        assert!(same_go_package("internal/q/a.go", "internal/q/a_test.go"));
+        assert!(!same_go_package("internal/q/a.go", "internal/q/sub/b.go"));
+        assert!(!same_go_package("internal/q/a.go", "internal/q/a.ts"));
+        assert!(!same_go_package("a.go", "a.go"));
+
+        let g = graph_with(
+            "golive",
+            &[("go.mod", "module github.com/acme/w\n")],
+            &[
+                ("cmd/w/main.go", vec!["github.com/acme/w/internal/q"]),
+                ("cmd/w/flags.go", vec![]),
+                ("internal/q/a.go", vec![]),
+                ("internal/q/b.go", vec![]),
+                ("internal/orphan/o.go", vec![]),
+            ],
+        );
+        let dead = |id: &str| g.nodes.iter().find(|n| n.module_id == id).unwrap().is_dead;
+        assert_eq!(dead("cmd/w/flags.go"), Some(false), "package main is alive via main.go");
+        assert_eq!(dead("internal/q/b.go"), Some(false));
+        assert_eq!(dead("internal/orphan/o.go"), Some(true), "unimported package stays dead");
+    }
+
+    // God modules are about a file's OWN outgoing breadth and size. A file that
+    // is merely imported by many (high fan-in) is not one; a large file that
+    // reaches into many modules is. A Go package counts once, however many
+    // files its import fans out to.
+    #[test]
+    fn god_module_is_outgoing_breadth_not_fan_in() {
+        let state = ApiState::new(std::path::PathBuf::from("/test"));
+        let mk = |id: &str, sigs: usize| GraphNode {
+            module_id: id.into(),
+            path: id.into(),
+            language: "go".into(),
+            signature_count: sigs,
+            complexity: None,
+            is_bridge: None,
+            bridge_score: None,
+            degree: Some(200),
+            risk_level: None,
+            churn: None,
+            hotspot_score: None,
+            role: None,
+            is_dead: None,
+            unreferenced_exports: None,
+            fan_in: None,
+            fan_out: None,
+            cochange_partners: None,
+            cochange_entropy: None,
+            owner: None,
+        };
+        let e = |s: &str, t: &str, res: &str| GraphEdge {
+            source: s.into(),
+            target: t.into(),
+            edge_type: "runtime".into(),
+            at_range: None,
+            resolution: res.into(),
+        };
+        let mut nodes = vec![mk("popular.go", 100), mk("big.go", 100), mk("fanout.go", 100)];
+        let mut edges = Vec::new();
+        for i in 0..80 {
+            let id = format!("user{i}.go");
+            nodes.push(mk(&id, 1));
+            edges.push(e(&id, "popular.go", "exact"));
+            if i < GOD_MIN_BREADTH {
+                edges.push(e("big.go", &id, "exact"));
+            }
+            // 80 files of ONE package: a single dependency unit.
+            edges.push(e("fanout.go", &format!("pkg/f{i}.go"), "package"));
+        }
+        let gods = state.detect_god_modules(&nodes, &edges, &HashMap::new());
+        let ids: Vec<&str> = gods.iter().map(|g| g.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["big.go"], "{gods:?}");
+        assert_eq!(gods[0].degree, GOD_MIN_BREADTH);
+
+        // Too small to be a god module however broad.
+        nodes[1].signature_count = GOD_MIN_SIGNATURES - 1;
+        assert!(state.detect_god_modules(&nodes, &edges, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn layer_check_counts_a_go_package_import_once() {
+        let e = |s: &str, t: &str, res: &str| GraphEdge {
+            source: s.into(),
+            target: t.into(),
+            edge_type: "runtime".into(),
+            at_range: None,
+            resolution: res.into(),
+        };
+        let mut edges: Vec<GraphEdge> =
+            (0..40).map(|i| e("cmd/ckb/review.go", &format!("internal/query/f{i}.go"), "package")).collect();
+        edges.push(e("cmd/ckb/review.go", "internal/query/extra.ts", "exact"));
+        edges.push(e("main.go", "util.go", "package")); // root package: per file
+        let tuples = layer_edge_tuples(&edges);
+        assert_eq!(
+            tuples,
+            vec![
+                ("cmd/ckb/review.go".to_string(), "internal/query/".to_string()),
+                ("cmd/ckb/review.go".to_string(), "internal/query/extra.ts".to_string()),
+                ("main.go".to_string(), "util.go".to_string()),
+            ]
+        );
+        let config = LayerConfig::from_toml(
+            "[layers]\ncore = \"internal/query/\"\ncli = \"cmd/\"\n\n[allowed_flows]\ncore -> cli\n",
+        )
+        .unwrap();
+        let v = detect_layer_violations(&tuples, &config);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].target_path, "internal/query/");
+    }
+
+    // tsconfig `paths` aliases resolve (with extension, index and .d.ts lookup),
+    // including a nested package's own tsconfig that `extends` a base with
+    // comments and trailing commas; `baseUrl` bare paths resolve; an alias that
+    // names nothing is dangling, and an npm package is never fuzzy-guessed onto
+    // a same-named file (drizzle-orm → drizzle/0000_init.sql).
+    #[test]
+    fn ts_path_aliases_resolve_and_bare_packages_never_fuzzy() {
+        let g = graph_with(
+            "tsalias",
+            &[
+                (
+                    "tsconfig.json",
+                    "{\n  // root\n  \"compilerOptions\": { \"paths\": { \"@/*\": [\"./src/*\"], \"@ui\": [\"./src/components/ui/index.ts\"], }, },\n}",
+                ),
+                ("packages/web/tsconfig.base.json", "{ \"compilerOptions\": { \"baseUrl\": \"./app\", /* x */ \"paths\": { \"~/*\": [\"lib/*\"] } } }"),
+                ("packages/web/tsconfig.json", "{ \"extends\": \"./tsconfig.base\" }"),
+            ],
+            &[
+                ("src/app/page.tsx", vec!["@/lib/db", "@/components/Button", "@/types/api", "@ui", "@/missing/x", "drizzle-orm"]),
+                ("src/lib/db.ts", vec![]),
+                ("src/lib/db.css", vec![]),
+                ("src/components/Button/index.tsx", vec![]),
+                ("src/components/ui/index.ts", vec![]),
+                ("src/types/api.d.ts", vec![]),
+                ("drizzle/0000_init.sql", vec![]),
+                ("packages/web/app/main.ts", vec!["~/util", "routes/home", "./x.js"]),
+                ("packages/web/app/lib/util.ts", vec![]),
+                ("packages/web/app/routes/home.ts", vec![]),
+                ("packages/web/app/x.ts", vec![]),
+            ],
+        );
+        let exact = Some(("runtime".to_string(), "exact".to_string()));
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/lib/db.ts"), exact, "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/components/Button/index.tsx"), exact);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/types/api.d.ts"), exact);
+        assert_eq!(has_edge(&g, "src/app/page.tsx", "src/components/ui/index.ts"), exact);
+        assert!(has_edge(&g, "src/app/page.tsx", "drizzle/0000_init.sql").is_none());
+        assert!(has_edge(&g, "src/app/page.tsx", "src/lib/db.css").is_none());
+        assert_eq!(
+            g.edges.iter().filter(|e| e.source == "src/app/page.tsx").count(),
+            4,
+            "alias miss and npm package give no edge: {:?}",
+            g.edges
+        );
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/lib/util.ts"), exact);
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/routes/home.ts"), exact);
+        assert_eq!(has_edge(&g, "packages/web/app/main.ts", "packages/web/app/x.ts"), exact);
+    }
+
+    // `import type` edges stay in the graph as `type` edges but do not close
+    // cycles; a runtime loop still does. A pair imported both ways keeps the
+    // runtime edge.
+    #[test]
+    fn type_only_imports_are_typed_and_skip_cycles() {
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let (b_to_a, p_to_q) = (t("./a"), t("./q"));
+        let g = graph_with(
+            "tstype",
+            &[],
+            &[
+                ("src/a.ts", vec!["./b"]),
+                ("src/b.ts", vec![b_to_a.as_str()]),
+                ("src/x.ts", vec!["./y"]),
+                ("src/y.ts", vec!["./x"]),
+                ("src/p.ts", vec![p_to_q.as_str(), "./q"]),
+                ("src/q.ts", vec![]),
+            ],
+        );
+        assert_eq!(has_edge(&g, "src/b.ts", "src/a.ts"), Some(("type".into(), "exact".into())));
+        assert!(g.cycles.iter().any(|c| c.nodes.contains(&"src/x.ts".to_string())), "runtime cycle kept");
+        assert_eq!(g.cycles.len(), 1, "{:?}", g.cycles);
+        assert_eq!(has_edge(&g, "src/p.ts", "src/q.ts"), Some(("runtime".into(), "exact".into())));
+    }
+
+    // Python: function-local imports are runtime edges (src layout, absolute
+    // package path), relative imports anchor at the source package, and a
+    // TYPE_CHECKING import is a `type` edge that does not close a cycle.
+    // A stdlib import never lands on a same-named module inside a package:
+    // `import logging` is not src/app/logging.py (that is `app.logging`). A
+    // top-level module beside the script is found.
+    #[test]
+    fn python_absolute_import_needs_a_top_level_package() {
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in ["src/app/__init__.py", "src/app/logging.py", "src/app/audit.py", "scripts/run.py", "scripts/utils.py"] {
+            files.insert(p.to_string(), MappedFile::from_minimal(p.to_string(), vec![]));
+        }
+        let idx = ImportIndex::build(&files);
+        assert_eq!(idx.resolve("import logging", "src/app/audit.py"), None);
+        assert_eq!(
+            idx.resolve("from app import logging", "src/app/audit.py"),
+            Some(("src/app/logging.py".to_string(), "suffix"))
+        );
+        assert_eq!(
+            idx.resolve("import utils", "scripts/run.py"),
+            Some(("scripts/utils.py".to_string(), "suffix"))
+        );
+    }
+
+    #[test]
+    fn python_function_local_import_does_not_close_a_cycle() {
+        let lazy = format!("{}from app.profiles import load", crate::mapper::LAZY_PREFIX);
+        let g = graph_with(
+            "pylazy",
+            &[],
+            &[
+                ("src/app/__init__.py", vec![]),
+                ("src/app/profiles.py", vec!["from app.enrich import run"]),
+                ("src/app/enrich.py", vec![lazy.as_str()]),
+            ],
+        );
+        assert_eq!(has_edge(&g, "src/app/profiles.py", "src/app/enrich.py"), Some(("runtime".into(), "suffix".into())), "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/enrich.py", "src/app/profiles.py"), Some(("lazy".into(), "suffix".into())));
+        assert!(g.cycles.is_empty(), "a function-local import must not close a cycle: {:?}", g.cycles);
+    }
+
+    #[test]
+    fn python_local_relative_and_type_checking_imports() {
+        let t = |s: &str| format!("{}{s}", crate::mapper::TYPE_ONLY_PREFIX);
+        let tc = t("from app.web import Server");
+        let g = graph_with(
+            "py",
+            &[],
+            &[
+                ("src/app/__init__.py", vec![]),
+                ("src/app/web.py", vec!["from app.search.corpus import CorpusSearcher", "from .util import f", "from . import models", "from .. import nothing"]),
+                ("src/app/util.py", vec![]),
+                ("src/app/models/__init__.py", vec![]),
+                ("src/app/search/__init__.py", vec![]),
+                ("src/app/search/corpus.py", vec!["from ..util import g", "from ...outside import x", tc.as_str()]),
+            ],
+        );
+        let ex = |res: &str| Some(("runtime".to_string(), res.to_string()));
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/search/corpus.py"), ex("suffix"), "{:?}", g.edges);
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/util.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/web.py", "src/app/models/__init__.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/search/corpus.py", "src/app/util.py"), ex("exact"));
+        assert_eq!(has_edge(&g, "src/app/search/corpus.py", "src/app/web.py"), Some(("type".into(), "suffix".into())));
+        assert!(g.cycles.is_empty(), "TYPE_CHECKING import must not close a cycle: {:?}", g.cycles);
+        // `from .. import nothing` from src/app/web.py names src/__init__.py: not scanned.
+        assert_eq!(g.edges.iter().filter(|e| e.source == "src/app/web.py").count(), 3);
     }
 
     // Directory rollup folds files into their folder, drops intra-folder edges, and
@@ -3412,5 +4695,143 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// Recall probe over a real checkout (not part of the normal suite):
+/// `PROBE_ROOT=/path cargo test --lib graph_probe -- --ignored --nocapture`.
+/// Scans without the persistent map cache so extractor changes are measured.
+#[cfg(test)]
+mod graph_probe {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn graph_probe() {
+        let Ok(root) = std::env::var("PROBE_ROOT") else { return };
+        let root = std::path::PathBuf::from(root);
+        let scan = crate::scanner::scan_files_with_noise_tracking(&root).unwrap();
+        let mut files: HashMap<String, MappedFile> = HashMap::new();
+        for p in scan.files.iter().filter(|p| !crate::scanner::is_ignored_path(p)) {
+            let Ok(content) = std::fs::read_to_string(p) else { continue };
+            let rel = p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+            files.insert(rel, crate::mapper::extract_skeleton(p, &content));
+        }
+        // Alias hit rate: imports that start with a tsconfig-style alias prefix.
+        let idx = ImportIndex::build(&files).with_go_module(&root).with_ts_paths(&root);
+        let (mut alias, mut alias_hit) = (0usize, 0usize);
+        for (id, f) in &files {
+            for imp in &f.imports {
+                let (m, _) = parse_import_parts(imp);
+                if m.starts_with("@/") || m.starts_with("~/") {
+                    alias += 1;
+                    if idx.resolve(split_import_kind(imp).0, id).is_some() {
+                        alias_hit += 1;
+                    } else {
+                        println!("  alias miss: {id}: {imp}");
+                    }
+                }
+            }
+        }
+        drop(idx);
+        let state = ApiState::new(root.clone());
+        *state.mapped_files.lock().unwrap() = files;
+        let g = state.rebuild_graph().unwrap();
+        let mut by_res: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &g.edges {
+            *by_res.entry(format!("{}/{}", e.edge_type, e.resolution)).or_insert(0) += 1;
+        }
+        let edge_set: std::collections::HashSet<(String, String)> = g
+            .edges
+            .iter()
+            .flat_map(|e| [(e.source.clone(), e.target.clone()), (e.target.clone(), e.source.clone())])
+            .collect();
+        let pairs = crate::git_analysis::git_cochange(&root, 500);
+        let pairs: Vec<_> = pairs.into_iter().filter(|p| p.count >= 2).collect();
+        let hidden = pairs
+            .iter()
+            .filter(|p| !edge_set.contains(&(p.file_a.clone(), p.file_b.clone())))
+            .filter(|p| !same_go_package(&p.file_a, &p.file_b))
+            .count();
+        let m = &g.metadata;
+        println!("PROBE root={}", root.display());
+        println!("files={} edges={} by={:?}", m.total_files, m.total_edges, by_res);
+        println!("alias imports={} resolved={}", alias, alias_hit);
+        println!(
+            "cycles={} god={} bridges={} health={:.1} cochange_pairs={} hidden={}",
+            m.cycle_count.unwrap_or(0),
+            m.god_module_count.unwrap_or(0),
+            m.bridge_count.unwrap_or(0),
+            m.health_score.unwrap_or(0.0),
+            pairs.len(),
+            hidden
+        );
+        let code_ext = |p: &str| lang_family(p).is_some();
+        let code_to_noncode = g
+            .edges
+            .iter()
+            .filter(|e| code_ext(&e.source) && !code_ext(&e.target) && !is_doc_path(&e.target))
+            .count();
+        for e in g.edges.iter().filter(|e| code_ext(&e.source) && !code_ext(&e.target) && !is_doc_path(&e.target)).take(8) {
+            println!("  code->noncode: {} -> {} ({}/{})", e.source, e.target, e.edge_type, e.resolution);
+        }
+        println!(
+            "dead={} code->noncode edges={}",
+            m.dead_code_count.unwrap_or(0),
+            code_to_noncode
+        );
+        let bs: Vec<f64> = g.nodes.iter().filter(|n| n.is_bridge == Some(true)).filter_map(|n| n.bridge_score).collect();
+        println!(
+            "bridge_score buckets: >0={} >0.5={} >1={} >5={} >10={}",
+            bs.len(),
+            bs.iter().filter(|x| **x > 0.5).count(),
+            bs.iter().filter(|x| **x > 1.0).count(),
+            bs.iter().filter(|x| **x > 5.0).count(),
+            bs.iter().filter(|x| **x > 10.0).count()
+        );
+        let mut top: Vec<&GraphNode> = g.nodes.iter().filter(|n| n.is_bridge == Some(true)).collect();
+        top.sort_by(|a, b| b.bridge_score.partial_cmp(&a.bridge_score).unwrap());
+        for n in top.iter().take(5) {
+            println!("  bridge: {} score={:.2} degree={:?}", n.module_id, n.bridge_score.unwrap_or(0.0), n.degree);
+        }
+        for c in &g.cycles {
+            println!("  cycle: {:?}", c.nodes);
+        }
+        for gm in g.god_modules.iter().take(8) {
+            println!("  god: {} degree={} cohesion={:.2}", gm.module_id, gm.degree, gm.cohesion_score);
+        }
+        // Calibration view for god modules: widest non-test files by breadth.
+        let mut units: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+        for e in g.edges.iter().filter(|e| matches!(e.edge_type.as_str(), "runtime" | "type" | "lazy")) {
+            let u = if e.resolution == "package" {
+                e.target.rsplit_once('/').map(|x| x.0).unwrap_or("")
+            } else {
+                e.target.as_str()
+            };
+            units.entry(e.source.as_str()).or_default().insert(u);
+        }
+        let mut wide: Vec<(&str, usize, usize)> = g
+            .nodes
+            .iter()
+            .filter(|n| !is_test_path(&n.path))
+            .map(|n| (n.module_id.as_str(), units.get(n.module_id.as_str()).map_or(0, |u| u.len()), n.signature_count))
+            .collect();
+        wide.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        println!("  widest (id, breadth, sigs): {:?}", &wide[..wide.len().min(6)]);
+        for e in g.edges.iter().filter(|e| e.resolution == "fuzzy" && code_ext(&e.source)).take(6) {
+            println!("  fuzzy: {} -> {}", e.source, e.target);
+        }
+        if let Ok(f) = std::env::var("PROBE_FILE") {
+            for e in g.edges.iter().filter(|e| e.source == f) {
+                println!("  out: {} ({}/{})", e.target, e.edge_type, e.resolution);
+            }
+        }
+        let mut targets: HashMap<&str, usize> = HashMap::new();
+        for e in &g.edges {
+            *targets.entry(e.target.as_str()).or_insert(0) += 1;
+        }
+        let mut t: Vec<_> = targets.into_iter().collect();
+        t.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        println!("  top fan-in: {:?}", &t[..t.len().min(5)]);
     }
 }

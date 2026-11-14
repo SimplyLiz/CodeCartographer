@@ -117,7 +117,7 @@ Before any metric is computed, commits are filtered:
 
 ### Co-change coupling score
 
-Adam Tornhill's formula: `count / min(churn_a, churn_b)` where `count` is the number of commits that changed both files and `churn_a`/`churn_b` are the individual file churn counts.
+Adam Tornhill's ratio with a support prior: `count / (min(churn_a, churn_b) + 2)`, where `count` is the number of commits that changed both files and `churn_a`/`churn_b` are the individual file churn counts. The `+ 2` (two pseudo-commits without a co-change) keeps a file changed twice, both times with X, from scoring 1.0 and outranking a partner with 14 co-changes: 2 of 2 scores 0.5, 14 of 16 scores 0.78. The FFI's default minimum co-change count is 3.
 
 ### Hidden coupling
 
