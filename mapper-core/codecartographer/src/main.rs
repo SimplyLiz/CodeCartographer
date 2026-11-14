@@ -4378,11 +4378,7 @@ fn layers_validate(root: &Path, config_path: Option<&Path>, json_out: bool) -> R
     { let mut f = state.mapped_files.lock().unwrap(); *f = mapped; }
     let graph = state.rebuild_graph().map_err(|e| anyhow::anyhow!(e))?;
 
-    let edge_tuples: Vec<(String, String)> = graph
-        .edges
-        .iter()
-        .map(|e| (e.source.clone(), e.target.clone()))
-        .collect();
+    let edge_tuples = api::layer_edge_tuples(&graph.edges);
 
     let violations = detect_layer_violations(&edge_tuples, &config);
 

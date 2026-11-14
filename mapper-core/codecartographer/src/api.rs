@@ -828,10 +828,7 @@ impl ApiState {
         let god_modules = self.detect_god_modules(&nodes, &code_structural, files);
         let god_module_count = god_modules.len();
 
-        let edge_tuples: Vec<(String, String)> = code_structural
-            .iter()
-            .map(|e| (e.source.clone(), e.target.clone()))
-            .collect();
+        let edge_tuples = layer_edge_tuples(&code_structural);
 
         let layer_violations = self.detect_layer_violations(&edge_tuples);
         let layer_violation_count = layer_violations.len();
@@ -2768,6 +2765,28 @@ fn go_dir(p: &str) -> &str {
 /// A file that is part of a Go package's compiled API: a non-test `.go` file.
 /// Importers of the package see these; `_test.go` files are only visible to
 /// the package's own tests.
+/// Edges as a layer check counts them. A Go import resolves to every file of
+/// the imported package (`"package"` edges), but it is one dependency: it
+/// becomes one edge to the package directory, written with a trailing `/`
+/// (`internal/query/`) so layer folders match with or without one. Without
+/// this, one `import ".../internal/query"` across a boundary was reported once
+/// per file of the package (81 violations for a single import in CKB).
+/// Root-package files keep their per-file edges: there is no directory to name.
+pub(crate) fn layer_edge_tuples(edges: &[GraphEdge]) -> Vec<(String, String)> {
+    let mut seen: std::collections::HashSet<(&str, String)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for e in edges {
+        let target = match (e.resolution.as_str(), e.target.rsplit_once('/')) {
+            ("package", Some((dir, _))) => format!("{dir}/"),
+            _ => e.target.clone(),
+        };
+        if seen.insert((e.source.as_str(), target.clone())) {
+            out.push((e.source.clone(), target));
+        }
+    }
+    out
+}
+
 fn is_go_package_member(path: &str) -> bool {
     path.ends_with(".go") && !path.ends_with("_test.go")
 }
@@ -4166,6 +4185,37 @@ mod tests {
         // Too small to be a god module however broad.
         nodes[1].signature_count = GOD_MIN_SIGNATURES - 1;
         assert!(state.detect_god_modules(&nodes, &edges, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn layer_check_counts_a_go_package_import_once() {
+        let e = |s: &str, t: &str, res: &str| GraphEdge {
+            source: s.into(),
+            target: t.into(),
+            edge_type: "runtime".into(),
+            at_range: None,
+            resolution: res.into(),
+        };
+        let mut edges: Vec<GraphEdge> =
+            (0..40).map(|i| e("cmd/ckb/review.go", &format!("internal/query/f{i}.go"), "package")).collect();
+        edges.push(e("cmd/ckb/review.go", "internal/query/extra.ts", "exact"));
+        edges.push(e("main.go", "util.go", "package")); // root package: per file
+        let tuples = layer_edge_tuples(&edges);
+        assert_eq!(
+            tuples,
+            vec![
+                ("cmd/ckb/review.go".to_string(), "internal/query/".to_string()),
+                ("cmd/ckb/review.go".to_string(), "internal/query/extra.ts".to_string()),
+                ("main.go".to_string(), "util.go".to_string()),
+            ]
+        );
+        let config = LayerConfig::from_toml(
+            "[layers]\ncore = \"internal/query/\"\ncli = \"cmd/\"\n\n[allowed_flows]\ncore -> cli\n",
+        )
+        .unwrap();
+        let v = detect_layer_violations(&tuples, &config);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].target_path, "internal/query/");
     }
 
     // tsconfig `paths` aliases resolve (with extension, index and .d.ts lookup),

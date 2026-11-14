@@ -295,11 +295,7 @@ pub extern "C" fn codecartographer_check_layers(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let edge_tuples: Vec<(String, String)> = graph
-        .edges
-        .iter()
-        .map(|e| (e.source.clone(), e.target.clone()))
-        .collect();
+    let edge_tuples = api::layer_edge_tuples(&graph.edges);
 
     let violations = layers::detect_layer_violations(&edge_tuples, &config);
 

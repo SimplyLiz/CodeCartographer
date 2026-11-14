@@ -7,6 +7,15 @@ All notable changes to CodeCartographer will be documented in this file.
 The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
+### Fixed — a Go package import is one layer violation, not one per file
+
+- Go imports resolve to every file of the package (`"package"` edges), so one
+  `import ".../internal/query"` across a layer boundary was reported once per
+  file of the package — 81 violations in CKB for a single import, and the
+  inflated count fed the health score. Layer checks (C ABI `check_layers`, the
+  graph's `layer_violations`, `check-layers` CLI) now see one edge to the
+  package directory, written `internal/query/`.
+
 ### Fixed — skeleton cache survives upgrades and uncommitted edits
 
 - **`.codecartographer_cache.json` is stamped with the crate version and a new
