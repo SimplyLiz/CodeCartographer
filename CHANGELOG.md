@@ -2,7 +2,7 @@
 
 All notable changes to CodeCartographer will be documented in this file.
 
-## [Unreleased]
+## [4.1.0] — 2026-11-14
 
 The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
