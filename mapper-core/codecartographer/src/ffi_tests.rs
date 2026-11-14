@@ -345,4 +345,6 @@ fn probe_timing() {
         codecartographer_simulate_change(p, target.as_ptr(), std::ptr::null(), std::ptr::null())
     });
     timed("hidden_coupling", &|| codecartographer_hidden_coupling(p, 0, 0));
+    timed("git_cochange", &|| codecartographer_git_cochange(p, 0, 0));
+    timed("git_churn", &|| codecartographer_git_churn(p, 0));
 }

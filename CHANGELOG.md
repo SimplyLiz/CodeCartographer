@@ -4,6 +4,28 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — FFI calls reuse built state
+
+- **Process-level cache for the C ABI.** Every FFI call scanned the tree,
+  loaded or rebuilt the skeletons, created a fresh `ApiState` and rebuilt the
+  graph. Built state is now kept per canonical root (up to 4 roots, least
+  recently used evicted) and re-validated on each call with a stat walk through
+  the same scanner (file set, size, mtime). Unchanged tree: reused as is.
+  Changed files: only those are re-parsed, and the new state inherits the
+  topology-keyed centrality cache. Concurrent calls on one root build once.
+- **Git history results are cached by HEAD.** `git_churn`, `git_cochange`,
+  `hidden_coupling` and `shotgun_surgery` each ran `git log -n 500` per call
+  (~350 ms on CKB); they now share results keyed by (root, HEAD, limit).
+- `hidden_coupling` no longer re-parses the whole tree single-threaded (6.3 s
+  on a CKB clone; 0.4–0.7 s now, most of it the first `git log`).
+
+### Fixed — the skeleton cache served stale skeletons for uncommitted edits
+
+- `.codecartographer_cache.json` was keyed by git HEAD alone, so a file edited
+  but not committed kept its old skeleton in every new process. The cache now
+  stores size and mtime per file and reuses only entries whose file is
+  unchanged. Caches written by older versions are re-parsed once.
+
 ### Fixed — the scanner reads git's out-of-tree excludes
 
 - **`.git/info/exclude` and `core.excludesFile` apply.** The scanner resolved

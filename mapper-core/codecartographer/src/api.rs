@@ -595,6 +595,16 @@ impl ApiState {
         }
     }
 
+    /// Carry over the topology-keyed centrality cache from an earlier state of
+    /// the same tree. Entries self-invalidate by fingerprint (see `bc_cache`),
+    /// so an edit that leaves the import graph alone skips betweenness.
+    #[allow(dead_code)] // used by the C-ABI state cache (lib), not the binary
+    pub(crate) fn inherit_bc_cache(&self, other: &ApiState) {
+        if let (Ok(src), Ok(mut dst)) = (other.bc_cache.lock(), self.bc_cache.lock()) {
+            *dst = src.clone();
+        }
+    }
+
     pub fn rebuild_graph(&self) -> Result<ProjectGraphResponse, String> {
         // Serve the cached graph if present. Building it is expensive (cycle detection,
         // betweenness centrality, god-module analysis) and it's recomputed on every tool

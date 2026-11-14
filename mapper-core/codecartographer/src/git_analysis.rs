@@ -330,14 +330,19 @@ pub struct CoChangeDispersion {
 ///
 /// Reuses the existing co-change pairs — no additional git call.
 pub fn git_cochange_dispersion(root: &Path, limit: usize) -> Vec<CoChangeDispersion> {
-    let pairs = git_cochange(root, limit);
+    dispersion_from_pairs(&git_cochange(root, limit))
+}
+
+/// Dispersion from already computed co-change pairs (lets the FFI reuse its
+/// cached pairs instead of running `git log` again).
+pub fn dispersion_from_pairs(pairs: &[CoChangePair]) -> Vec<CoChangeDispersion> {
     if pairs.is_empty() {
         return vec![];
     }
 
     // Build per-file partner maps: file → { partner → count }
     let mut partner_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for p in &pairs {
+    for p in pairs {
         *partner_counts
             .entry(p.file_a.clone())
             .or_default()
