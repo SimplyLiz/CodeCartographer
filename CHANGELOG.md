@@ -4,7 +4,7 @@ All notable changes to CodeCartographer will be documented in this file.
 
 ## [Unreleased]
 
-Measured on four real repositories (CKB/Go, a Next.js app, a Python
+The four import-graph fixes were measured on four real repositories (CKB/Go, a Next.js app, a Python
 package, a Rust crate) before and after; numbers are from those runs.
 
 ### Fixed — Rust inline paths, grouped uses, re-exports, precise anchoring
@@ -103,6 +103,77 @@ package, a Rust crate) before and after; numbers are from those runs.
   1,321 files, the TS app 176 of 698). Package fan-out spread paths over all
   members and would have raised CKB to 544; the count at >= 1.0 went 66 → 77.
   CKB health 65.0 → 86.1.
+
+### Fixed — co-change coupling accounts for support
+
+- **`coupling_score` is shrunk by a prior.** It was Tornhill's
+  `count / min(churn_a, churn_b)`, so a file changed twice, both times with X,
+  scored 1.0 and outranked a partner that changed with X in 14 of its 16
+  commits (CKB's `prepareChange` showed exactly that, plus a false "High
+  coupling" risk factor). The score is now `count / (min(churn_a, churn_b) + 2)`:
+  2 of 2 scores 0.5, 5 of 5 0.71, 14 of 16 0.78, 10 of 10 0.83. Ties are broken
+  by the co-change count. Applies to `git_cochange`, `hidden_coupling`, shotgun
+  surgery's input, the MCP tools and the CLI.
+- The FFI's default minimum co-change count (`min_count` 0) is 3 instead of 2.
+
+### Changed — FFI calls reuse built state
+
+- **Process-level cache for the C ABI.** Every FFI call scanned the tree,
+  loaded or rebuilt the skeletons, created a fresh `ApiState` and rebuilt the
+  graph. Built state is now kept per canonical root (up to 4 roots, least
+  recently used evicted) and re-validated on each call with a stat walk through
+  the same scanner (file set, size, mtime). Unchanged tree: reused as is.
+  Changed files: only those are re-parsed, and the new state inherits the
+  topology-keyed centrality cache. Concurrent calls on one root build once.
+- **Git history results are cached by HEAD.** `git_churn`, `git_cochange`,
+  `hidden_coupling` and `shotgun_surgery` each ran `git log -n 500` per call
+  (~350 ms on CKB); they now share results keyed by (root, HEAD, limit).
+- `hidden_coupling` no longer re-parses the whole tree single-threaded (6.3 s
+  on a CKB clone; 0.4–0.7 s now, most of it the first `git log`).
+
+### Fixed — the skeleton cache served stale skeletons for uncommitted edits
+
+- `.codecartographer_cache.json` was keyed by git HEAD alone, so a file edited
+  but not committed kept its old skeleton in every new process. The cache now
+  stores size and mtime per file and reuses only entries whose file is
+  unchanged. Caches written by older versions are re-parsed once.
+
+### Fixed — the scanner reads git's out-of-tree excludes
+
+- **`.git/info/exclude` and `core.excludesFile` apply.** The scanner resolved
+  `.gitignore` files itself but never read the two exclude sources outside the
+  tree. A checkout that keeps `.claude/worktrees/` (two full copies of the repo)
+  out of git only through `info/exclude` was scanned three times over: on CKB's
+  checkout the scan found 3,693 files instead of 1,323, and `MapProject` took
+  more than 10 minutes instead of 2.3 s. Both sources are read with git's
+  semantics: patterns relative to the repository top level (also when the scan
+  root is a subdirectory), lowest precedence, so a `.gitignore` negation still
+  wins. A `.git` file (linked worktree, submodule) is followed, and a worktree
+  reads `info/exclude` from the common git dir. `core.excludesFile` comes from
+  `git config` (repo, global, system), defaulting to
+  `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`.
+
+### Fixed — the C ABI speaks camelCase
+
+- **FFI results are camelCase, as documented.** Most result structs
+  (`ProjectGraphResponse`, `GraphNode`, `GraphMetadata`, `CycleInfo`,
+  `GodModuleInfo`, `SimulatedChange`/`ImpactAnalysis`, `LayerViolation`,
+  `ArchitectureEvolution`, `CoChangeDispersion`, `DependencyInfo`, `DocNode`)
+  serialize snake_case for the MCP server and the CLI, and the FFI passed that
+  through. CKB's Go types decode camelCase, so `isBridge`, `healthScore`,
+  `godModules`, `moduleId`, `predictedImpact`, `sourcePath`, `partnerCount` and
+  more came back as zero values: the bridge risk multiplier never fired, the
+  layers check always passed, shotgun surgery and evolution reported zeros. The
+  FFI now re-serializes struct field names to camelCase through a serializer
+  adapter (`ffi_json`); map keys (paths in `git_churn`, extensions in
+  `metadata.languages`) and string values are never touched. MCP and CLI output
+  is unchanged.
+- `context_health` (and the `health` object inside `query_context` /
+  `query_docs`) stays snake_case: CKB decodes it with snake_case tags.
+- `ranked_skeleton` returns `{ "files": [...] }`, the shape CKB decodes; the
+  bare array failed to unmarshal there.
+- A contract test calls every FFI function CKB uses and checks the keys
+  `types.go` expects.
 
 ## [4.0.3] — 2026-11-14
 

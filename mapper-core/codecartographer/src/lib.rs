@@ -8,12 +8,9 @@
 //!   - Output strings are allocated by Rust and MUST be freed by the caller
 //!     via `codecartographer_free_string()`.
 
-use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
-
-use rayon::prelude::*;
 
 mod api;
 mod call_graph;
@@ -22,6 +19,10 @@ mod cross_call;
 mod diagram;
 mod diagram_export;
 mod extractor;
+mod ffi_cache;
+mod ffi_json;
+#[cfg(test)]
+mod ffi_tests;
 mod html_export;
 mod git_analysis;
 mod layers;
@@ -31,7 +32,6 @@ mod search;
 mod token_metrics;
 
 use api::ApiState;
-use mapper::{extract_skeleton, MappedFile};
 use scanner::{is_ignored_path, scan_files_with_noise_tracking};
 
 // ---------------------------------------------------------------------------
@@ -64,12 +64,35 @@ fn c_str_to_path(s: *const c_char) -> Result<PathBuf, String> {
     Ok(PathBuf::from(rust_str))
 }
 
+/// Encode an FFI result as the `{"ok", "data" | "error"}` envelope.
+///
+/// Struct field names inside `data` are emitted camelCase (the FFI contract),
+/// even though the structs themselves serialize snake_case for the MCP server
+/// and the CLI; see [`ffi_json`]. Map keys are data and stay as they are.
+/// A `serde_json::Value` passes through unchanged, so a struct embedded in a
+/// `json!` must go through [`ffi_json::camel`] at the embedding site.
 fn result_to_json_ptr<T: serde::Serialize>(result: Result<T, String>) -> *mut c_char {
+    let json = match result {
+        Ok(value) => serde_json::json!({ "ok": true, "data": ffi_json::camel(&value) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    json_to_c_ptr(&json)
+}
+
+/// Like [`result_to_json_ptr`] but keeps the struct field names as serde emits
+/// them. Only for `ContextHealthReport`: CKB decodes it with snake_case tags
+/// (`token_count`, `signal_density`, ...), so it stays snake_case until both
+/// sides change together.
+fn result_to_json_ptr_verbatim<T: serde::Serialize>(result: Result<T, String>) -> *mut c_char {
     let json = match result {
         Ok(value) => serde_json::json!({ "ok": true, "data": value }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     };
-    let s = serde_json::to_string(&json)
+    json_to_c_ptr(&json)
+}
+
+fn json_to_c_ptr(json: &serde_json::Value) -> *mut c_char {
+    let s = serde_json::to_string(json)
         .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_string());
     match CString::new(s) {
         Ok(cs) => cs.into_raw(),
@@ -85,7 +108,7 @@ fn result_to_json_ptr<T: serde::Serialize>(result: Result<T, String>) -> *mut c_
 // ---------------------------------------------------------------------------
 
 /// Return the current git HEAD SHA for `root`, or `""` if not a git repo.
-fn git_head(root: &Path) -> String {
+pub(crate) fn git_head(root: &Path) -> String {
     std::process::Command::new("git")
         .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
         .output()
@@ -95,59 +118,8 @@ fn git_head(root: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Persistent cache envelope stored at `<root>/.codecartographer_cache.json`.
-#[derive(serde::Deserialize)]
-struct MapCache {
-    head: String,
-    files: HashMap<String, MappedFile>,
-}
-
-/// Borrowed mirror of `MapCache` for writing. Owning the envelope would mean
-/// deep-copying the whole skeleton map just to hand it to serde.
-#[derive(serde::Serialize)]
-struct MapCacheRef<'a> {
-    head: &'a str,
-    files: &'a HashMap<String, MappedFile>,
-}
-
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".codecartographer_cache.json")
-}
-
-fn load_cache(root: &Path, current_head: &str) -> Option<HashMap<String, MappedFile>> {
-    if current_head.is_empty() {
-        return None; // not a git repo — skip cache
-    }
-    let data = std::fs::read(cache_path(root)).ok()?;
-    let cache: MapCache = serde_json::from_slice(&data).ok()?;
-    if cache.head == current_head {
-        Some(cache.files)
-    } else {
-        None
-    }
-}
-
-fn save_cache(root: &Path, head: &str, files: &HashMap<String, MappedFile>) {
-    if head.is_empty() {
-        return;
-    }
-    // Stream borrowed data straight to the file. Cloning the map and then
-    // buffering the entire JSON in memory held three copies of the skeleton at
-    // once (map, clone, encoded bytes) at the peak of every cold build.
-    // A partial write is self-healing: it fails to deserialize, so the next
-    // load_cache() returns None and rebuilds.
-    let Ok(file) = std::fs::File::create(cache_path(root)) else {
-        return;
-    };
-    let mut writer = std::io::BufWriter::new(file);
-    if serde_json::to_writer(&mut writer, &MapCacheRef { head, files }).is_ok() {
-        use std::io::Write;
-        let _ = writer.flush();
-    }
-}
-
 // ---------------------------------------------------------------------------
-// build_mapped_files: parallel scan + optional cache
+// Shared parse pool and cached project state
 // ---------------------------------------------------------------------------
 
 /// Shared rayon pool with a large per-worker stack for the recursive tree-sitter
@@ -163,41 +135,11 @@ fn parse_pool() -> &'static rayon::ThreadPool {
     })
 }
 
-pub(crate) fn build_mapped_files(root: &Path) -> Result<HashMap<String, MappedFile>, String> {
-    // Check persistent cache first
-    let head = git_head(root);
-    if let Some(cached) = load_cache(root, &head) {
-        return Ok(cached);
-    }
-
-    let scan_result = scan_files_with_noise_tracking(root).map_err(|e| e.to_string())?;
-
-    // Parallel extraction — extract_skeleton is pure, each file is independent.
-    // Runs on a dedicated pool with a large stack: the tree-sitter walkers recurse
-    // by AST depth, and deeply nested files (macro-generated C initializers in the
-    // Linux kernel, etc.) overflow a worker's default ~2 MB stack and abort the
-    // whole process — including the host when linked via FFI. The pool is built
-    // once per process and shared across all FFI calls.
-    let result: HashMap<String, MappedFile> = parse_pool().install(|| {
-        scan_result
-            .files
-            .par_iter()
-            .filter(|p| !is_ignored_path(p))
-            .filter_map(|p| {
-                let content = std::fs::read_to_string(p).ok()?;
-                let mapped = extract_skeleton(p, &content);
-                let rel = p
-                    .strip_prefix(root)
-                    .unwrap_or(p)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                Some((rel, mapped))
-            })
-            .collect()
-    });
-
-    save_cache(root, &head, &result);
-    Ok(result)
+/// Built project state for `root` from the process-level cache
+/// ([`ffi_cache`]): mapped files plus the graph, reused while the tree is
+/// unchanged and patched file by file when it is not.
+fn ffi_state(root: &Path) -> Result<std::sync::Arc<ApiState>, String> {
+    ffi_cache::global().get(root).map(|(state, _)| state)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,15 +172,10 @@ pub extern "C" fn codecartographer_map_project(path: *const c_char) -> *mut c_ch
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let result = state.rebuild_graph();
     result_to_json_ptr(result)
@@ -272,15 +209,10 @@ pub extern "C" fn codecartographer_health(path: *const c_char) -> *mut c_char {
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let graph = match state.rebuild_graph() {
         Ok(g) => g,
@@ -352,15 +284,10 @@ pub extern "C" fn codecartographer_check_layers(
         layers::LayerConfig::default()
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let graph = match state.rebuild_graph() {
         Ok(g) => g,
@@ -376,7 +303,7 @@ pub extern "C" fn codecartographer_check_layers(
     let violations = layers::detect_layer_violations(&edge_tuples, &config);
 
     let data = serde_json::json!({
-        "violations": violations,
+        "violations": ffi_json::camel(&violations),
         "violationCount": violations.len(),
     });
 
@@ -460,15 +387,10 @@ pub extern "C" fn codecartographer_simulate_change(
         None
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let result = state.simulate_change(&mod_id, new_sig, rem_sig);
 
@@ -524,9 +446,13 @@ pub extern "C" fn codecartographer_skeleton_map(
         mapper::DetailLevel::Standard
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
+    };
+    let mapped_files = match state.mapped_files.lock() {
+        Ok(m) => m,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
     };
 
     let mut total_sigs = 0;
@@ -614,15 +540,10 @@ pub extern "C" fn codecartographer_module_context(
         }
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
@@ -652,7 +573,7 @@ pub extern "C" fn codecartographer_module_context(
             "imports": module.imports,
             "signatures": module.signatures.iter().map(|s| &s.raw).collect::<Vec<_>>(),
         },
-        "dependencies": deps,
+        "dependencies": ffi_json::camel(&deps),
     });
 
     result_to_json_ptr::<serde_json::Value>(Ok(data))
@@ -702,20 +623,25 @@ pub extern "C" fn codecartographer_git_churn(path: *const c_char, limit: u32) ->
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
     let limit = if limit == 0 { 500 } else { limit as usize };
-    let churn = git_analysis::git_churn(&path, limit);
-    result_to_json_ptr::<std::collections::HashMap<String, usize>>(Ok(churn))
+    let churn = ffi_cache::git_churn(&path, limit);
+    result_to_json_ptr::<std::collections::HashMap<String, usize>>(Ok((*churn).clone()))
 }
 
 // ---------------------------------------------------------------------------
 // FFI: Git Co-change
 // ---------------------------------------------------------------------------
 
+/// Co-change floor when the caller passes 0. Two shared commits are too few to
+/// call a coupling (it was 2, which let a file changed twice outrank real
+/// partners); CKB uses 3 for its own hidden-coupling check.
+const DEFAULT_MIN_COCHANGES: usize = 3;
+
 /// Return temporally coupled file pairs from the last `limit` commits.
 ///
 /// Inputs:
 ///   `path`      — project root (C string)
 ///   `limit`     — number of commits to analyse (0 → 500)
-///   `min_count` — minimum co-change count to include (0 → 2)
+///   `min_count` — minimum co-change count to include (0 → 3)
 ///
 /// Response shape:
 /// ```json
@@ -743,10 +669,10 @@ pub extern "C" fn codecartographer_git_cochange(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
     let limit = if limit == 0 { 500 } else { limit as usize };
-    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+    let min_count = if min_count == 0 { DEFAULT_MIN_COCHANGES } else { min_count as usize };
 
-    let pairs: Vec<serde_json::Value> = git_analysis::git_cochange(&path, limit)
-        .into_iter()
+    let pairs: Vec<serde_json::Value> = ffi_cache::git_cochange(&path, limit)
+        .iter()
         .filter(|p| p.count >= min_count)
         .map(|p| {
             serde_json::json!({
@@ -897,7 +823,7 @@ pub extern "C" fn codecartographer_semidiff(
 /// Inputs:
 ///   `path`      — project root
 ///   `limit`     — commits to analyse (0 → 500)
-///   `min_count` — minimum co-change count to include (0 → 2)
+///   `min_count` — minimum co-change count to include (0 → 3)
 ///
 /// Response shape: same as `codecartographer_git_cochange` (array of CoChangePair).
 /// Returns an empty array when the directory is not a git repo.
@@ -912,34 +838,13 @@ pub extern "C" fn codecartographer_hidden_coupling(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
     let limit = if limit == 0 { 500 } else { limit as usize };
-    let min_count = if min_count == 0 { 2 } else { min_count as usize };
+    let min_count = if min_count == 0 { DEFAULT_MIN_COCHANGES } else { min_count as usize };
 
     // Build the static import-edge set from the dependency graph.
-    let scan_result = match scan_files_with_noise_tracking(&path) {
-        Ok(r) => r,
-        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e.to_string())),
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
+        Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let mapped: std::collections::HashMap<String, MappedFile> = scan_result
-        .files
-        .iter()
-        .filter(|p| !is_ignored_path(p))
-        .filter_map(|p| {
-            let content = std::fs::read_to_string(p).ok()?;
-            let mapped = extract_skeleton(p, &content);
-            let rel = p
-                .strip_prefix(&path)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .replace('\\', "/");
-            Some((rel, mapped))
-        })
-        .collect();
-
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped;
-    }
 
     // Normalise: store both (a,b) and (b,a) so lookup is direction-agnostic.
     let import_edges: std::collections::HashSet<(String, String)> =
@@ -958,8 +863,8 @@ pub extern "C" fn codecartographer_hidden_coupling(
         };
 
     // Keep only pairs with no import edge — those are the hidden coupling.
-    let pairs: Vec<serde_json::Value> = git_analysis::git_cochange(&path, limit)
-        .into_iter()
+    let pairs: Vec<serde_json::Value> = ffi_cache::git_cochange(&path, limit)
+        .iter()
         .filter(|p| p.count >= min_count)
         .filter(|p| !import_edges.contains(&(p.file_a.clone(), p.file_b.clone())))
         .filter(|p| !api::same_go_package(&p.file_a, &p.file_b))
@@ -991,17 +896,19 @@ pub extern "C" fn codecartographer_hidden_coupling(
 /// ```json
 /// {
 ///   "ok": true,
-///   "data": [
-///     {
-///       "path": "src/api.rs",
-///       "moduleId": "src/api.rs",
-///       "rank": 0.0842,
-///       "signatureCount": 45,
-///       "estimatedTokens": 680,
-///       "role": "core",
-///       "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
-///     }
-///   ]
+///   "data": {
+///     "files": [
+///       {
+///         "path": "src/api.rs",
+///         "moduleId": "src/api.rs",
+///         "rank": 0.0842,
+///         "signatureCount": 45,
+///         "estimatedTokens": 680,
+///         "role": "core",
+///         "signatures": ["pub fn rebuild_graph(...) -> ...", "..."]
+///       }
+///     ]
+///   }
 /// }
 /// ```
 #[no_mangle]
@@ -1027,15 +934,10 @@ pub extern "C" fn codecartographer_ranked_skeleton(
         vec![]
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
@@ -1059,7 +961,9 @@ pub extern "C" fn codecartographer_ranked_skeleton(
         }))
         .collect();
 
-    result_to_json_ptr::<Vec<serde_json::Value>>(Ok(data))
+    // CKB decodes `{ "files": [...] }` (RankedSkeletonResult); a bare array
+    // failed to unmarshal there.
+    result_to_json_ptr::<serde_json::Value>(Ok(serde_json::json!({ "files": data })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,15 +996,10 @@ pub extern "C" fn codecartographer_unreferenced_symbols(path: *const c_char) -> 
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let graph = match state.rebuild_graph() {
         Ok(g) => g,
@@ -1308,12 +1207,10 @@ pub extern "C" fn codecartographer_blast_radius(
     };
     let max = if max_related == 0 { 10 } else { max_related as usize };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
 
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
@@ -1413,12 +1310,10 @@ pub extern "C" fn codecartographer_evolution(
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
 
     let days_opt = if days == 0 { None } else { Some(days) };
     let result = state.get_evolution(days_opt);
@@ -1734,7 +1629,7 @@ pub extern "C" fn codecartographer_context_health(
     };
 
     let report = token_metrics::analyze(&text, &opts);
-    result_to_json_ptr(Ok::<_, String>(report))
+    result_to_json_ptr_verbatim(Ok::<_, String>(report))
 }
 
 // ---------------------------------------------------------------------------
@@ -1926,12 +1821,10 @@ pub extern "C" fn codecartographer_query_context(
     }
 
     // Step 2: ranked skeleton personalised to focus files
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
     }
@@ -2005,7 +1898,7 @@ pub extern "C" fn codecartographer_shotgun_surgery(
     let limit = if limit == 0 { 500 } else { limit as usize };
     let min_partners = if min_partners == 0 { 3 } else { min_partners as usize };
 
-    let mut entries = git_analysis::git_cochange_dispersion(&path, limit);
+    let mut entries = git_analysis::dispersion_from_pairs(&ffi_cache::git_cochange(&path, limit));
     entries.retain(|e| e.partner_count >= min_partners);
 
     result_to_json_ptr(Ok::<_, String>(entries))
@@ -2026,10 +1919,10 @@ pub extern "C" fn codecartographer_shotgun_surgery(
 ///   "data": [
 ///     {
 ///       "path": "docs/architecture.md",
-///       "module_id": "docs/architecture.md",
+///       "moduleId": "docs/architecture.md",
 ///       "signatures": ["# Architecture", "## Overview"],
 ///       "imports": ["src/api.rs"],
-///       "edge_count": 3
+///       "edgeCount": 3
 ///     }
 ///   ]
 /// }
@@ -2041,15 +1934,10 @@ pub extern "C" fn codecartographer_doc_index(path: *const c_char) -> *mut c_char
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let result = state.doc_nodes();
     result_to_json_ptr(result)
@@ -2098,15 +1986,10 @@ pub extern "C" fn codecartographer_doc_context(
     };
     let budget = if budget == 0 { 4000 } else { budget as usize };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
@@ -2249,12 +2132,10 @@ pub extern "C" fn codecartographer_query_docs(
     }
 
     // Step 3: Build graph + follow doc cross-refs into code
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    { let mut f = state.mapped_files.lock().unwrap(); *f = mapped_files; }
     if let Err(e) = state.rebuild_graph() {
         return result_to_json_ptr::<serde_json::Value>(Err(e));
     }
@@ -2405,15 +2286,10 @@ pub extern "C" fn codecartographer_render_architecture(
     let depth = if depth == 0 { 2 } else { depth as usize };
     let max_nodes = if max_nodes == 0 { 40 } else { max_nodes as usize };
 
-    let mapped_files = match build_mapped_files(&path) {
-        Ok(m) => m,
+    let state = match ffi_state(&path) {
+        Ok(s) => s,
         Err(e) => return result_to_json_ptr::<serde_json::Value>(Err(e)),
     };
-    let state = ApiState::new(path.clone());
-    {
-        let mut files = state.mapped_files.lock().unwrap();
-        *files = mapped_files;
-    }
 
     let graph = match state.rebuild_graph() {
         Ok(g) => g,

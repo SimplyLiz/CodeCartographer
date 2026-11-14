@@ -20,7 +20,9 @@ pub struct CoChangePair {
     pub file_b: String,
     /// Number of commits where both files changed together.
     pub count: usize,
-    /// count / min(churn_a, churn_b) — 1.0 means they always change together.
+    /// count / (min(churn_a, churn_b) + COUPLING_PRIOR): Tornhill's coupling
+    /// ratio, shrunk toward 0 for pairs with little support. See
+    /// [`coupling_score`].
     pub coupling_score: f64,
 }
 
@@ -194,8 +196,8 @@ pub fn git_churn(root: &Path, limit: usize) -> HashMap<String, usize> {
 ///
 /// Bot and formatting-only commits are excluded.
 ///
-/// Uses Adam Tornhill's coupling formula:
-///   coupling = co_changes / min(churn_a, churn_b)
+/// Score: [`coupling_score`] (Tornhill's ratio with a support prior); ties
+/// broken by the raw co-change count.
 pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
     let limit = effective_limit(limit);
     let output = Command::new("git")
@@ -282,12 +284,7 @@ pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
         .map(|((a, b), count)| {
             let ca = *churn.get(&a).unwrap_or(&1);
             let cb = *churn.get(&b).unwrap_or(&1);
-            let min_churn = ca.min(cb) as f64;
-            let coupling_score = if min_churn > 0.0 {
-                (count as f64 / min_churn).min(1.0)
-            } else {
-                0.0
-            };
+            let coupling_score = coupling_score(count, ca, cb);
             CoChangePair {
                 file_a: a,
                 file_b: b,
@@ -301,8 +298,29 @@ pub fn git_cochange(root: &Path, limit: usize) -> Vec<CoChangePair> {
         b.coupling_score
             .partial_cmp(&a.coupling_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.count.cmp(&a.count))
     });
     pairs
+}
+
+/// Pseudo-commits in which a pair is assumed *not* to have changed together.
+/// See [`coupling_score`].
+pub const COUPLING_PRIOR: f64 = 2.0;
+
+/// Coupling of two files that changed together in `count` commits, out of
+/// `churn_a` and `churn_b` commits each.
+///
+/// Tornhill's ratio `count / min(churn_a, churn_b)` says how often the less
+/// active file changes with the other, but it ignores support: a file changed
+/// twice, both times with X, scored 1.0 and outranked a partner that changed
+/// with X in 14 of 16 commits. The ratio is now shrunk by a prior of
+/// [`COUPLING_PRIOR`] commits without a co-change (the posterior mean under a
+/// Beta(0, 2) prior): 2 of 2 scores 0.5, 5 of 5 0.71, 14 of 16 0.78,
+/// 10 of 10 0.83. Well-supported pairs keep roughly their old value; the
+/// score still reads "how reliably does the smaller file follow the other".
+pub fn coupling_score(count: usize, churn_a: usize, churn_b: usize) -> f64 {
+    let min_churn = churn_a.min(churn_b).max(count) as f64;
+    count as f64 / (min_churn + COUPLING_PRIOR)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,14 +348,19 @@ pub struct CoChangeDispersion {
 ///
 /// Reuses the existing co-change pairs — no additional git call.
 pub fn git_cochange_dispersion(root: &Path, limit: usize) -> Vec<CoChangeDispersion> {
-    let pairs = git_cochange(root, limit);
+    dispersion_from_pairs(&git_cochange(root, limit))
+}
+
+/// Dispersion from already computed co-change pairs (lets the FFI reuse its
+/// cached pairs instead of running `git log` again).
+pub fn dispersion_from_pairs(pairs: &[CoChangePair]) -> Vec<CoChangeDispersion> {
     if pairs.is_empty() {
         return vec![];
     }
 
     // Build per-file partner maps: file → { partner → count }
     let mut partner_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for p in &pairs {
+    for p in pairs {
         *partner_counts
             .entry(p.file_a.clone())
             .or_default()
@@ -612,6 +635,61 @@ mod tests {
         ] {
             assert!(!is_noise_path(p), "expected kept: {p}");
         }
+    }
+
+    /// The case that broke CKB's co-change list: a file changed twice, both
+    /// times with X, scored 1.0 and outranked a partner with 14 co-changes.
+    #[test]
+    fn rare_file_does_not_outrank_strong_partner() {
+        let rare = coupling_score(2, 2, 60); // 2 of its 2 commits with X
+        let strong = coupling_score(14, 16, 60); // 14 of its 16 commits with X
+        assert!(strong > rare, "strong {strong} <= rare {rare}");
+        assert!((rare - 0.5).abs() < 1e-9);
+        // Well-supported, always-together pairs stay near the top of the scale.
+        assert!(coupling_score(10, 10, 40) > 0.8);
+        // Monotone in support at a fixed ratio.
+        assert!(coupling_score(3, 3, 9) < coupling_score(6, 6, 9));
+        assert!(coupling_score(0, 5, 5) == 0.0);
+    }
+
+    #[test]
+    fn git_cochange_ranks_by_supported_coupling() {
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("cc-cochange-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).status().unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Tester"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        let commit = |files: &[&str], i: usize| {
+            for f in files {
+                std::fs::write(root.join(f), format!("{i}\n")).unwrap();
+            }
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", &format!("c{i}")]);
+        };
+        // x.rs + strong.rs together 14 times, strong.rs alone twice,
+        // x.rs + rare.rs together twice (rare.rs never changes otherwise).
+        let mut i = 0;
+        for _ in 0..14 { i += 1; commit(&["x.rs", "strong.rs"], i); }
+        for _ in 0..2 { i += 1; commit(&["strong.rs"], i); }
+        for _ in 0..2 { i += 1; commit(&["x.rs", "rare.rs"], i); }
+
+        let pairs = git_cochange(&root, 0);
+        let pos = |b: &str| {
+            pairs.iter()
+                .position(|p| (p.file_a == "x.rs" && p.file_b == b) || (p.file_b == "x.rs" && p.file_a == b))
+                .unwrap_or_else(|| panic!("pair x.rs/{b} missing: {pairs:?}"))
+        };
+        assert!(pos("strong.rs") < pos("rare.rs"), "{pairs:?}");
+        let strong = &pairs[pos("strong.rs")];
+        assert_eq!(strong.count, 14);
+        assert!((strong.coupling_score - 14.0 / 18.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
